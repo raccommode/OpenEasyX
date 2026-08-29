@@ -194,6 +194,27 @@ describe("media catalog", () => {
     db.close();
   });
 
+  it("deletes a downloader media path and rejects paths outside the library root", async () => {
+    const { root, data, media, db } = fixture();
+    const relativePath = "Example Performer/example.com/recording.mp4";
+    const file = path.join(media, ...relativePath.split("/"));
+    const outside = path.join(root, "outside.mp4");
+    fs.writeFileSync(file, "recording");
+    fs.writeFileSync(outside, "keep me");
+    const catalog = new Catalog(db, media, data, false); await catalog.scan();
+    const item = db.listMedia().items[0];
+    const playback = path.join(data, "playback-cache", `${item.id}.mp4`);
+    fs.writeFileSync(playback, "cached");
+
+    expect(catalog.deleteStoredMedia(relativePath)).toEqual({ bytes: 9, missing: false });
+    expect(fs.existsSync(file)).toBe(false);
+    expect(fs.existsSync(playback)).toBe(false);
+    expect(db.listMedia().total).toBe(0);
+    expect(() => catalog.deleteStoredMedia("../outside.mp4")).toThrow("escapes the configured library root");
+    expect(fs.readFileSync(outside, "utf8")).toBe("keep me");
+    db.close();
+  });
+
   it("separates unseen, in-progress, unfinished, and completed videos", async () => {
     const { data, media, db } = fixture();
     const directory = path.join(media, "Example Performer", "example.com");

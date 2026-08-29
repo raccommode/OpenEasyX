@@ -59,11 +59,18 @@ describe("public live-cam discovery parsers", () => {
   it("reads an exact live Stripchat room from its browser-compatible profile state", () => {
     const state = {
       viewCam: { model: { username: "Alice", id: 42, status: "public", isLive: true, isOnline: true, viewersCount: 55 } },
-      configV3: { initialCommon: { hlsStreamHost: "doppiocdn.net", hlsStreamHosts: { A: "doppiocdn.com" } }, static: { featureSettings: { hlsFallback: { fallbackDomains: ["doppiocdn.media"] } } } },
+      configV3: { initialCommon: { hlsStreamHost: "doppiocdn.net", hlsStreamHosts: { A: "doppiocdn.com" } }, static: { featureSettings: {
+        hlsFallback: { fallbackDomains: ["doppiocdn.media"] },
+        MMPExternalUnitedSourceOrigin: "https://mmp.doppiocdn.com/player/mmp/",
+      } } },
+      featuresConfig: { features: { playerModuleExternalLoading: { mmpVersion: "v2.12.0" } } },
     };
     const html = `<html><script>window.__PRELOADED_STATE__ = ${JSON.stringify(state)};</script></html>`;
     expect(stripchatProfileLiveCams(html, "alice")).toEqual([expect.objectContaining({ id: "alice", username: "Alice", pageUrl: "https://stripchat.com/Alice" })]);
-    expect(stripchatStreamConfig(html)).toEqual({ modelId: "42", domains: ["doppiocdn.media", "doppiocdn.net", "doppiocdn.com"] });
+    expect(stripchatStreamConfig(html)).toEqual({
+      modelId: "42", domains: ["doppiocdn.media", "doppiocdn.net", "doppiocdn.com"],
+      playerScriptUrl: "https://mmp.doppiocdn.com/player/mmp/v2.12.0/main.js",
+    });
     expect(stripchatProfileLiveCams(html, "bob")).toEqual([]);
     expect(stripchatProfileLiveCams(`<script>window.__PRELOADED_STATE__ = ${JSON.stringify({ viewCam: { model: { username: "Alice", isLive: false, isOnline: false } } })}</script>`)).toEqual([]);
   });

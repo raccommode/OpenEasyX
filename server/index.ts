@@ -34,7 +34,10 @@ const catalog = new Catalog(libraryDb, mediaDir, dataDir);
 const pluginRepositories = new PluginRepositoryManager(dataDir, path.resolve("plugins"), externalPluginsDir);
 const plugins = new PluginManager(db, pluginRepositories.roots(), path.join(dataDir, "sessions"), writeLog);
 await plugins.load();
-const queue = new DownloadQueue(db, plugins, mediaDir, writeLog, () => catalog.scan());
+const queue = new DownloadQueue(
+  db, plugins, mediaDir, writeLog, () => catalog.scan(),
+  (item) => catalog.deleteStoredMedia(item.storagePath!),
+);
 const browserLogin = new BrowserLoginManager(dataDir);
 const liveCams = new LiveCamService(db, plugins);
 queue.start();

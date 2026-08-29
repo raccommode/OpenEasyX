@@ -15,7 +15,14 @@ export class DownloadQueue {
   private active = new Map<string, ActiveDownload>();
   private finalizers = new Map<string, Promise<void>>();
   private timer?: NodeJS.Timeout;
-  constructor(private db: Database, private plugins: PluginManager, private mediaRoot: string, private writeLog?: LogWriter, private onCompleted?: () => unknown | Promise<unknown>) {}
+  constructor(
+    private db: Database,
+    private plugins: PluginManager,
+    private mediaRoot: string,
+    private writeLog?: LogWriter,
+    private onCompleted?: () => unknown | Promise<unknown>,
+    private onDeleteCompleted?: (item: DownloadItem) => unknown,
+  ) {}
 
   start() {
     fs.mkdirSync(this.mediaRoot, { recursive: true });
@@ -54,8 +61,14 @@ export class DownloadQueue {
   delete(itemId: string) {
     const item = this.requiredItem(itemId);
     if (["downloading", "paused"].includes(item.status) && this.active.has(itemId)) return this.interrupt(itemId, "delete");
+    let mediaDeletion: unknown;
+    if (item.status === "completed") {
+      if (!item.storagePath) throw Object.assign(new Error("Completed item has no stored media path"), { statusCode: 409 });
+      if (!this.onDeleteCompleted) throw Object.assign(new Error("Completed media deletion is not configured"), { statusCode: 409 });
+      mediaDeletion = this.onDeleteCompleted(item);
+    }
     this.db.deleteItem(itemId);
-    return { deleted: true, id: itemId };
+    return { deleted: true, id: itemId, ...(mediaDeletion && typeof mediaDeletion === "object" ? mediaDeletion : {}) };
   }
 
   outputPath(itemId: string) {

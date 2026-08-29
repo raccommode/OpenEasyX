@@ -201,7 +201,7 @@ export function stripchatLiveCams(payload: unknown): LiveCam[] {
   }).filter((cam): cam is LiveCam => Boolean(cam)));
 }
 
-export type StripchatStreamConfig = { modelId: string; domains: string[] };
+export type StripchatStreamConfig = { modelId: string; domains: string[]; playerScriptUrl?: string };
 
 function stripchatPreloadedState(html: string): Record<string, unknown> | undefined {
   const marker = html.indexOf("window.__PRELOADED_STATE__");
@@ -218,6 +218,8 @@ export function stripchatStreamConfig(html: string): StripchatStreamConfig | und
   const configV3 = record(state?.configV3);
   const common = record(configV3?.initialCommon);
   const featureSettings = record(record(configV3?.static)?.featureSettings);
+  const features = record(record(state?.featuresConfig)?.features);
+  const playerModule = record(features?.playerModuleExternalLoading) ?? record(featureSettings?.playerModuleExternalLoading);
   const fallbackDomains = record(featureSettings?.hlsFallback)?.fallbackDomains;
   const streamHosts = record(common?.hlsStreamHosts);
   const domains = [
@@ -225,7 +227,12 @@ export function stripchatStreamConfig(html: string): StripchatStreamConfig | und
     model?.hlsStreamHost, common?.hlsStreamHost, common?.defaultHlsStreamHost,
     ...(streamHosts ? Object.values(streamHosts) : []),
   ].map(text).filter((value): value is string => Boolean(value));
-  return { modelId, domains: [...new Set(domains)] };
+  const playerOrigin = text(featureSettings?.MMPExternalUnitedSourceOrigin) ?? text(featureSettings?.MMPExternalSourceOrigin);
+  const playerVersion = text(playerModule?.mmpVersion);
+  const playerScriptUrl = playerOrigin && playerVersion
+    ? `${playerOrigin.replace(/\/+$/, "")}/${encodeURIComponent(playerVersion)}/main.js`
+    : undefined;
+  return { modelId, domains: [...new Set(domains)], ...(playerScriptUrl ? { playerScriptUrl } : {}) };
 }
 
 export function stripchatProfileLiveCams(html: string, requestedUsername?: string): LiveCam[] {

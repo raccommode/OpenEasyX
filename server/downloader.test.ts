@@ -7,6 +7,8 @@ import { once } from "node:events";
 import { Database } from "./database.js";
 import { PluginManager } from "./plugin-manager.js";
 import { DownloadQueue } from "./downloader.js";
+import { Catalog } from "./catalog.js";
+import { LibraryDatabase } from "./library-database.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -173,5 +175,24 @@ describe("DownloadQueue", () => {
     await waitFor(() => db.getItem(doomed.id)?.status === "downloading"); queue.delete(doomed.id);
     await waitFor(() => db.getItem(doomed.id) === undefined); queue.stop();
     expect(fs.existsSync(path.join(mediaDir, ".downloads", doomed.id))).toBe(false);
+  });
+
+  it("deletes both a completed item and its recorded media file", async () => {
+    const dataDir = temp("easyx-completed-delete-data"); const mediaDir = temp("easyx-completed-delete-media"); const pluginDir = temp("easyx-completed-delete-plugins");
+    const db = new Database(dataDir); const manager = new PluginManager(db, [pluginDir]); await manager.load();
+    const person = db.upsertPerformer({ externalId: "person", name: "Recorded Performer" }, "test.completed-delete");
+    const source = db.addSource(person.id, "test.completed-delete", { externalId: "source", label: "Live", profileUrl: "https://example.test/live", domain: "example.test" });
+    db.ingestItems(source, [{ externalId: "recording", mediaType: "video", filename: "recording.mp4" }]);
+    const item = db.listItems()[0]; const relativePath = "Recorded Performer/example.test/recording.mp4";
+    db.setItemStatus(item.id, "completed", { progress: 1, storagePath: relativePath });
+    const file = path.join(mediaDir, ...relativePath.split("/")); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, "recording");
+    const libraryDb = new LibraryDatabase(dataDir); const catalog = new Catalog(libraryDb, mediaDir, dataDir, false); await catalog.scan();
+    const queue = new DownloadQueue(db, manager, mediaDir, undefined, undefined, (completed) => catalog.deleteStoredMedia(completed.storagePath!));
+
+    expect(queue.delete(item.id)).toMatchObject({ deleted: true, id: item.id, bytes: 9, missing: false });
+    expect(db.getItem(item.id)).toBeUndefined();
+    expect(fs.existsSync(file)).toBe(false);
+    expect(libraryDb.listMedia().total).toBe(0);
+    libraryDb.close();
   });
 });

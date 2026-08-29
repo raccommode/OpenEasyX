@@ -4,6 +4,12 @@ export type DownloadTiming = {
   downloadFinishedAt?: string;
 };
 
+export const COMPLETED_DELETE_CONFIRMATION = "Permanently delete this completed recording and its media file?";
+
+export function confirmItemDeletion(status: string, confirm: (message: string) => boolean): boolean {
+  return status !== "completed" || confirm(COMPLETED_DELETE_CONFIRMATION);
+}
+
 export function activitySourceDomains(sources: Array<{ domain: string }>): string[] {
   return [...new Set(sources.map((source) => source.domain.trim().toLowerCase()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));

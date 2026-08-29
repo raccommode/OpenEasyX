@@ -156,6 +156,43 @@ export class Catalog {
     return candidate;
   }
 
+  private removeGeneratedArtifacts(mediaId: string, kind: MediaKind) {
+    const cached = [
+      path.join(this.dataDir, "thumbnails", kind === "video" ? `${mediaId}-middle-v1.jpg` : `${mediaId}-image-v1.jpg`),
+      path.join(this.dataDir, "video-previews", `${mediaId}.gif`),
+      path.join(this.dataDir, "playback-cache", `${mediaId}.mp4`),
+    ];
+    for (const file of cached) fs.rmSync(file, { force: true });
+    fs.rmSync(path.join(this.dataDir, "subtitles", mediaId), { recursive: true, force: true });
+  }
+
+  deleteStoredMedia(relativePath: string) {
+    const normalized = relativePath.replaceAll("\\", "/").replace(/^\.\//, "");
+    const root = path.resolve(this.mediaRoot);
+    const source = path.resolve(root, ...normalized.split("/"));
+    if (!normalized || source === root || !source.startsWith(`${root}${path.sep}`)) {
+      throw Object.assign(new Error("Media path escapes the configured library root"), { statusCode: 409 });
+    }
+    const extension = path.extname(normalized).toLowerCase();
+    const kind: MediaKind | undefined = VIDEO_EXTENSIONS.has(extension) ? "video" : IMAGE_EXTENSIONS.has(extension) ? "image" : undefined;
+    if (!kind) throw Object.assign(new Error("Stored item is not a supported media file"), { statusCode: 409 });
+    const mediaId = crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 24);
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(source); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      this.db.markMediaMissing(mediaId);
+      this.removeGeneratedArtifacts(mediaId, kind);
+      return { bytes: 0, missing: true };
+    }
+    if (!stat.isFile()) throw Object.assign(new Error("Media path is not a regular file"), { statusCode: 409 });
+    try { fs.unlinkSync(source); }
+    catch { throw Object.assign(new Error("Media file could not be deleted. Check that the media mount is writable"), { statusCode: 409 }); }
+    this.db.markMediaMissing(mediaId);
+    this.removeGeneratedArtifacts(mediaId, kind);
+    return { bytes: stat.size, missing: false };
+  }
+
   deleteMedia(media: Media) {
     const source = this.absolutePath(media);
     let stat: fs.Stats;
@@ -165,13 +202,7 @@ export class Catalog {
     try { fs.unlinkSync(source); }
     catch { throw Object.assign(new Error("Media file could not be deleted. Check that the media mount is writable"), { statusCode: 409 }); }
     this.db.markMediaMissing(media.id);
-    const cached = [
-      path.join(this.dataDir, "thumbnails", media.kind === "video" ? `${media.id}-middle-v1.jpg` : `${media.id}-image-v1.jpg`),
-      path.join(this.dataDir, "video-previews", `${media.id}.gif`),
-      path.join(this.dataDir, "playback-cache", `${media.id}.mp4`),
-    ];
-    for (const file of cached) fs.rmSync(file, { force: true });
-    fs.rmSync(path.join(this.dataDir, "subtitles", media.id), { recursive: true, force: true });
+    this.removeGeneratedArtifacts(media.id, media.kind);
     return { bytes: stat.size };
   }
 
