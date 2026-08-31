@@ -43,13 +43,50 @@ describe("Open EasyX live cams", () => {
       return { cams, total: cams.length, page: query.page, pageSize: query.pageSize, pages: 1 };
     };
     const alice = (await service.list({ page: 1, pageSize: 24 })).items[0];
-    expect(service.setFavorite("test.live", alice, true)).toMatchObject({ favorite: true, item: { username: "alice" } });
+    await expect(service.setFavorite("test.live", alice, true)).resolves.toMatchObject({ favorite: true, item: { username: "alice" } });
     expect(database.listLiveCamFavorites()).toHaveLength(1);
     await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({
       total: 1, items: [{ username: "alice", favorite: true }],
     });
     expect(service.listFavorites()).toEqual([expect.objectContaining({ username: "alice" })]);
-    expect(service.setFavorite("test.live", alice, false)).toEqual({ favorite: false });
+    await expect(service.setFavorite("test.live", alice, false)).resolves.toEqual({ favorite: false });
+  });
+
+  it("reconciles an authoritative account snapshot without touching other providers", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    database.setLiveCamFavorite("test.live", { camId: "old", username: "old", pageUrl: "https://live.test/old" }, true);
+    database.setLiveCamFavorite("other.live", { camId: "keep", username: "keep", pageUrl: "https://other.test/keep" }, true);
+    plugins.get("test.live").listFollowedLiveCams = async () => ({
+      authoritative: true,
+      cams: [
+        { id: "alice", username: "alice", pageUrl: "https://live.test/alice" },
+        { id: "bob", username: "bob", pageUrl: "https://live.test/bob" },
+      ],
+    });
+
+    await expect(service.syncFavorites("test.live")).resolves.toEqual({
+      providerId: "test.live", synced: 2, added: 2, removed: 1, authoritative: true,
+    });
+    expect(database.listLiveCamFavorites("test.live").map((item) => item.username)).toEqual(["alice", "bob"]);
+    expect(database.listLiveCamFavorites("other.live").map((item) => item.username)).toEqual(["keep"]);
+  });
+
+  it("keeps existing favorites when an account snapshot is not authoritative", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    database.setLiveCamFavorite("test.live", { camId: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true);
+    plugins.get("test.live").listFollowedLiveCams = async () => ({ cams: [], authoritative: false, skippedReason: "Session expired" });
+    await expect(service.syncFavorites("test.live")).resolves.toMatchObject({ authoritative: false, skippedReason: "Session expired" });
+    expect(database.listLiveCamFavorites("test.live").map((item) => item.username)).toEqual(["alice"]);
+  });
+
+  it("updates the provider account before changing the local favorite", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    let remoteFavorite: boolean | undefined;
+    plugins.get("test.live").setLiveCamFavorite = async (_context, _cam, favorite) => { remoteFavorite = favorite; return { synchronized: true }; };
+    await expect(service.setFavorite("test.live", { id: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true))
+      .resolves.toMatchObject({ favorite: true, synchronized: true });
+    expect(remoteFavorite).toBe(true);
+    expect(database.isLiveCamFavorite("test.live", "alice")).toBe(true);
   });
 
   it("resolves provider streams behind a short-lived Downloader proxy URL", async () => {

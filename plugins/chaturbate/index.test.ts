@@ -1,6 +1,20 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PluginContext } from "../../packages/plugin-sdk/index.js";
 import chaturbate, { chaturbateLiveCam, chaturbateLiveCamPage, chaturbateLiveCandidate, normalizedChaturbateUrl } from "./index.js";
 import { ytDlpDownload } from "../yt-dlp-utils.js";
+
+const temporaryDirectories: string[] = [];
+afterEach(() => { for (const directory of temporaryDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true }); });
+
+function accountContext(fetchImpl: typeof fetch): PluginContext {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-chaturbate-")); temporaryDirectories.push(directory);
+  const cookiesFile = path.join(directory, "cookies.txt");
+  fs.writeFileSync(cookiesFile, "# Netscape HTTP Cookie File\n.chaturbate.com\tTRUE\t/\tTRUE\t0\tsessionid\taccount-session\n.chaturbate.com\tTRUE\t/\tTRUE\t0\tcsrftoken\tcsrf-token\n");
+  return { config: { cookiesFile }, fetch: fetchImpl, runCommand: vi.fn(), log: vi.fn() };
+}
 
 describe("Chaturbate plugin", () => {
   it("creates one stable candidate for an active live session", () => {
@@ -41,5 +55,45 @@ describe("Chaturbate plugin", () => {
     }), { status: 200 });
     const page = await chaturbate.listLiveCams!({ fetch } as never, { page: 1, pageSize: 24, search: "alice" });
     expect(page).toMatchObject({ total: 1, cams: [{ username: "alice" }] });
+  });
+
+  it("loads both online and offline followed creators from a connected account", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = String(input);
+      const offline = url.includes("offline=true");
+      return new Response(JSON.stringify({
+        rooms: [{ username: offline ? "offline_model" : "online_model", current_show: offline ? "offline" : "public", is_following: true }],
+        total_count: 1,
+      }), { status: 200 });
+    });
+    const result = await chaturbate.listFollowedLiveCams!(accountContext(fetchMock as typeof fetch));
+    expect(result).toMatchObject({ authoritative: true, cams: [{ username: "online_model" }, { username: "offline_model", viewers: 0 }] });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ cookie: expect.stringContaining("sessionid=account-session") });
+  });
+
+  it("refuses to replace favorites when Chaturbate ignores the followed-only filter", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ rooms: [{ username: "public_model", is_following: false }], total_count: 1 }), { status: 200 }));
+    await expect(chaturbate.listFollowedLiveCams!(accountContext(fetchMock as typeof fetch))).resolves.toMatchObject({
+      authoritative: false, cams: [], skippedReason: "Chaturbate ignored the followed-only filter",
+    });
+  });
+
+  it("mirrors favorite changes to Chaturbate and verifies the remote result", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("chatvideocontext")) return new Response(JSON.stringify({ following: true }), { status: 200 });
+      return new Response("", { status: 200 });
+    });
+    const result = await chaturbate.setLiveCamFavorite!(accountContext(fetchMock as typeof fetch), {
+      id: "alice", username: "alice", pageUrl: "https://chaturbate.com/alice/",
+    }, true);
+    expect(result).toEqual({ synchronized: true });
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      "https://chaturbate.com/alice/",
+      "https://chaturbate.com/follow/follow/alice/",
+      "https://chaturbate.com/api/chatvideocontext/alice/",
+    ]);
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "POST", headers: expect.objectContaining({ "x-csrftoken": "csrf-token" }) });
   });
 });

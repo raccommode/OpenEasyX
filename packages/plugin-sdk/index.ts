@@ -157,6 +157,16 @@ export type LiveCamPage = {
   pages: number;
 };
 
+export type LiveCamFavoriteSnapshot = {
+  cams: LiveCam[];
+  authoritative: boolean;
+  skippedReason?: string;
+};
+
+export type LiveCamFavoriteUpdate = {
+  synchronized: boolean;
+};
+
 export type LiveStream = {
   url: string;
   audioUrl?: string;
@@ -172,6 +182,8 @@ export interface EasyXPlugin {
   listMedia?(context: PluginContext, source: MediaSource): Promise<MediaCandidate[]>;
   resolveDownload?(context: PluginContext, item: MediaCandidate): Promise<DownloadRequest>;
   listLiveCams?(context: PluginContext, query: LiveCamQuery): Promise<LiveCamPage>;
+  listFollowedLiveCams?(context: PluginContext): Promise<LiveCamFavoriteSnapshot>;
+  setLiveCamFavorite?(context: PluginContext, cam: LiveCam, favorite: boolean): Promise<LiveCamFavoriteUpdate>;
   resolveLiveStream?(context: PluginContext, cam: LiveCam): Promise<LiveStream>;
   afterDownload?(context: PluginContext, download: CompletedDownload): Promise<void>;
   acceptLibraryDeletion?(context: PluginContext, deletion: LibraryDeletion): Promise<LibraryDeletion>;

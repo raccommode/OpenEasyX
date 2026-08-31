@@ -46,6 +46,17 @@ queue.start();
 const app = Fastify({ loggerInstance: appLogger, bodyLimit: 8 * 1024 * 1024 });
 const discoveryStatus = { running: false, completed: 0, total: 0, progress: 0, query: "", error: "" };
 
+function refreshLiveCamFavorites(providerId?: string) {
+  if (providerId && !plugins.get(providerId, false).listFollowedLiveCams) return;
+  const sync = providerId ? liveCams.syncFavorites(providerId).then((result) => [result]) : liveCams.syncAllFavorites();
+  void sync.then((results) => {
+    for (const result of results) {
+      if (result.authoritative) app.log.info({ scope: "live-cams", ...result }, "Provider favorites synchronized");
+      else if (result.skippedReason && !result.skippedReason.startsWith("Connect a Chaturbate account")) app.log.warn({ scope: "live-cams", ...result }, "Provider favorite synchronization skipped");
+    }
+  }).catch((error) => app.log.warn({ scope: "live-cams", error, providerId }, "Provider favorite synchronization failed"));
+}
+
 app.setErrorHandler((error, request, reply) => {
   const status = typeof (error as { statusCode?: unknown }).statusCode === "number" ? Number((error as { statusCode: number }).statusCode) : 500;
   const message = error instanceof Error ? error.message : String(error);
@@ -96,6 +107,7 @@ app.delete<{ Params: { id: string } }>("/api/plugin-repositories/:id", async (re
 });
 app.post<{ Params: { id: string }; Body: Record<string, unknown> | undefined }>("/api/plugins/:id/install", async (request) => {
   plugins.install(request.params.id, request.body ?? {});
+  refreshLiveCamFavorites(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
 app.delete<{ Params: { id: string } }>("/api/plugins/:id", async (request) => {
@@ -111,6 +123,7 @@ app.post<{ Params: { id: string }; Body: { enabled?: boolean } }>("/api/plugins/
 });
 app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/plugins/:id/config", async (request) => {
   plugins.configure(request.params.id, request.body ?? {});
+  refreshLiveCamFavorites(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
 app.post<{ Params: { id: string } }>("/api/plugins/:id/test", async (request) => {
@@ -150,6 +163,7 @@ app.post<{ Params: { id: string }; Body: Record<string, unknown> | undefined }>(
   const installed = db.getPluginState(request.params.id).installed;
   if (installed) plugins.configure(request.params.id, incoming); else plugins.install(request.params.id, incoming);
   await browserLogin.removeProfile(request.params.id);
+  refreshLiveCamFavorites(request.params.id);
   return { plugin: plugins.list().find((entry) => entry.manifest.id === request.params.id), test };
 });
 app.post<{ Params: { id: string }; Body: { text?: unknown } }>("/api/plugins/:id/browser-login/paste", async (request) => {
@@ -216,6 +230,10 @@ app.get("/api/live-cams/favorites", async () => ({ items: liveCams.listFavorites
 app.put<{ Body: unknown }>("/api/live-cams/favorites", async (request) => {
   const body = liveCamBodySchema.extend({ favorite: z.boolean() }).parse(request.body);
   return liveCams.setFavorite(body.providerId, body.cam, body.favorite);
+});
+app.post<{ Params: { providerId: string } }>("/api/live-cams/favorites/sync/:providerId", async (request) => {
+  const providerId = z.string().trim().min(1).max(200).parse(request.params.providerId);
+  return liveCams.syncFavorites(providerId);
 });
 app.get<{ Params: { providerId: string; camId: string } }>("/api/live-cams/:providerId/:camId", async (request) => {
   const params = z.object({
@@ -569,5 +587,7 @@ const shutdown = async () => {
 process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);
 await app.listen({ port, host: "0.0.0.0" });
 startEmbeddedSubtitleWorker();
+setTimeout(() => refreshLiveCamFavorites(), 500).unref();
+setInterval(() => refreshLiveCamFavorites(), 5 * 60_000).unref();
 setTimeout(() => void catalog.scan().catch((error) => app.log.error(error, "Initial library scan failed")), 250).unref();
 setInterval(() => void catalog.scan().catch((error) => app.log.error(error, "Scheduled library scan failed")), scanIntervalMinutes * 60_000).unref();

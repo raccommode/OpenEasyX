@@ -15,7 +15,7 @@ import "./library.css";
 
 type Media = {
   id: string; relativePath: string; kind: "video" | "image"; title: string; performer: string; source: string;
-  extension: string; mimeType: string; size: number; modifiedAt: string; duration: number; width: number; height: number;
+  extension: string; mimeType: string; size: number; modifiedAt: string; addedAt?: string; duration: number; width: number; height: number;
   favorite: boolean; progressSeconds: number; completed: boolean; viewCount: number; lastViewedAt?: string; thumbnailUrl: string; previewUrl: string; streamUrl: string;
 };
 type Stats = {
@@ -93,6 +93,17 @@ function formatBytes(bytes = 0) {
 function formatDuration(seconds = 0) {
   if (!seconds) return ""; const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60);
   return hours ? `${hours}:${String(minutes).padStart(2, "0")}` : `${minutes} min`;
+}
+export function mediaQualityLabel(media: Pick<Media, "kind" | "width" | "height" | "extension">): string {
+  if (media.width > 0 && media.height > 0) {
+    return media.kind === "video" ? `${Math.min(media.width, media.height)}p` : `${media.width}×${media.height}`;
+  }
+  return media.extension.replace(/^\./, "").toUpperCase() || (media.kind === "video" ? "Video" : "Photo");
+}
+export function mediaDateLabel(value?: string): string {
+  if (!value) return "Unknown date";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Unknown date" : new Intl.DateTimeFormat("en-US", { day: "numeric", month: "short", year: "numeric" }).format(date);
 }
 function formatLongDuration(seconds = 0) {
   const whole = Math.max(0, Math.floor(seconds)); const hours = Math.floor(whole / 3600); const minutes = Math.floor((whole % 3600) / 60);
@@ -403,7 +414,7 @@ function MediaCard({ media, open, favorite, selectionMode = false, selected = fa
   return <article className={`media-card ${selected ? "selected" : ""}`}>{selectionMode && <button className="selection-control" aria-label={selected ? `Deselect ${media.title}` : `Select ${media.title}`} aria-pressed={selected} onClick={() => toggleSelected?.(media.id)}>{selected ? <CheckSquare/> : <Square/>}</button>}<a className="poster" href={href} aria-label={selectionMode ? `${selected ? "Deselect" : "Select"} ${media.title}` : `Open ${media.kind}: ${media.title}`} onClick={(event) => internalLink(event, activate)} onMouseMove={startPreview} onMouseLeave={stopPreview} onFocus={startPreview} onBlur={stopPreview} onWheel={stopPreview}>
     <span className="media-art"><LazyImage className="poster-still" src={media.thumbnailUrl} alt="" onError={() => setUnavailable(true)}/>{preview && <img className={`poster-preview ${previewReady ? "ready" : ""}`} src={media.previewUrl} decoding="async" alt="" onLoad={() => setPreviewReady(true)} onError={stopPreview}/>}</span>
     <span className="play">{media.kind === "video" ? <Play/> : <Search/>}</span><span className="type">{media.kind === "video" ? <Film/> : <ImageIcon/>}</span>{media.duration > 0 && <time>{formatDuration(media.duration)}</time>}{progress > 0 && <span className={`watch-label ${viewed ? "complete" : ""}`}>{viewed ? "Completed" : `${Math.round(progress)}%`}</span>}{progress > 0 && <i className={viewed ? "completed" : ""} style={{ width: `${progress}%` }}></i>}</a>
-    <div className="media-copy"><a className="media-title" href={href} onClick={(event) => internalLink(event, activate)}>{media.title}</a><p>{media.performer || "Unsorted"}{media.source ? ` - ${sourceDomain(media.source)}` : ""}{media.viewCount ? ` · ${media.viewCount} ${media.viewCount === 1 ? "view" : "views"}` : ""}</p></div>{!selectionMode && <button className="heart-button" aria-label={media.favorite ? "Remove from favorites" : "Add to favorites"} onClick={() => void favorite(media, !media.favorite)}><Heart className={media.favorite ? "filled" : ""}/></button>}</article>;
+    <div className="media-copy"><a className="media-title" href={href} onClick={(event) => internalLink(event, activate)}>{media.title}</a><p>{media.performer || "Unsorted"}{media.source ? ` - ${sourceDomain(media.source)}` : ""}{media.viewCount ? ` · ${media.viewCount} ${media.viewCount === 1 ? "view" : "views"}` : ""}</p><div className="media-facts"><span>{mediaQualityLabel(media)}</span><i/><time dateTime={media.addedAt || media.modifiedAt}>{mediaDateLabel(media.addedAt || media.modifiedAt)}</time></div></div>{!selectionMode && <button className="heart-button" aria-label={media.favorite ? "Remove from favorites" : "Add to favorites"} onClick={() => void favorite(media, !media.favorite)}><Heart className={media.favorite ? "filled" : ""}/></button>}</article>;
 }
 
 function EmptyLibrary({ scan }: { scan: Scan }) {

@@ -10,6 +10,9 @@ export type LiveCamResult = {
   items: PublicLiveCam[]; total: number; page: number; pageSize: number; pages: number;
   providers: LiveCamProviderStatus[]; complete?: boolean;
 };
+export type LiveCamFavoriteSyncResult = {
+  providerId: string; synced: number; added: number; removed: number; authoritative: boolean; skippedReason?: string;
+};
 
 type ProxyEntry = { url?: string; body?: string; headers: Record<string, string>; expiresAt: number };
 type ProviderResult = { items: PublicLiveCam[]; total: number; status: LiveCamProviderStatus };
@@ -26,6 +29,7 @@ export class LiveCamService {
   private proxyEntries = new Map<string, ProxyEntry>();
   private proxyReverse = new Map<string, string>();
   private recentCams = new Map<string, { cam: PublicLiveCam; expiresAt: number }>();
+  private favoriteSyncs = new Map<string, Promise<LiveCamFavoriteSyncResult>>();
 
   constructor(private readonly db: Database, private readonly plugins: PluginManager, private readonly request: typeof fetch = fetch) {}
 
@@ -165,16 +169,75 @@ export class LiveCamService {
     return this.db.listLiveCamFavorites();
   }
 
-  setFavorite(providerId: string, cam: LiveCam, favorite: boolean): { favorite: boolean; item?: LiveCamFavorite } {
+  async setFavorite(providerId: string, cam: LiveCam, favorite: boolean): Promise<{ favorite: boolean; item?: LiveCamFavorite; synchronized?: boolean }> {
     const entry = this.livePlugins(providerId)[0];
     if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
     if (!pluginMatchesSource(entry.manifest, cam.pageUrl)) throw Object.assign(new Error(`${entry.manifest.name} does not support this live URL`), { statusCode: 400 });
+    const plugin = this.plugins.get(providerId);
+    const remote = plugin.setLiveCamFavorite
+      ? await plugin.setLiveCamFavorite(this.plugins.context(providerId), cam, favorite)
+      : undefined;
     const item = this.db.setLiveCamFavorite(providerId, {
       camId: cam.id, username: cam.username, title: cam.title, pageUrl: cam.pageUrl, thumbnailUrl: cam.thumbnailUrl,
     }, favorite);
     const key = `${providerId}:${cam.id.toLowerCase()}`; const cached = this.recentCams.get(key);
     if (cached) cached.cam.favorite = favorite;
-    return { favorite, ...(item ? { item } : {}) };
+    return { favorite, ...(item ? { item } : {}), ...(remote ? { synchronized: remote.synchronized } : {}) };
+  }
+
+  async syncFavorites(providerId: string): Promise<LiveCamFavoriteSyncResult> {
+    const current = this.favoriteSyncs.get(providerId);
+    if (current) return current;
+    const operation = this.performFavoriteSync(providerId).finally(() => this.favoriteSyncs.delete(providerId));
+    this.favoriteSyncs.set(providerId, operation);
+    return operation;
+  }
+
+  async syncAllFavorites(): Promise<LiveCamFavoriteSyncResult[]> {
+    const providerIds = this.livePlugins().filter((entry) => Boolean(this.plugins.get(entry.manifest.id).listFollowedLiveCams)).map((entry) => entry.manifest.id);
+    return Promise.all(providerIds.map((providerId) => this.syncFavorites(providerId)));
+  }
+
+  private async performFavoriteSync(providerId: string): Promise<LiveCamFavoriteSyncResult> {
+    const entry = this.livePlugins(providerId)[0];
+    if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
+    const plugin = this.plugins.get(providerId);
+    if (!plugin.listFollowedLiveCams) return { providerId, synced: 0, added: 0, removed: 0, authoritative: false, skippedReason: `${entry.manifest.name} does not support account favorite synchronization` };
+    const snapshot = await plugin.listFollowedLiveCams(this.plugins.context(providerId));
+    if (!snapshot.authoritative) return {
+      providerId, synced: 0, added: 0, removed: 0, authoritative: false,
+      skippedReason: snapshot.skippedReason ?? "The provider did not return a complete followed list",
+    };
+
+    const unique = new Map<string, LiveCam>();
+    for (const cam of snapshot.cams) {
+      if (!cam.username.trim() || !cam.id.trim() || !pluginMatchesSource(entry.manifest, cam.pageUrl)) {
+        throw new Error(`${entry.manifest.name} returned an invalid followed creator`);
+      }
+      const key = cam.username.trim().toLowerCase();
+      if (unique.has(key)) throw new Error(`${entry.manifest.name} returned duplicate followed creators`);
+      unique.set(key, cam);
+    }
+
+    const previous = this.db.listLiveCamFavorites(providerId);
+    const previousKeys = new Set(previous.map((favorite) => favorite.username.toLowerCase()));
+    for (const [key, cam] of unique) {
+      this.db.setLiveCamFavorite(providerId, {
+        camId: cam.id, username: cam.username, title: cam.title, pageUrl: cam.pageUrl, thumbnailUrl: cam.thumbnailUrl,
+      }, true);
+      previousKeys.delete(key);
+    }
+    for (const favorite of previous) {
+      if (previousKeys.has(favorite.username.toLowerCase())) this.db.setLiveCamFavorite(providerId, favorite, false);
+    }
+    for (const cached of this.recentCams.values()) {
+      if (cached.cam.providerId === providerId) cached.cam.favorite = unique.has(cached.cam.username.toLowerCase());
+    }
+    return {
+      providerId, synced: unique.size,
+      added: [...unique.keys()].filter((key) => !previous.some((favorite) => favorite.username.toLowerCase() === key)).length,
+      removed: previousKeys.size, authoritative: true,
+    };
   }
 
   record(providerId: string, cam: LiveCam): { itemId: string; status: string } {
