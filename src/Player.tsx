@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Captions, Check, Clock3, Grid3X3, Heart, LoaderCircle, Maximize, Minimize, Pause, Play, Upload, Volume2, VolumeX } from "lucide-react";
 import { api } from "./api";
 import { initialAutoplay, nextMediaId, PHOTO_AUTOPLAY_SECONDS } from "./playback";
+import { loadPlayerAudio, savePlayerAudio } from "./player-audio";
 import { monitorVideoStalls } from "./video-stall-recovery";
 import "./player.css";
 import "./photo-player.css";
@@ -26,12 +27,6 @@ function bytes(value = 0) {
   const units = ["B", "KB", "MB", "GB", "TB"]; const index = value ? Math.min(4, Math.floor(Math.log(value) / Math.log(1024))) : 0;
   return `${(value / 1024 ** index).toFixed(index > 2 ? 1 : 0)} ${units[index]}`;
 }
-function savedAudio() {
-  try {
-    const value = JSON.parse(localStorage.getItem("open-easyx.player-audio") || "{}");
-    return { volume: typeof value.volume === "number" ? value.volume : 1, muted: value.muted === true };
-  } catch { return { volume: 1, muted: false }; }
-}
 function safePlay(element: HTMLVideoElement) {
   void element.play().catch(() => {});
 }
@@ -41,7 +36,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   favorite: (media: Media, value: boolean) => void; advance: (media: Media) => void; setNotice: (value: string) => void;
 }) {
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const lastSaved = useRef(0); const hideTimer = useRef<number | undefined>(undefined);
-  const initialAudio = useRef(savedAudio());
+  const initialAudio = useRef(loadPlayerAudio());
   const [playing, setPlaying] = useState(false); const [waiting, setWaiting] = useState(false); const [controls, setControls] = useState(true);
   const [currentTime, setCurrentTime] = useState(media.progressSeconds || 0); const [duration, setDuration] = useState(media.duration || 0); const [buffered, setBuffered] = useState(0);
   const [volume, setVolume] = useState(initialAudio.current.volume); const [muted, setMuted] = useState(initialAudio.current.muted); const [fullscreen, setFullscreen] = useState(false);
@@ -64,7 +59,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   };
   const togglePlayback = () => { const element = video.current; if (!element) return; if (element.paused) safePlay(element); else element.pause(); };
   const seek = (value: number) => { const element = video.current; if (!element) return; element.currentTime = Math.max(0, Math.min(element.duration || 0, value)); setCurrentTime(element.currentTime); reveal(); };
-  const toggleMute = () => { const element = video.current; if (!element) return; element.muted = !element.muted; setMuted(element.muted); localStorage.setItem("open-easyx.player-audio", JSON.stringify({ volume: element.volume, muted: element.muted })); };
+  const toggleMute = () => { const element = video.current; if (!element) return; element.muted = !element.muted; setMuted(element.muted); savePlayerAudio({ volume: element.volume, muted: element.muted }); };
   const toggleFullscreen = async () => { if (document.fullscreenElement) await document.exitFullscreen(); else await player.current?.requestFullscreen(); };
   const selectTrack = (id: string) => { setSubtitleTrack(id); localStorage.setItem("open-easyx.subtitle-track", id); setCaptionMenu(false); };
   const toggleAutoplay = () => { const value = !autoplay; setAutoplay(value); localStorage.setItem("open-easyx.autoplay", String(value)); };
@@ -86,7 +81,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     if (media.kind === "video" && video.current) {
       video.current.src = media.streamUrl; video.current.load();
     }
-    initialAudio.current = savedAudio(); setVolume(initialAudio.current.volume); setMuted(initialAudio.current.muted);
+    initialAudio.current = loadPlayerAudio(); setVolume(initialAudio.current.volume); setMuted(initialAudio.current.muted);
     setPlaying(false); setWaiting(false); setControls(true); setCurrentTime(media.progressSeconds || 0); setDuration(media.duration || 0); setBuffered(0);
     setPhotoRemaining(PHOTO_AUTOPLAY_SECONDS); setPhotoReady(false); setCaptionMenu(false);
     setSubtitles({ status: "disabled", progress: 0, sourceLanguage: "", error: "", tracks: [] });
@@ -157,7 +152,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
         onLoadedMetadata={(event) => { const element = event.currentTarget; setDuration(element.duration || media.duration || 0); element.volume = initialAudio.current.volume; element.muted = initialAudio.current.muted; element.currentTime = 0; if (!media.completed && media.progressSeconds > 0 && media.progressSeconds < element.duration - 5) element.currentTime = media.progressSeconds; if (autoStart && element.paused) safePlay(element); }}
         onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); void save(); }} onProgress={(event) => { const element = event.currentTarget; if (element.buffered.length) setBuffered(element.buffered.end(element.buffered.length - 1)); }}
         onPlay={() => { setPlaying(true); setWaiting(false); reveal(); }} onPlaying={() => { setPlaying(true); setWaiting(false); }} onPause={() => { setPlaying(false); setWaiting(false); void save(false, true); }} onWaiting={() => setWaiting(true)} onCanPlay={() => setWaiting(false)}
-        onVolumeChange={(event) => { setVolume(event.currentTarget.volume); setMuted(event.currentTarget.muted); initialAudio.current = { volume: event.currentTarget.volume, muted: event.currentTarget.muted }; localStorage.setItem("open-easyx.player-audio", JSON.stringify(initialAudio.current)); }} onEnded={() => void next()}>
+        onVolumeChange={(event) => { setVolume(event.currentTarget.volume); setMuted(event.currentTarget.muted); initialAudio.current = { volume: event.currentTarget.volume, muted: event.currentTarget.muted }; savePlayerAudio(initialAudio.current); }} onEnded={() => void next()}>
         {subtitles.tracks.map((track) => <track key={`${track.id}-${track.url}`} kind="subtitles" src={track.url} srcLang={track.language} label={track.label}/>)}
       </video></div>
       {waiting && <div className="player-buffering"><LoaderCircle className="spin"/></div>}{!playing && !waiting && <button className="player-center-play" onClick={togglePlayback} aria-label="Play"><Play fill="currentColor"/></button>}

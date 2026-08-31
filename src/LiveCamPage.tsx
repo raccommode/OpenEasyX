@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import type HlsInstance from "hls.js";
 import { AlertTriangle, ArrowLeft, Download, Eye, LoaderCircle, Maximize, Minimize, Pause, Play, Radio, RefreshCw, Search, Server, Star, Users, Volume2, VolumeX } from "lucide-react";
 import { api } from "./api";
+import { loadPlayerAudio, savePlayerAudio } from "./player-audio";
 import { monitorVideoStalls } from "./video-stall-recovery";
 import "./player.css";
 import "./watch-page.css";
@@ -47,9 +48,10 @@ export function shouldRecoverNativeLiveMediaError(code: number | undefined, hidd
 
 export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) {
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const hideTimer = useRef<number | undefined>(undefined);
+  const initialAudio = useRef(loadPlayerAudio(localStorage, { volume: 1, muted: true }));
   const [streamUrl, setStreamUrl] = useState(""); const [error, setError] = useState(""); const [retry, setRetry] = useState(0);
   const [playing, setPlaying] = useState(false); const [waiting, setWaiting] = useState(true); const [controls, setControls] = useState(true);
-  const [volume, setVolume] = useState(1); const [muted, setMuted] = useState(true); const [fullscreen, setFullscreen] = useState(false);
+  const [volume, setVolume] = useState(initialAudio.current.volume); const [muted, setMuted] = useState(initialAudio.current.muted); const [fullscreen, setFullscreen] = useState(false);
   const reveal = () => {
     setControls(true); window.clearTimeout(hideTimer.current);
     if (!video.current?.paused) hideTimer.current = window.setTimeout(() => setControls(false), 2400);
@@ -60,9 +62,13 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
   };
   const toggleMute = () => {
     const element = video.current; if (!element) return;
-    element.muted = !element.muted; setMuted(element.muted);
+    element.muted = !element.muted; setMuted(element.muted); savePlayerAudio({ volume: element.volume, muted: element.muted });
   };
   const toggleFullscreen = async () => { if (document.fullscreenElement) await document.exitFullscreen(); else await player.current?.requestFullscreen(); };
+  useEffect(() => {
+    const element = video.current; if (!element) return;
+    element.volume = initialAudio.current.volume; element.muted = initialAudio.current.muted;
+  }, []);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") { close(); return; }
@@ -140,7 +146,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
     <div ref={player} className={`custom-player live-custom-player ${controls || !playing ? "controls-visible" : "controls-hidden"}`} tabIndex={0} onMouseMove={reveal} onTouchStart={reveal} onMouseLeave={() => playing && setControls(false)}>
       <div className="player-surface" onClick={togglePlayback} onDoubleClick={() => void toggleFullscreen()}><video ref={video} playsInline muted={muted} preload="auto"
         onPlay={() => { setPlaying(true); setWaiting(false); setError(""); reveal(); }} onPlaying={() => { setPlaying(true); setWaiting(false); setError(""); }} onPause={() => { setPlaying(false); setWaiting(false); }} onWaiting={() => setWaiting(true)} onCanPlay={() => setWaiting(false)}
-        onVolumeChange={(event) => { setVolume(event.currentTarget.volume); setMuted(event.currentTarget.muted); }}/></div>
+        onVolumeChange={(event) => { const audio = { volume: event.currentTarget.volume, muted: event.currentTarget.muted }; setVolume(audio.volume); setMuted(audio.muted); initialAudio.current = audio; savePlayerAudio(audio); }}/></div>
       {waiting && !error && <div className="player-buffering"><LoaderCircle className="spin"/></div>}
       {!playing && !waiting && !error && <button className="player-center-play" onClick={togglePlayback} aria-label="Play live stream"><Play fill="currentColor"/></button>}
       <div className="player-controls" onClick={(event) => event.stopPropagation()}><div className="player-control-row"><div className="player-controls-left">

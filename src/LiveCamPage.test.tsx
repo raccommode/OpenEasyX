@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LiveCamCard, LiveCamFavoriteButton, LiveCamRecordButton, LiveCamUnavailable, LivePlayer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl, shouldRecoverNativeLiveMediaError } from "./LiveCamPage";
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("Live Cam availability", () => {
   it("explains that a live source plugin is needed instead of presenting a broken empty grid", () => {
@@ -16,6 +18,14 @@ describe("Live Cam availability", () => {
     expect(html).not.toContain("controls=\"\"");
     expect(html).not.toContain("Autoplay");
     expect(html).not.toContain("Subtitles");
+  });
+
+  it("restores the saved player volume for live streams", () => {
+    vi.stubGlobal("localStorage", { getItem: () => JSON.stringify({ volume: 0.35, muted: false }), setItem: vi.fn() });
+    const html = renderToStaticMarkup(<LivePlayer cam={{ id: "alice", username: "alice", pageUrl: "https://example.test/alice", providerId: "test", providerName: "Test Live" }} close={() => {}}/>);
+    expect(html).toContain('aria-label="Volume"');
+    expect(html).toContain('value="0.35"');
+    expect(html).not.toContain('<video playsInline="" muted=""');
   });
 
   it("creates shareable URLs for filters and individual live cams", () => {
