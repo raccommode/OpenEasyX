@@ -10,6 +10,16 @@ function createDb() { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-t
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 
 describe("Database", () => {
+  it("persists live creator favorites independently from recorded media", () => {
+    const db = createDb();
+    expect(db.setLiveCamFavorite("test.live", { camId: "alice-id", username: "Alice", title: "Alice live", pageUrl: "https://live.test/Alice", thumbnailUrl: "https://live.test/alice.jpg" }, true))
+      .toMatchObject({ providerId: "test.live", camId: "alice-id", username: "Alice" });
+    expect(db.isLiveCamFavorite("test.live", "alice")).toBe(true);
+    expect(db.listLiveCamFavorites()).toEqual([expect.objectContaining({ username: "Alice", pageUrl: "https://live.test/Alice" })]);
+    expect(db.setLiveCamFavorite("test.live", { camId: "alice-id", username: "ALICE", pageUrl: "https://live.test/Alice" }, false)).toBeUndefined();
+    expect(db.listLiveCamFavorites()).toEqual([]);
+  });
+
   it("queues discovered media by default without overriding a saved preference", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-test-")); dirs.push(dir);
     const initial = new Database(dir);

@@ -1,7 +1,7 @@
 import { createLiveCamPlugin } from "../live-cam-plugin-factory.js";
 import { browserHtml } from "../browser-html-utils.js";
-import { stripchatStreamConfig } from "../live-cam-discovery.js";
-import type { CommandDownloadRequest, LiveStream, MediaCandidate, PluginContext } from "../../packages/plugin-sdk/index.js";
+import { stripchatProfileLiveCams, stripchatStreamConfig } from "../live-cam-discovery.js";
+import type { CommandDownloadRequest, LiveStream, MediaCandidate, MediaSource, PluginContext } from "../../packages/plugin-sdk/index.js";
 
 const plugin = createLiveCamPlugin({
   id: "org.easyx.stripchat", name: "Stripchat Live", prefix: "stripchat", homepage: "https://stripchat.com",
@@ -85,6 +85,18 @@ export async function resolveStripchatDownload(context: PluginContext, item: Med
   };
 }
 
+export async function listStripchatMedia(context: PluginContext, source: MediaSource): Promise<MediaCandidate[]> {
+  const username = new URL(source.profileUrl).pathname.split("/").filter(Boolean).at(-1)?.replace(/^@/, "") ?? "live";
+  const cam = stripchatProfileLiveCams(await browserHtml(context, source.profileUrl), username)[0];
+  if (!cam) return [];
+  const safeName = cam.username.replace(/[^a-z0-9_.-]+/gi, "-").replace(/^-+|-+$/g, "") || "live";
+  return [{
+    externalId: `stripchat:${cam.username.toLowerCase()}:live`,
+    title: cam.title ?? `${cam.username} live`, pageUrl: cam.pageUrl, mediaType: "video", filename: `${safeName}-live.mp4`,
+    metadata: { extractorUrl: cam.pageUrl, live: true, viewers: cam.viewers, gender: cam.gender, tags: cam.tags ?? [] },
+  }];
+}
+
 plugin.resolveLiveStream = async (context, cam) => {
   try {
     return await resolveStripchatDirect(context, cam.pageUrl);
@@ -94,5 +106,6 @@ plugin.resolveLiveStream = async (context, cam) => {
   }
 };
 plugin.resolveDownload = resolveStripchatDownload;
+plugin.listMedia = listStripchatMedia;
 
 export default plugin;

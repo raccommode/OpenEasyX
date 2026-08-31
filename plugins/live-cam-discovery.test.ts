@@ -77,6 +77,20 @@ describe("public live-cam discovery parsers", () => {
 });
 
 describe("public live-cam discovery paging", () => {
+  it("pages the Stripchat catalogue locally because its endpoint ignores offsets", async () => {
+    const models = Array.from({ length: 60 }, (_, index) => ({ username: `model-${index + 1}`, status: "public", viewersCount: 60 - index, broadcastGender: "female" }));
+    const fetch = vi.fn(async (_input: string | URL | Request) => new Response(JSON.stringify({ blocks: [{ models }], totalCount: 2_000 }), { status: 200 }));
+    const context = { config: {}, fetch, log: vi.fn(), runCommand: vi.fn() };
+    const first = await listDiscoveredLiveCams(context, "stripchat", { page: 1, pageSize: 24 });
+    const second = await listDiscoveredLiveCams(context, "stripchat", { page: 2, pageSize: 24 });
+    expect(first).toMatchObject({ total: 60, pages: 3 });
+    expect(first.cams[0]).toMatchObject({ username: "model-1" });
+    expect(second.cams[0]).toMatchObject({ username: "model-25" });
+    expect(new Set(first.cams.map((cam) => cam.username))).not.toContain(second.cams[0].username);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0][0])).not.toMatch(/[?&](?:offset|page)=/);
+  });
+
   it("applies search, gender, and pagination to a provider catalogue", async () => {
     const context = {
       config: {}, fetch: globalThis.fetch, log: () => undefined,

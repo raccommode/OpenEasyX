@@ -246,20 +246,34 @@ export function stripchatProfileLiveCams(html: string, requestedUsername?: strin
 
 async function stripchatPage(context: PluginContext, query: LiveCamQuery): Promise<LiveCamPage> {
   const primaryTag = { female: "girls", male: "men", couple: "couples", trans: "trans" }[query.gender ?? "female"];
-  const load = async (offset: number, limit: number) => {
-    const url = new URL("https://stripchat.com/api/front/v2/models"); url.searchParams.set("primaryTag", primaryTag); url.searchParams.set("limit", String(Math.min(50, limit))); url.searchParams.set("offset", String(offset));
+  const load = async () => {
+    const url = new URL("https://stripchat.com/api/front/v2/models"); url.searchParams.set("primaryTag", primaryTag);
     const response = await context.fetch(url, { headers: { accept: "application/json", origin: "https://stripchat.com", referer: `https://stripchat.com/${primaryTag}`, "user-agent": USER_AGENT }, signal: context.signal ?? AbortSignal.timeout(20_000) });
-    if (!response.ok) throw new Error(`Stripchat live rooms returned HTTP ${response.status}`); const payload = await response.json();
-    return { cams: stripchatLiveCams(payload), total: whole(record(payload)?.totalCount) };
+    if (!response.ok) throw new Error(`Stripchat live rooms returned HTTP ${response.status}`);
+    return stripchatLiveCams(await response.json());
   };
   if (query.search) {
     const username = query.search.trim();
     const html = await browserHtml(context, `https://stripchat.com/${encodeURIComponent(username)}`);
     return filteredPage(stripchatProfileLiveCams(html, username), { ...query, page: 1 });
   }
-  const start = (query.page - 1) * query.pageSize; const parts = await Promise.all(Array.from({ length: Math.ceil(query.pageSize / 50) }, (_, index) => load(start + index * 50, Math.min(50, query.pageSize - index * 50))));
-  const cams = parts.flatMap((part) => part.cams).slice(0, query.pageSize); const total = parts[0]?.total ?? cams.length;
-  return { cams, total, page: query.page, pageSize: query.pageSize, pages: Math.max(1, Math.ceil(total / query.pageSize)) };
+  // Stripchat currently ignores offset/page parameters and returns the same
+  // multi-block catalogue for every request. Page that catalogue locally so a
+  // provider-filtered page never repeats page one. Keep one short-lived
+  // snapshot so viewer-count reordering cannot move a room across page
+  // boundaries while somebody navigates through the catalogue.
+  const cacheKey = `stripchat:${primaryTag}`; const cached = cache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return filteredPage(cached.cams, query);
+  try {
+    const cams = await load(); cache.set(cacheKey, { cams, expiresAt: Date.now() + 90_000 });
+    return filteredPage(cams, query);
+  } catch (error) {
+    if (cached?.cams.length) {
+      context.log("warn", "Stripchat live catalogue refresh failed; serving the last successful snapshot", error instanceof Error ? error.message : String(error));
+      return filteredPage(cached.cams, query);
+    }
+    throw error;
+  }
 }
 
 async function myfreecamsPage(context: PluginContext, query: LiveCamQuery): Promise<LiveCamPage> {

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { LiveCamRecordButton, LiveCamUnavailable, LivePlayer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl } from "./LiveCamPage";
+import { LiveCamFavoriteButton, LiveCamRecordButton, LiveCamUnavailable, LivePlayer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl, shouldRecoverNativeLiveMediaError } from "./LiveCamPage";
 
 describe("Live Cam availability", () => {
   it("explains that a live source plugin is needed instead of presenting a broken empty grid", () => {
@@ -19,15 +19,27 @@ describe("Live Cam availability", () => {
   });
 
   it("creates shareable URLs for filters and individual live cams", () => {
-    expect(liveCamListUrl({ query: "alice", providerId: "test.live", gender: "female", page: 3 }))
-      .toBe("/live-cam?q=alice&source=test.live&gender=female&page=3");
-    expect(liveCamPresetFromSearch("?q=alice&source=test.live&gender=female&page=3"))
-      .toEqual({ query: "alice", providerId: "test.live", gender: "female", page: 3 });
+    expect(liveCamListUrl({ query: "alice", providerId: "test.live", gender: "female", favoritesOnly: true, page: 3 }))
+      .toBe("/live-cam?q=alice&source=test.live&gender=female&favorites=1&page=3");
+    expect(liveCamPresetFromSearch("?q=alice&source=test.live&gender=female&favorites=1&page=3"))
+      .toEqual({ query: "alice", providerId: "test.live", gender: "female", favoritesOnly: true, page: 3 });
     expect(liveCamUrl({ providerId: "test.live", id: "alice/bob" })).toBe("/live-cam/test.live/alice%2Fbob");
   });
 
   it("offers direct recording from a live room", () => {
     const html = renderToStaticMarkup(<LiveCamRecordButton cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live" }}/>);
     expect(html).toContain("Record live");
+  });
+
+  it("offers a persistent creator favorite action", () => {
+    const html = renderToStaticMarkup(<LiveCamFavoriteButton cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live", favorite: true }}/>);
+    expect(html).toContain("Favorited"); expect(html).toContain('aria-pressed="true"');
+  });
+
+  it("recovers Safari media error 4 after a tab suspension without hiding real playback errors", () => {
+    expect(shouldRecoverNativeLiveMediaError(4, true, 0, 10_000)).toBe(true);
+    expect(shouldRecoverNativeLiveMediaError(4, false, 9_000, 10_000)).toBe(true);
+    expect(shouldRecoverNativeLiveMediaError(4, false, 1_000, 10_000)).toBe(false);
+    expect(shouldRecoverNativeLiveMediaError(3, true, 0, 10_000)).toBe(false);
   });
 });

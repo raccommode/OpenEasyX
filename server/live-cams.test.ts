@@ -32,6 +32,26 @@ describe("Open EasyX live cams", () => {
     });
   });
 
+  it("persists favorite creators and lists only favorites that are currently online", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    const plugin = plugins.get("test.live");
+    plugin.listLiveCams = async (_context, query) => {
+      const cams = [
+        { id: "alice", username: "alice", pageUrl: "https://live.test/alice", viewers: 25 },
+        { id: "bob", username: "bob", pageUrl: "https://live.test/bob", viewers: 10 },
+      ].filter((cam) => !query.search || cam.username.includes(query.search));
+      return { cams, total: cams.length, page: query.page, pageSize: query.pageSize, pages: 1 };
+    };
+    const alice = (await service.list({ page: 1, pageSize: 24 })).items[0];
+    expect(service.setFavorite("test.live", alice, true)).toMatchObject({ favorite: true, item: { username: "alice" } });
+    expect(database.listLiveCamFavorites()).toHaveLength(1);
+    await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({
+      total: 1, items: [{ username: "alice", favorite: true }],
+    });
+    expect(service.listFavorites()).toEqual([expect.objectContaining({ username: "alice" })]);
+    expect(service.setFavorite("test.live", alice, false)).toEqual({ favorite: false });
+  });
+
   it("resolves provider streams behind a short-lived Downloader proxy URL", async () => {
     const { plugins, service } = await fixture(); plugins.install("org.easyx.viewer"); plugins.install("test.live");
     await expect(service.resolve("test.live", { id: "alice", username: "alice", pageUrl: "https://live.test/alice" }))

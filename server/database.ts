@@ -37,6 +37,12 @@ export type ItemPage = {
   statusCounts: Record<string, number>; mediaTypes: string[];
 };
 
+export type LiveCamFavorite = {
+  providerId: string; camId: string; username: string; title?: string; pageUrl: string; thumbnailUrl?: string;
+  createdAt: string; updatedAt: string;
+};
+export type LiveCamFavoriteInput = Pick<LiveCamFavorite, "camId" | "username" | "pageUrl"> & Partial<Pick<LiveCamFavorite, "title" | "thumbnailUrl">>;
+
 export class Database {
   readonly sqlite: DatabaseSync;
 
@@ -84,6 +90,11 @@ export class Database {
       CREATE INDEX IF NOT EXISTS items_identity_idx ON items(identity_key, quality_score DESC);
       CREATE INDEX IF NOT EXISTS items_checksum_idx ON items(checksum_sha256);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS live_cam_favorites (
+        provider_id TEXT NOT NULL, username_key TEXT NOT NULL, cam_id TEXT NOT NULL, username TEXT NOT NULL,
+        title TEXT, page_url TEXT NOT NULL, thumbnail_url TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY(provider_id, username_key)
+      );
     `);
     const sourceColumns = new Set((this.sqlite.prepare("PRAGMA table_info(sources)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!sourceColumns.has("scraper_plugin_id")) this.sqlite.exec("ALTER TABLE sources ADD COLUMN scraper_plugin_id TEXT");
@@ -140,6 +151,33 @@ export class Database {
     const stmt = this.sqlite.prepare("INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at");
     for (const [key, value] of Object.entries(values)) stmt.run(key, JSON.stringify(value), now());
     return this.getSettings();
+  }
+
+  listLiveCamFavorites(providerId?: string): LiveCamFavorite[] {
+    const rows = providerId
+      ? this.sqlite.prepare("SELECT * FROM live_cam_favorites WHERE provider_id=? ORDER BY username COLLATE NOCASE").all(providerId)
+      : this.sqlite.prepare("SELECT * FROM live_cam_favorites ORDER BY username COLLATE NOCASE").all();
+    return (rows as any[]).map(this.mapLiveCamFavorite);
+  }
+
+  isLiveCamFavorite(providerId: string, username: string): boolean {
+    return Boolean(this.sqlite.prepare("SELECT 1 FROM live_cam_favorites WHERE provider_id=? AND username_key=?").get(providerId, username.trim().toLowerCase()));
+  }
+
+  setLiveCamFavorite(providerId: string, cam: LiveCamFavoriteInput, favorite: boolean): LiveCamFavorite | undefined {
+    const usernameKey = cam.username.trim().toLowerCase();
+    if (!favorite) {
+      this.sqlite.prepare("DELETE FROM live_cam_favorites WHERE provider_id=? AND username_key=?").run(providerId, usernameKey);
+      return undefined;
+    }
+    const stamp = now();
+    this.sqlite.prepare(`INSERT INTO live_cam_favorites(provider_id,username_key,cam_id,username,title,page_url,thumbnail_url,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id,username_key) DO UPDATE SET
+      cam_id=excluded.cam_id,username=excluded.username,title=excluded.title,page_url=excluded.page_url,
+      thumbnail_url=COALESCE(excluded.thumbnail_url,live_cam_favorites.thumbnail_url),updated_at=excluded.updated_at`)
+      .run(providerId, usernameKey, cam.camId, cam.username, cam.title ?? null, cam.pageUrl, cam.thumbnailUrl ?? null, stamp, stamp);
+    const row = this.sqlite.prepare("SELECT * FROM live_cam_favorites WHERE provider_id=? AND username_key=?").get(providerId, usernameKey) as any;
+    return row ? this.mapLiveCamFavorite(row) : undefined;
   }
 
   getPluginState(pluginId: string) {
@@ -451,6 +489,13 @@ export class Database {
       storagePath: row.storage_path ?? undefined, error: row.error ?? undefined,
       downloadStartedAt: row.download_started_at ?? undefined, downloadFinishedAt: row.download_finished_at ?? undefined,
       createdAt: row.created_at, updatedAt: row.updated_at };
+  }
+
+  private mapLiveCamFavorite(row: any): LiveCamFavorite {
+    return {
+      providerId: row.provider_id, camId: row.cam_id, username: row.username, title: row.title ?? undefined,
+      pageUrl: row.page_url, thumbnailUrl: row.thumbnail_url ?? undefined, createdAt: row.created_at, updatedAt: row.updated_at,
+    };
   }
 }
 

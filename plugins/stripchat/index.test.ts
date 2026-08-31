@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveStripchatDirect, resolveStripchatDownload, stripchatPublicPlaybackKey } from "./index.js";
+import { listStripchatMedia, resolveStripchatDirect, resolveStripchatDownload, stripchatPublicPlaybackKey } from "./index.js";
 
 function pageState() {
   return `<script>window.__PRELOADED_STATE__ = ${JSON.stringify({
@@ -29,6 +29,17 @@ function context(variant: string) {
 }
 
 describe("Stripchat direct live playback", () => {
+  it("detects a live configured source from browser state without invoking yt-dlp", async () => {
+    const mock = context("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:123\n");
+    await expect(listStripchatMedia(mock, {
+      id: "source-1", externalId: "Alice", performerId: "person-1", profileUrl: "https://stripchat.com/Alice", domain: "stripchat.com",
+    })).resolves.toEqual([expect.objectContaining({
+      externalId: "stripchat:alice:live", pageUrl: "https://stripchat.com/Alice", filename: "Alice-live.mp4", metadata: expect.objectContaining({ live: true }),
+    })]);
+    expect(mock.runCommand).toHaveBeenCalledTimes(1);
+    expect(mock.runCommand).toHaveBeenCalledWith("easyx-browser-fetch", ["https://stripchat.com/Alice"], expect.any(Object));
+  });
+
   it("extracts the public playback key from the current player module", () => {
     expect(stripchatPublicPlaybackKey('url.searchParams.set("pkey","B0p93vi8Uj6AYyZb")')).toBe("B0p93vi8Uj6AYyZb");
     expect(stripchatPublicPlaybackKey("no playback key here")).toBeUndefined();

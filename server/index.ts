@@ -176,6 +176,7 @@ const liveCamQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(48).default(24),
   providerId: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).optional()), search: z.string().trim().max(120).optional(),
   gender: z.preprocess((value) => value === "" ? undefined : value, z.enum(["female", "male", "couple", "trans"]).optional()),
+  favoritesOnly: z.preprocess((value) => value === "1" || value === "true" || value === true, z.boolean()).default(false),
 });
 const liveCamBodySchema = z.object({
   providerId: z.string().trim().min(1),
@@ -207,6 +208,11 @@ app.get<{ Querystring: Record<string, unknown> }>("/api/live-cams/events", async
     clearInterval(heartbeat);
     if (!reply.raw.destroyed) reply.raw.end();
   }
+});
+app.get("/api/live-cams/favorites", async () => ({ items: liveCams.listFavorites() }));
+app.put<{ Body: unknown }>("/api/live-cams/favorites", async (request) => {
+  const body = liveCamBodySchema.extend({ favorite: z.boolean() }).parse(request.body);
+  return liveCams.setFavorite(body.providerId, body.cam, body.favorite);
 });
 app.get<{ Params: { providerId: string; camId: string } }>("/api/live-cams/:providerId/:camId", async (request) => {
   const params = z.object({

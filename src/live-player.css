@@ -80,6 +80,12 @@
   font-size: 9px;
 }
 
+.live-favorite-button.active {
+  border-color: rgba(250, 64, 88, .38);
+  color: #ff7889;
+  background: rgba(250, 64, 88, .1);
+}
+
 .watch-page .live-unavailable.compact {
   min-height: calc(100dvh - 90px);
   border: 0;

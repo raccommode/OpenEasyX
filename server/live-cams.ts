@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyReply } from "fastify";
 import type { LiveCam, LiveCamQuery, LiveStream } from "../packages/plugin-sdk/index.js";
-import type { Database } from "./database.js";
+import type { Database, LiveCamFavorite } from "./database.js";
 import { PluginManager, pluginMatchesSource } from "./plugin-manager.js";
 
-export type PublicLiveCam = LiveCam & { providerId: string; providerName: string };
+export type PublicLiveCam = LiveCam & { providerId: string; providerName: string; favorite: boolean };
 export type LiveCamProviderStatus = { id: string; name: string; ok: boolean; count: number; pending?: boolean; error?: string };
 export type LiveCamResult = {
   items: PublicLiveCam[]; total: number; page: number; pageSize: number; pages: number;
@@ -13,6 +13,7 @@ export type LiveCamResult = {
 
 type ProxyEntry = { url?: string; body?: string; headers: Record<string, string>; expiresAt: number };
 type ProviderResult = { items: PublicLiveCam[]; total: number; status: LiveCamProviderStatus };
+type LiveCamListQuery = LiveCamQuery & { providerId?: string; favoritesOnly?: boolean };
 
 function text(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function whole(value: unknown): number { const parsed = Number(value); return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0; }
@@ -34,15 +35,28 @@ export class LiveCamService {
       && (!providerId || entry.manifest.id === providerId));
   }
 
-  private async listProvider(entry: ReturnType<PluginManager["list"]>[number], query: LiveCamQuery, signal?: AbortSignal): Promise<ProviderResult> {
+  private async listProvider(entry: ReturnType<PluginManager["list"]>[number], query: LiveCamQuery, signal?: AbortSignal, favoritesOnly = false): Promise<ProviderResult> {
     const plugin = this.plugins.get(entry.manifest.id);
     try {
       let cams: LiveCam[] = [];
       let total = 0;
       if (plugin.listLiveCams) {
-        const result = await plugin.listLiveCams(this.plugins.context(entry.manifest.id, signal), query);
-        cams = result.cams.slice(0, query.pageSize);
-        total = result.total;
+        if (favoritesOnly) {
+          const favorites = this.db.listLiveCamFavorites(entry.manifest.id);
+          const discovered = await Promise.all(favorites.map(async (favorite) => {
+            const result = await plugin.listLiveCams!(this.plugins.context(entry.manifest.id, signal), { page: 1, pageSize: 8, search: favorite.username });
+            const needle = favorite.username.toLowerCase();
+            return result.cams.find((cam) => cam.username.toLowerCase() === needle || cam.id.toLowerCase() === favorite.camId.toLowerCase());
+          }));
+          const unique = new Map(discovered.filter(Boolean).map((cam) => [cam!.username.toLowerCase(), cam!]));
+          const online = [...unique.values()].sort((left, right) => whole(right.viewers) - whole(left.viewers));
+          total = online.length;
+          cams = online.slice((query.page - 1) * query.pageSize, query.page * query.pageSize);
+        } else {
+          const result = await plugin.listLiveCams(this.plugins.context(entry.manifest.id, signal), query);
+          cams = result.cams.slice(0, query.pageSize);
+          total = result.total;
+        }
       } else if (plugin.listMedia) {
         const sources = this.db.listSources().filter((source) => source.enabled && source.scraperPluginId === entry.manifest.id);
         const discovered = await Promise.all(sources.map(async (source) => {
@@ -65,11 +79,12 @@ export class LiveCamService {
         }
         const requestedGender = query.gender;
         if (requestedGender) cams = cams.filter((cam) => cam.gender === requestedGender || cam.gender === requestedGender[0]);
+        if (favoritesOnly) cams = cams.filter((cam) => this.db.isLiveCamFavorite(entry.manifest.id, cam.username));
         total = cams.length;
         cams = cams.slice((query.page - 1) * query.pageSize, query.page * query.pageSize);
       }
       const normalized = cams.filter((cam) => pluginMatchesSource(entry.manifest, cam.pageUrl))
-        .map((cam) => ({ ...cam, providerId: entry.manifest.id, providerName: entry.manifest.name }));
+        .map((cam) => ({ ...cam, providerId: entry.manifest.id, providerName: entry.manifest.name, favorite: this.db.isLiveCamFavorite(entry.manifest.id, cam.username) }));
       for (const cam of normalized) this.recentCams.set(`${entry.manifest.id}:${cam.id.toLowerCase()}`, { cam, expiresAt: Date.now() + 120_000 });
       return {
         items: normalized,
@@ -85,7 +100,7 @@ export class LiveCamService {
   }
 
   private snapshot(
-    query: LiveCamQuery & { providerId?: string },
+    query: LiveCamListQuery,
     entries: ReturnType<PluginManager["list"]>,
     results: Map<string, ProviderResult>,
     complete: boolean,
@@ -106,7 +121,7 @@ export class LiveCamService {
     };
   }
 
-  async *stream(query: LiveCamQuery & { providerId?: string }, signal?: AbortSignal): AsyncGenerator<LiveCamResult> {
+  async *stream(query: LiveCamListQuery, signal?: AbortSignal): AsyncGenerator<LiveCamResult> {
     const entries = this.livePlugins();
     const requestedItems = query.page * query.pageSize;
     const results = new Map<string, ProviderResult>();
@@ -116,7 +131,7 @@ export class LiveCamService {
       const providerQuery = query.providerId && !selected
         ? { page: 1, pageSize: 1, search: query.search, gender: query.gender }
         : { page: selected ? query.page : 1, pageSize: selected ? query.pageSize : requestedItems, search: query.search, gender: query.gender };
-      pending.set(entry.manifest.id, this.listProvider(entry, providerQuery, signal).then((result) => ({ id: entry.manifest.id, result })));
+      pending.set(entry.manifest.id, this.listProvider(entry, providerQuery, signal, query.favoritesOnly).then((result) => ({ id: entry.manifest.id, result })));
     }
     yield this.snapshot(query, entries, results, pending.size === 0);
     while (pending.size && !signal?.aborted) {
@@ -127,7 +142,7 @@ export class LiveCamService {
     }
   }
 
-  async list(query: LiveCamQuery & { providerId?: string }): Promise<LiveCamResult> {
+  async list(query: LiveCamListQuery): Promise<LiveCamResult> {
     let latest: LiveCamResult | undefined;
     for await (const result of this.stream(query)) latest = result;
     return latest ?? { items: [], total: 0, page: query.page, pageSize: query.pageSize, pages: 1, providers: [], complete: true };
@@ -137,13 +152,29 @@ export class LiveCamService {
     const entry = this.livePlugins(providerId)[0];
     if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
     const cached = this.recentCams.get(`${providerId}:${camId.toLowerCase()}`);
-    if (cached && cached.expiresAt > Date.now()) return cached.cam;
+    if (cached && cached.expiresAt > Date.now()) return { ...cached.cam, favorite: this.db.isLiveCamFavorite(providerId, cached.cam.username) };
     const result = await this.listProvider(entry, { page: 1, pageSize: 48, search: camId });
     if (!result.status.ok) throw Object.assign(new Error(result.status.error ?? "The live provider could not be reached"), { statusCode: 502 });
     const needle = camId.toLowerCase();
     const cam = result.items.find((item) => item.id.toLowerCase() === needle || item.username.toLowerCase() === needle);
     if (!cam) throw Object.assign(new Error("This cam is no longer live"), { statusCode: 404 });
     return cam;
+  }
+
+  listFavorites(): LiveCamFavorite[] {
+    return this.db.listLiveCamFavorites();
+  }
+
+  setFavorite(providerId: string, cam: LiveCam, favorite: boolean): { favorite: boolean; item?: LiveCamFavorite } {
+    const entry = this.livePlugins(providerId)[0];
+    if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
+    if (!pluginMatchesSource(entry.manifest, cam.pageUrl)) throw Object.assign(new Error(`${entry.manifest.name} does not support this live URL`), { statusCode: 400 });
+    const item = this.db.setLiveCamFavorite(providerId, {
+      camId: cam.id, username: cam.username, title: cam.title, pageUrl: cam.pageUrl, thumbnailUrl: cam.thumbnailUrl,
+    }, favorite);
+    const key = `${providerId}:${cam.id.toLowerCase()}`; const cached = this.recentCams.get(key);
+    if (cached) cached.cam.favorite = favorite;
+    return { favorite, ...(item ? { item } : {}) };
   }
 
   record(providerId: string, cam: LiveCam): { itemId: string; status: string } {
