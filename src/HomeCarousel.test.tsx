@@ -12,6 +12,7 @@ describe("RecentCarousel", () => {
     const html = renderToStaticMarkup(<RecentCarousel items={items} open={vi.fn()} favorite={vi.fn()}/>);
 
     expect(html).toContain("LATEST CONTENT");
+    expect(html).toContain('class="home-carousel-image"');
     expect(html).toContain("Newest photo");
     expect(html).toContain("View photo");
     expect(html).toContain("Previous latest content");

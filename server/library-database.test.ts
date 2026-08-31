@@ -51,6 +51,7 @@ describe("media catalog", () => {
     const result = db.listMedia({ sort: "title" });
 
     expect(scan.indexed).toBe(2);
+    expect(catalog.status).toMatchObject({ running: false, indexed: 2, processed: 2, total: 2, progress: 100 });
     expect(result.total).toBe(2);
     expect(result.items[0]).toMatchObject({ title: "cover", performer: "Example Performer", source: "example.com", kind: "image" });
     expect(result.items[1]).toMatchObject({ title: "first video", kind: "video" });

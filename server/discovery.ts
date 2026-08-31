@@ -18,6 +18,7 @@ export type DiscoveryGroup = {
   profileUrls: string[];
   matches: DiscoveryMatch[];
 };
+export type DiscoveryProgress = { completed: number; total: number; progress: number };
 
 export function normalizeIdentity(value: string): string {
   return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -52,8 +53,11 @@ export function groupDiscoveryMatches(matches: DiscoveryMatch[], query: string):
   });
 }
 
-export async function discoverPeople(plugins: PluginManager, query: string) {
+export async function discoverPeople(plugins: PluginManager, query: string, onProgress?: (progress: DiscoveryProgress) => void) {
   const entries = plugins.list().filter((entry) => entry.installed && entry.enabled && entry.manifest.capabilities.includes("identity-search"));
+  let completed = 0;
+  const reportProgress = () => onProgress?.({ completed, total: entries.length, progress: entries.length ? Math.round(completed / entries.length * 100) : 100 });
+  reportProgress();
   const searches = await Promise.all(entries.map(async (entry): Promise<{ status: DiscoveryProviderStatus; matches: DiscoveryMatch[] }> => {
     const started = Date.now();
     const controller = new AbortController();
@@ -72,6 +76,8 @@ export async function discoverPeople(plugins: PluginManager, query: string) {
       };
     } finally {
       clearTimeout(timeout);
+      completed++;
+      reportProgress();
     }
   }));
   return {

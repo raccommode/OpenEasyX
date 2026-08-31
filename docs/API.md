@@ -7,6 +7,7 @@ The MVP exposes a JSON API under `/api`. It is currently intended for private, a
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/health` | Container health and version |
+| `GET` | `/api/version` | Version injected into the running image |
 | `GET` | `/api/dashboard` | Counts and recent workspace state |
 | `GET` | `/api/settings` | Core settings and media root |
 | `PUT` | `/api/settings` | Update supported core settings |

@@ -23,11 +23,14 @@ describe("multi-provider discovery", () => {
       get: (id: string) => ({ searchPeople: id === "bad" ? async () => { throw new Error("provider down"); } : async () => [{ externalId: "1", name: "Example Star" }] }),
       context: (_id: string, signal?: AbortSignal) => ({ config: {}, signal, fetch: globalThis.fetch, log: () => undefined }),
     };
-    const response = await discoverPeople(manager as never, "Example Star");
+    const progress: number[] = [];
+    const response = await discoverPeople(manager as never, "Example Star", (status) => progress.push(status.progress));
     expect(response.results).toHaveLength(1);
     expect(response.providers).toEqual([
       expect.objectContaining({ pluginId: "good", ok: true, resultCount: 1 }),
       expect.objectContaining({ pluginId: "bad", ok: false, error: "provider down" }),
     ]);
+    expect(progress[0]).toBe(0);
+    expect(progress.at(-1)).toBe(100);
   });
 });

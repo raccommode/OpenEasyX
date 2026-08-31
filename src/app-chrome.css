@@ -105,6 +105,9 @@
   font-weight: 700;
 }
 .easyx-scan-button:disabled { opacity: .55; }
+.easyx-header-operation { min-width: 152px; font-variant-numeric: tabular-nums; }
+.easyx-header-operation:disabled { cursor: progress; opacity: 1; }
+.easyx-header-operation svg.spin { transform-origin: center; }
 .easyx-nav-backdrop { display: none; }
 
 .performer-intro-actions { display: flex; align-items: center; gap: 8px; }
@@ -156,7 +159,7 @@
   .easyx-shell .easyx-header-title p { display: none; }
   .easyx-shell .easyx-header-title h1 { font-size: 19px; }
   .easyx-header-actions { gap: 7px; }
-  .easyx-header-actions > * { width: 40px; height: 40px; padding: 0; }
+  .easyx-header-actions > * { width: 40px; min-width: 40px; height: 40px; padding: 0; }
   .easyx-header-actions span { display: none; }
   .performer-intro-actions { width: 100%; }
   .performer-intro-actions > * { flex: 1; }

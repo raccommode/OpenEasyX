@@ -86,7 +86,7 @@ export class Catalog {
   private previews = new Map<string, Promise<string>>();
   private playbackFiles = new Map<string, Promise<string>>();
   private ffmpegQueue: Promise<void> = Promise.resolve();
-  readonly status = { running: false, indexed: 0, lastScanAt: "", error: "" };
+  readonly status = { running: false, indexed: 0, processed: 0, total: 0, progress: 0, lastScanAt: "", error: "" };
 
   constructor(
     readonly db: LibraryDatabase,
@@ -104,14 +104,22 @@ export class Catalog {
     if (this.scanPromise) return this.scanPromise;
     this.status.running = true;
     this.status.error = "";
-    this.scanPromise = Promise.resolve().then(() => {
+    this.status.indexed = 0;
+    this.status.processed = 0;
+    this.status.total = 0;
+    this.status.progress = 0;
+    this.scanPromise = Promise.resolve().then(async () => {
       const started = Date.now();
       const scanId = new Date().toISOString();
       let indexed = 0;
-      for (const absolute of walk(this.mediaRoot)) {
+      const files = [...walk(this.mediaRoot)].map((absolute) => {
         const extension = path.extname(absolute).toLowerCase();
         const kind: MediaKind | undefined = VIDEO_EXTENSIONS.has(extension) ? "video" : IMAGE_EXTENSIONS.has(extension) ? "image" : undefined;
-        if (!kind) continue;
+        return kind ? { absolute, extension, kind } : undefined;
+      }).filter((file): file is { absolute: string; extension: string; kind: MediaKind } => !!file);
+      this.status.total = files.length;
+      if (!files.length) this.status.progress = 100;
+      for (const [index, { absolute, extension, kind }] of files.entries()) {
         try {
           const stat = fs.statSync(absolute);
           const relativePath = path.relative(this.mediaRoot, absolute).split(path.sep).join("/");
@@ -134,9 +142,14 @@ export class Catalog {
           }
           indexed++;
         } catch { /* A file may disappear while the scan is in progress. */ }
+        this.status.indexed = indexed;
+        this.status.processed = index + 1;
+        this.status.progress = Math.round(this.status.processed / this.status.total * 100);
+        await new Promise<void>((resolve) => setImmediate(resolve));
       }
       this.db.finishScan(scanId);
       this.status.indexed = indexed;
+      this.status.progress = 100;
       this.status.lastScanAt = new Date().toISOString();
       return { indexed, durationMs: Date.now() - started };
     }).catch((error) => {

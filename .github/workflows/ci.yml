@@ -1,8 +1,19 @@
-name: CI
+name: Fast checks / publish
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: Docker platforms to publish
+        required: true
+        default: linux/amd64,linux/arm64
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -19,7 +30,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: python -m py_compile worker/subtitles.py
-      - run: docker build -t open-easyx:ci .
+      - run: docker build --build-arg APP_VERSION=ci-test -t open-easyx:ci .
       - name: Test Docker runtime with an Unraid-style volume
         shell: bash
         run: |
@@ -47,7 +58,8 @@ jobs:
 
           docker exec "$container" sh -lc 'test "$(awk "/^Uid:/ { print \$2 }" /proc/1/status)" = 99 && test "$(cat /proc/1/comm)" = tini'
           docker exec "$container" sh -lc 'test -w /data && test -f /data/easyx.sqlite && test -f /data/open-easyx-library.sqlite'
-          docker exec "$container" node -e "fetch('http://127.0.0.1:3210/api/health').then(r=>r.json()).then(v=>{if(v.product!=='Open EasyX'||!v.ok)throw Error(JSON.stringify(v))})"
+          docker exec "$container" node -e "fetch('http://127.0.0.1:3210/api/health').then(r=>r.json()).then(v=>{if(v.product!=='Open EasyX'||!v.ok||v.version!=='ci-test')throw Error(JSON.stringify(v))})"
+          docker exec "$container" node -e "fetch('http://127.0.0.1:3210/api/version').then(r=>r.json()).then(v=>{if(v.version!=='ci-test')throw Error(JSON.stringify(v))})"
           docker exec "$container" node -e "fetch('http://127.0.0.1:3210/api/plugin-repositories').then(r=>r.json()).then(v=>{if(!Array.isArray(v)||!v.find(x=>x.id==='official'&&!x.removable))throw Error(JSON.stringify(v))})"
           docker exec "$container" node -e "fetch('http://127.0.0.1:3210/api/plugins/org.easyx.manyvids/browser-login/start',{method:'POST'}).then(async r=>{const v=await r.json();if(!r.ok||!v.active||!v.viewerPath)throw Error(JSON.stringify(v))})"
           docker exec "$container" node -e "fetch('http://127.0.0.1:3210/browser/vnc.html').then(r=>{if(!r.ok)throw Error('noVNC '+r.status)})"
@@ -59,14 +71,38 @@ jobs:
 
   publish:
     needs: test
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_name == 'main')
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Compute version (YEAR.WEEK.N)
+        id: version
+        run: |
+          YEAR=$(date -u +%G)
+          WEEK=$(date -u +%V)
+          # Remove leading zero for clean version number
+          WEEK_NUM=$((10#$WEEK))
+          WEEK_PAD=$(printf "%02d" "$WEEK_NUM")
+
+          # Find existing releases for this year.week prefix
+          PREFIX="${YEAR}.${WEEK_PAD}"
+          LATEST=$(gh release list --limit 100 --json tagName -q \
+            "[.[] | select(.tagName | startswith(\"${PREFIX}.\"))] | length")
+
+          N=$(( LATEST + 1 ))
+          VERSION="${PREFIX}.${N}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Computed version: $VERSION"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/setup-qemu-action@v3
 
@@ -83,17 +119,25 @@ jobs:
         with:
           images: ghcr.io/raccommode/open-easyx
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,format=short
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
 
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'linux/amd64,linux/arm64' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        if: github.ref_name == 'main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          generate_release_notes: true

@@ -25,6 +25,7 @@ const dataDir = path.resolve(process.env.EASYX_DATA_DIR ?? "data");
 const mediaDir = path.resolve(process.env.EASYX_MEDIA_DIR ?? "media");
 const externalPluginsDir = path.resolve(process.env.EASYX_EXTERNAL_PLUGINS_DIR ?? "plugins-external");
 const scanIntervalMinutes = Math.max(1, Number(process.env.EASYX_SCAN_INTERVAL_MINUTES ?? 10));
+const appVersion = process.env.APP_VERSION?.trim() || "dev";
 const logStore = new LogStore();
 const appLogger = pino({ level: process.env.EASYX_LOG_LEVEL ?? "info" }, logStore.stream);
 const writeLog: LogWriter = (level, scope, message, details) => appLogger[level]({ scope, ...(details === undefined ? {} : { details }) }, message);
@@ -43,6 +44,7 @@ const liveCams = new LiveCamService(db, plugins);
 queue.start();
 
 const app = Fastify({ loggerInstance: appLogger, bodyLimit: 8 * 1024 * 1024 });
+const discoveryStatus = { running: false, completed: 0, total: 0, progress: 0, query: "", error: "" };
 
 app.setErrorHandler((error, request, reply) => {
   const status = typeof (error as { statusCode?: unknown }).statusCode === "number" ? Number((error as { statusCode: number }).statusCode) : 500;
@@ -54,7 +56,8 @@ app.setErrorHandler((error, request, reply) => {
 await app.register(fastifyHttpProxy, { upstream: "http://127.0.0.1:6080", prefix: "/browser", websocket: true });
 const library = registerLibraryRoutes(app, libraryDb, catalog, db, dataDir);
 
-app.get("/api/health", async () => ({ ok: true, product: "Open EasyX", version: "1.0.0", plugins: plugins.list().length, library: libraryDb.stats().total, scan: catalog.status }));
+app.get("/api/health", async () => ({ ok: true, product: "Open EasyX", version: appVersion, plugins: plugins.list().length, library: libraryDb.stats().total, scan: catalog.status }));
+app.get("/api/version", async () => ({ version: appVersion }));
 app.get("/api/dashboard", async () => ({ stats: db.stats(), performers: db.listPerformers(), sources: db.listSources(), items: db.listItems(30) }));
 app.get<{ Querystring: Record<string, string | undefined> }>("/api/logs", async (request) => {
   const query = z.object({ limit: z.coerce.number().int().min(1).max(1_000).default(500), level: z.enum(["debug", "info", "warn", "error"]).optional(), search: z.string().trim().max(200).optional() }).parse(request.query);
@@ -235,8 +238,19 @@ app.get<{ Params: { tokenPath: string }; Querystring: Record<string, unknown> }>
 
 app.get<{ Querystring: { q?: string } }>("/api/discover", async (request) => {
   const query = z.string().trim().min(2).max(120).parse(request.query.q);
-  return discoverPeople(plugins, query);
+  Object.assign(discoveryStatus, { running: true, completed: 0, total: 0, progress: 0, query, error: "" });
+  try {
+    const result = await discoverPeople(plugins, query, (progress) => Object.assign(discoveryStatus, progress));
+    discoveryStatus.progress = 100;
+    return result;
+  } catch (error) {
+    discoveryStatus.error = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    discoveryStatus.running = false;
+  }
 });
+app.get("/api/discover/status", async () => discoveryStatus);
 
 const candidateSchema = z.object({
   externalId: z.string().min(1), name: z.string().trim().min(1).max(160), aliases: z.array(z.string()).optional(),

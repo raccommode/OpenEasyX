@@ -76,7 +76,7 @@ Important environment variables include `PUID`, `PGID`, `EASYX_SCAN_INTERVAL_MIN
 
 ## Container publishing
 
-Every push and pull request runs tests, TypeScript, the production web build, a Docker build, and runtime checks. Successful pushes publish multi-architecture images to `ghcr.io/raccommode/open-easyx` with `latest`, branch, tag, and commit SHA tags.
+Every push to `main` runs tests, TypeScript, the production web build, a Docker build, and runtime checks. A successful push automatically creates a `YEAR.WEEK.N` version (for example `2026.35.1`), publishes the multi-architecture image to `ghcr.io/raccommode/open-easyx` with both that version and `latest`, injects the version into the application, and creates the matching GitHub Release. Pull requests run the same checks without publishing a release.
 
 ## Responsible use
 

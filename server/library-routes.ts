@@ -69,6 +69,7 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
     };
   });
   app.post("/api/scan", async () => catalog.scan());
+  app.get("/api/scan/status", async () => catalog.status);
   app.get<{ Querystring: Record<string, string | undefined> }>("/api/library", async (request) => {
     const result = libraryDb.listMedia(libraryQuery(request.query));
     return { ...result, items: result.items.map(payload) };
