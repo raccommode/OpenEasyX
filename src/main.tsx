@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, Box, Check, ChevronLeft, ChevronRight, CircleAlert, ClipboardPaste, CloudDownload, Database, Download, ExternalLink, FolderOpen, Gauge, Globe2, HardDrive, LayoutDashboard, Link2, LoaderCircle, PackagePlus, Pause, Pencil, Play, Plug, Plus, RefreshCw, Search, Settings, ShieldCheck, Sparkles, Square, Terminal, Trash2, UserRound, Users, X } from "lucide-react";
+import { Activity, Box, Captions, Check, ChevronLeft, ChevronRight, CircleAlert, ClipboardPaste, CloudDownload, Database, Download, ExternalLink, FolderOpen, Gauge, Globe2, HardDrive, LayoutDashboard, Link2, LoaderCircle, PackagePlus, Pause, Pencil, Play, Plug, Plus, RefreshCw, Search, Settings, ShieldCheck, Sparkles, Square, Terminal, Trash2, UserRound, Users, X } from "lucide-react";
 import { api } from "./api.js";
 import { activitySourceDomains, confirmItemDeletion, downloadTime } from "./activity.js";
 import { pluginFaviconUrl } from "./plugin-icon.js";
@@ -16,6 +16,8 @@ import "./repositories.css";
 import "./unified-navigation.css";
 import "./plugin-catalog.css";
 import "./app-chrome.css";
+import "./settings-navigation.css";
+import "./performer-discovery.css";
 
 type Plugin = { manifest: { id: string; name: string; version: string; description: string; author: string; homepage?: string; capabilities: string[]; settings?: Array<{ key: string; label: string; type: string; required?: boolean; default?: unknown; placeholder?: string; help?: string; cookieDomains?: string[]; sessionFormat?: "cookies" | "raw-json" }>; browserAuth?: { loginUrl: string; sessionSetting: string; capture?: "cookies" | "onlyfans" | "manyvids" | "authorization-header"; requestDomains?: string[] }; sourceUrlPatterns?: string[]; fallback?: boolean; polling?: { mode: "periodic" | "live"; defaultIntervalSeconds: number; minimumIntervalSeconds: number } }; installed: boolean; enabled: boolean; config: Record<string, unknown>; origin: string };
 type PluginRepository = { id: string; name: string; url: string; official: boolean; removable: boolean; addedAt: string; updatedAt: string; pluginCount: number };
@@ -30,7 +32,7 @@ type DiscoveryResult = { key: string; name: string; aliases: string[]; imageUrl?
 type DiscoveryProvider = { pluginId: string; pluginName: string; ok: boolean; resultCount: number; durationMs: number; error?: string };
 
 const nav = [
-  ["dashboard", "Home", LayoutDashboard], ["discover", "Discover", Search], ["library", "Performers", Users],
+  ["dashboard", "Home", LayoutDashboard], ["library", "Performers", Users],
   ["activity", "Activity", Activity], ["logs", "Logs", Terminal], ["plugins", "Plugins", Plug], ["settings", "Settings", Settings],
 ] as const;
 
@@ -119,15 +121,21 @@ function App() {
     finally { setRefreshing(false); }
   };
 
+  const openPerformerDiscovery = () => {
+    const target = "/performers?discover=1";
+    if (`${window.location.pathname}${window.location.search}` !== target) window.history.pushState({}, "", target);
+    setPage("library");
+    window.dispatchEvent(new Event("easyx:refresh-performers"));
+  };
+
   if (!dashboard) return <div className="boot"><div className="logo-mark">EX</div><LoaderCircle className="spin"/><span>Starting Open EasyX…</span></div>;
   if (!settings.legalAccepted) return <Welcome onAccept={() => run(() => api("/api/settings", { method: "PUT", body: JSON.stringify({ legalAccepted: true }) }), "Open EasyX activated")} busy={busy}/>;
 
   const title = nav.find(([key]) => key === page)?.[1] ?? "Home";
   document.title = `${title} · Open EasyX`;
-  return <AppChrome title={title} scanningLibrary={refreshing} onScanLibrary={() => void manualRefresh()}>
+  return <AppChrome title={title} scanningLibrary={refreshing} onScanLibrary={() => void manualRefresh()} onRefreshPerformers={openPerformerDiscovery}>
     <div className="content">
-        {page === "dashboard" && <Overview dashboard={dashboard} plugins={plugins} go={navigate}/>}
-        {page === "discover" && <Discover plugins={plugins} run={run}/>}
+        {page === "dashboard" && <Overview dashboard={dashboard} plugins={plugins} go={navigate} discover={openPerformerDiscovery}/>}
         {page === "library" && <Library dashboard={dashboard} plugins={plugins} run={run}/>}
         {page === "activity" && <ActivityPage performers={dashboard.performers} sources={dashboard.sources} run={run}/>}
         {page === "logs" && <LogsPage/>}
@@ -150,14 +158,14 @@ function Welcome({ onAccept, busy }: { onAccept: () => void; busy: boolean }) {
   </div></div>;
 }
 
-function Overview({ dashboard, plugins, go }: { dashboard: Dashboard; plugins: Plugin[]; go: (page: PageKey) => void }) {
+function Overview({ dashboard, plugins, go, discover }: { dashboard: Dashboard; plugins: Plugin[]; go: (page: PageKey) => void; discover: () => void }) {
   const cards = [["Performers", dashboard.stats.performers, Users, "people"], ["Sources", dashboard.stats.sources, Database, "connected"], ["Downloaded", dashboard.stats.completed, CloudDownload, formatBytes(dashboard.stats.bytes)], ["Queue", dashboard.stats.queued, Activity, `${dashboard.stats.available} available`]] as const;
   const installed = plugins.filter((plugin) => plugin.installed).length;
   const active = plugins.filter((plugin) => plugin.installed && plugin.enabled).length;
   return <>
-    <section className="hero"><div><span className="pill"><Sparkles size={14}/>PLUGIN-FIRST AUTOMATION</span><h2>Build the media library<br/>you actually want.</h2><p>Discover a person once. Let your chosen plugins find, organize, and keep their content up to date.</p><button className="primary" onClick={() => go("discover")}><Search size={17}/>Start discovering</button></div><div className="hero-orbit"><div className="orbit orbit-one"></div><div className="orbit orbit-two"></div><div className="core"><Download/><span>CORE</span></div><span className="satellite s1"><Plug/></span><span className="satellite s2"><Database/></span><span className="satellite s3"><FolderOpen/></span></div></section>
+    <section className="hero"><div><span className="pill"><Sparkles size={14}/>PLUGIN-FIRST AUTOMATION</span><h2>Build the media library<br/>you actually want.</h2><p>Discover a person once. Let your chosen plugins find, organize, and keep their content up to date.</p><button className="primary" onClick={discover}><Search size={17}/>Start discovering</button></div><div className="hero-orbit"><div className="orbit orbit-one"></div><div className="orbit orbit-two"></div><div className="core"><Download/><span>CORE</span></div><span className="satellite s1"><Plug/></span><span className="satellite s2"><Database/></span><span className="satellite s3"><FolderOpen/></span></div></section>
     <section className="stat-grid">{cards.map(([label, value, Icon, suffix]) => <div className="stat" key={label}><span className="stat-icon"><Icon/></span><div><small>{label}</small><strong>{value}</strong><p>{suffix}</p></div></div>)}</section>
-    <div className="split"><section className="panel"><div className="panel-head"><div><p>RECENT ACTIVITY</p><h3>Download pipeline</h3></div><button className="text-button" onClick={() => go("activity")}>View all <ChevronRight size={15}/></button></div>{dashboard.items.length ? <ItemList items={dashboard.items.slice(0, 5)} performers={dashboard.performers}/> : <Empty icon={Download} title="Nothing in the pipeline yet" text="Discover a performer, add a source, and new items will appear here." action="Discover now" onAction={() => go("discover")}/>}</section>
+    <div className="split"><section className="panel"><div className="panel-head"><div><p>RECENT ACTIVITY</p><h3>Download pipeline</h3></div><button className="text-button" onClick={() => go("activity")}>View all <ChevronRight size={15}/></button></div>{dashboard.items.length ? <ItemList items={dashboard.items.slice(0, 5)} performers={dashboard.performers}/> : <Empty icon={Download} title="Nothing in the pipeline yet" text="Discover a performer, add a source, and new items will appear here." action="Discover now" onAction={discover}/>}</section>
       <section className="panel compact"><div className="panel-head"><div><p>EXTENSIONS</p><h3>Plugin health</h3></div><span className="status-dot">{active}/{installed} active</span></div><div className="plugin-summary"><div className="plugin-health-counts"><div><strong>{installed}</strong><span>Installed</span></div><i/><div><strong>{active}</strong><span>Active</span></div></div><div className="bar"><i style={{ width: `${installed ? active / installed * 100 : 0}%` }}/></div><button className="secondary wide" onClick={() => go("plugins")}><PackagePlus size={17}/>Manage plugins</button></div></section></div>
   </>;
 }
@@ -165,16 +173,24 @@ function Overview({ dashboard, plugins, go }: { dashboard: Dashboard; plugins: P
 function Discover({ plugins, run }: { plugins: Plugin[]; run: (op: () => Promise<unknown>, msg: string) => Promise<void> }) {
   const [query, setQuery] = useState(""); const [searching, setSearching] = useState(false); const [results, setResults] = useState<DiscoveryResult[]>([]);
   const [statuses, setStatuses] = useState<DiscoveryProvider[]>([]); const [searchError, setSearchError] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
   const providers = plugins.filter((p) => p.enabled && p.manifest.capabilities.includes("identity-search"));
-  const search = async (event: React.FormEvent) => {
-    event.preventDefault(); if (query.trim().length < 2) return; setSearching(true); setSearchError("");
+  const search = useCallback(async () => {
+    const performerName = query.trim();
+    if (performerName.length < 2) { inputRef.current?.focus(); return; }
+    setSearching(true); setSearchError("");
     try {
-      const data = await api<{ results: DiscoveryResult[]; providers: DiscoveryProvider[] }>(`/api/discover?q=${encodeURIComponent(query)}`);
+      const data = await api<{ results: DiscoveryResult[]; providers: DiscoveryProvider[] }>(`/api/discover?q=${encodeURIComponent(performerName)}`);
       setResults(data.results); setStatuses(data.providers);
     } catch (error) { setSearchError(error instanceof Error ? error.message : String(error)); }
     finally { setSearching(false); }
-  };
-  return <div className="discover-page"><section className="search-stage"><p>UNIFIED DISCOVERY</p><h2>Who are you looking for?</h2><span>Enabled plugins search their own indexes and return identities for you to review.</span><form onSubmit={search}><Search/><input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Enter a performer name…"/><button className="primary" disabled={searching || query.trim().length < 2}>{searching ? <LoaderCircle className="spin"/> : "Search"}</button></form><div className="providers">Searching with {providers.length ? providers.map((p) => <b key={p.manifest.id}>{p.manifest.name}</b>) : <b>no providers</b>}</div></section>
+  }, [query]);
+  useEffect(() => {
+    const refreshPerformers = () => void search();
+    window.addEventListener("easyx:refresh-performers", refreshPerformers);
+    return () => window.removeEventListener("easyx:refresh-performers", refreshPerformers);
+  }, [search]);
+  return <div className="discover-page"><section className="search-stage"><p>UNIFIED DISCOVERY</p><h2>Who are you looking for?</h2><span>Enabled plugins search their own indexes and return identities for you to review.</span><form onSubmit={(event) => { event.preventDefault(); void search(); }}><Search/><input ref={inputRef} autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Enter a performer name…"/><button className="primary" disabled={searching || query.trim().length < 2}>{searching ? <LoaderCircle className="spin"/> : "Search"}</button></form><div className="providers">Searching with {providers.length ? providers.map((p) => <b key={p.manifest.id}>{p.manifest.name}</b>) : <b>no providers</b>}</div></section>
     {!providers.length && <div className="callout"><Plug/><div><strong>No discovery plugin is enabled</strong><p>Install and configure a plugin with identity search support first. The core never searches websites by itself.</p></div></div>}
     {searchError && <div className="callout error-callout"><CircleAlert/><div><strong>Discovery failed</strong><p>{searchError}</p></div></div>}
     {statuses.length > 0 && <div className="provider-report">{statuses.map((status) => <span className={status.ok ? "ok" : "failed"} key={status.pluginId} title={status.error}><i/>{status.pluginName}<small>{status.ok ? `${status.resultCount} found · ${status.durationMs} ms` : "unavailable"}</small></span>)}</div>}
@@ -185,16 +201,40 @@ function Discover({ plugins, run }: { plugins: Plugin[]; run: (op: () => Promise
 
 function Library({ dashboard, plugins, run }: { dashboard: Dashboard; plugins: Plugin[]; run: (op: () => Promise<unknown>, msg: string) => Promise<void> }) {
   const [filter, setFilter] = useState(""); const [selectedId, setSelectedId] = useState<string | null>(null); const [adding, setAdding] = useState(false);
+  const [discovering, setDiscovering] = useState(() => new URLSearchParams(window.location.search).get("discover") === "1");
   const needle = filter.trim().toLowerCase();
   const people = dashboard.performers.filter((person) => [person.name, ...person.aliases].some((value) => value.toLowerCase().includes(needle)));
   const selected = dashboard.performers.find((person) => person.id === selectedId);
+  useEffect(() => {
+    const openDiscovery = () => setDiscovering(true);
+    const syncDiscoveryWithLocation = () => setDiscovering(new URLSearchParams(window.location.search).get("discover") === "1");
+    window.addEventListener("easyx:refresh-performers", openDiscovery);
+    window.addEventListener("popstate", syncDiscoveryWithLocation);
+    return () => {
+      window.removeEventListener("easyx:refresh-performers", openDiscovery);
+      window.removeEventListener("popstate", syncDiscoveryWithLocation);
+    };
+  }, []);
+  const closeDiscovery = () => {
+    setDiscovering(false);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("discover");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  };
+  useEffect(() => {
+    if (!discovering) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") closeDiscovery(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [discovering]);
   return <>
-    <div className="performer-intro"><div><p>PERFORMER DIRECTORY</p><h2>People and profiles</h2><span>Manage identities, images, URLs, plugin ownership, and local media from one place.</span></div><div className="performer-intro-actions"><a className="primary" href="/discover"><Search size={16}/>Find a performer</a><button className="secondary" onClick={() => setAdding(true)}><Plus size={16}/>Add manually</button></div></div>
+    <div className="performer-intro"><div><p>PERFORMER DIRECTORY</p><h2>People and profiles</h2><span>Manage identities, images, URLs, plugin ownership, and local media from one place.</span></div><div className="performer-intro-actions"><button className="primary" onClick={() => setDiscovering(true)}><Search size={16}/>Find a performer</button><button className="secondary" onClick={() => setAdding(true)}><Plus size={16}/>Add manually</button></div></div>
     <div className="performer-toolbar"><div className="mini-search"><Search/><input aria-label="Search performers" placeholder="Search names or aliases…" value={filter} onChange={(event) => setFilter(event.target.value)}/></div><span><strong>{people.length}</strong> performer{people.length === 1 ? "" : "s"}</span></div>
     {people.length ? <div className="people-grid">{people.map((person) => {
       const sources = dashboard.sources.filter((source) => source.performerId === person.id); const items = dashboard.items.filter((item) => item.performerId === person.id);
       return <article className="person-card" key={person.id}><button className="cover cover-button" onClick={() => setSelectedId(person.id)} aria-label={`Manage ${person.name}`}><PerformerImage src={person.imageUrl} alt={person.name}/><span className="file-count">{items.filter((item) => item.status === "completed").length} files</span></button><div className="person-card-copy"><div className="person-card-title"><div><h3>{person.name}</h3><p>{person.aliases.slice(0, 3).join(" · ") || "No aliases"}</p></div><span>{sources.length} URL{sources.length === 1 ? "" : "s"}</span></div><div className="source-row">{sources.slice(0, 3).map((source) => <span key={source.id}>{source.domain}</span>)}{sources.length > 3 && <span>+{sources.length - 3}</span>}</div><button className="secondary wide" onClick={() => setSelectedId(person.id)}><Settings size={15}/>Manage performer</button></div></article>;
-    })}</div> : <Empty icon={Users} title={needle ? "No performers match" : "Your performer directory is empty"} text={needle ? "Try another name or alias." : "Add someone manually or use Discover to import a performer from an enabled plugin."}/>}
+    })}</div> : <Empty icon={Users} title={needle ? "No performers match" : "Your performer directory is empty"} text={needle ? "Try another name or alias." : "Add someone manually or use Find a performer to import someone from an enabled plugin."}/>}
+    {discovering && <div className="modal-backdrop performer-discovery-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeDiscovery()}><div className="modal performer-discovery-modal" role="dialog" aria-modal="true" aria-label="Find a performer"><div className="modal-head performer-discovery-head"><div><p>PERFORMER SEARCH</p><h2>Find a performer</h2></div><button className="icon-button" aria-label="Close performer search" onClick={closeDiscovery}><X/></button></div><Discover plugins={plugins} run={run}/></div></div>}
     {adding && <PerformerForm close={() => setAdding(false)} run={run}/>}
     {selected && <PerformerManager performer={selected} sources={dashboard.sources.filter((source) => source.performerId === selected.id)} items={dashboard.items.filter((item) => item.performerId === selected.id)} plugins={plugins} close={() => setSelectedId(null)} run={run}/>}
   </>;
@@ -468,12 +508,35 @@ function PluginConfig({ plugin, installing, close, run }: { plugin: Plugin; inst
 
 function SettingsPage({ settings, run, setNotice }: { settings: Record<string, any>; run: (op: () => Promise<unknown>, msg: string) => Promise<void>; setNotice: (text: string) => void }) {
   const [values, setValues] = useState(settings);
-  return <><div className="settings-layout"><section className="panel"><div className="panel-head"><div><p>AUTOMATION</p><h3>Scraping and downloads</h3></div></div><div className="form-stack"><label><span>Default periodic scrape interval (minutes)</span><input type="number" min="5" value={values.defaultScrapeIntervalMinutes ?? 360} onChange={(e) => setValues({ ...values, defaultScrapeIntervalMinutes: Number(e.target.value) })}/><small>Fallback for plugins that do not publish a recommended schedule. Each performer URL can override it.</small></label><label><span>Default live check interval (seconds)</span><input type="number" min="5" max="3600" value={values.defaultLiveIntervalSeconds ?? 10} onChange={(e) => setValues({ ...values, defaultLiveIntervalSeconds: Number(e.target.value) })}/><small>Reserved for live-aware plugins. A plugin can enforce a safer minimum interval.</small></label><label><span>Maximum concurrent downloads</span><input type="number" min="1" max="8" value={values.maxConcurrentDownloads ?? 2} onChange={(e) => setValues({ ...values, maxConcurrentDownloads: Number(e.target.value) })}/><small>Keep this low on slower storage or connections.</small></label><label className="toggle-row"><span><b>Automatically queue discovered media</b><small>New items from every source are queued without review.</small></span><input type="checkbox" checked={!!values.autoQueueDiscovered} onChange={(e) => setValues({ ...values, autoQueueDiscovered: e.target.checked })}/></label><label><span>Retention period (days)</span><input type="number" min="0" value={values.retentionDays ?? 0} onChange={(e) => setValues({ ...values, retentionDays: Number(e.target.value) })}/><small>Reserved for retention policies. Use 0 to keep files indefinitely.</small></label></div><button className="primary" onClick={() => void run(() => api("/api/settings", { method: "PUT", body: JSON.stringify({ defaultScrapeIntervalMinutes: values.defaultScrapeIntervalMinutes, defaultLiveIntervalSeconds: values.defaultLiveIntervalSeconds, maxConcurrentDownloads: values.maxConcurrentDownloads, autoQueueDiscovered: values.autoQueueDiscovered, retentionDays: values.retentionDays }) }), "Settings saved")}><Check size={16}/>Save changes</button></section><section className="panel compact"><div className="panel-head"><div><p>STORAGE</p><h3>Media volume</h3></div></div><div className="path-box"><FolderOpen/><code>{settings.mediaRoot}</code></div><p className="muted">Files are organized as <code>Performer / source-domain / filename</code>. Mount this path into media managers that should index completed downloads.</p></section></div><div className="library-mode embedded-subtitle-settings"><SubtitleSettingsPage setNotice={setNotice}/></div></>;
+  const [category, setCategory] = useState<"automation" | "storage" | "subtitles">("automation");
+  const categories = [
+    { key: "automation", label: "Automation", description: "Discovery and downloads", icon: Gauge },
+    { key: "storage", label: "Storage", description: "Media location", icon: HardDrive },
+    { key: "subtitles", label: "Subtitles", description: "Local transcription", icon: Captions },
+  ] as const;
+  const saveAutomation = () => void run(() => api("/api/settings", { method: "PUT", body: JSON.stringify({ defaultScrapeIntervalMinutes: values.defaultScrapeIntervalMinutes, defaultLiveIntervalSeconds: values.defaultLiveIntervalSeconds, maxConcurrentDownloads: values.maxConcurrentDownloads, autoQueueDiscovered: values.autoQueueDiscovered, retentionDays: values.retentionDays }) }), "Settings saved");
+  return <section className="categorized-settings">
+    <div className="settings-page-heading"><p>APPLICATION SETTINGS</p><h2>Settings</h2><span>Configure each part of Open EasyX from its own category.</span></div>
+    <div className="categorized-settings-layout">
+      <nav className="settings-category-menu" aria-label="Settings categories"><p>CATEGORIES</p>{categories.map(({ key, label, description, icon: Icon }) => <button key={key} className={category === key ? "active" : ""} aria-pressed={category === key} onClick={() => setCategory(key)}><Icon/><span><b>{label}</b><small>{description}</small></span><ChevronRight/></button>)}</nav>
+      <div className="settings-category-content">
+        {category === "automation" && <section className="panel"><div className="panel-head"><div><p>AUTOMATION</p><h3>Scraping and downloads</h3></div></div><div className="form-stack"><label><span>Default periodic scrape interval (minutes)</span><input type="number" min="5" value={values.defaultScrapeIntervalMinutes ?? 360} onChange={(e) => setValues({ ...values, defaultScrapeIntervalMinutes: Number(e.target.value) })}/><small>Fallback for plugins that do not publish a recommended schedule. Each performer URL can override it.</small></label><label><span>Default live check interval (seconds)</span><input type="number" min="5" max="3600" value={values.defaultLiveIntervalSeconds ?? 10} onChange={(e) => setValues({ ...values, defaultLiveIntervalSeconds: Number(e.target.value) })}/><small>Reserved for live-aware plugins. A plugin can enforce a safer minimum interval.</small></label><label><span>Maximum concurrent downloads</span><input type="number" min="1" max="8" value={values.maxConcurrentDownloads ?? 2} onChange={(e) => setValues({ ...values, maxConcurrentDownloads: Number(e.target.value) })}/><small>Keep this low on slower storage or connections.</small></label><label className="toggle-row"><span><b>Automatically queue discovered media</b><small>New items from every source are queued without review.</small></span><input type="checkbox" checked={!!values.autoQueueDiscovered} onChange={(e) => setValues({ ...values, autoQueueDiscovered: e.target.checked })}/></label><label><span>Retention period (days)</span><input type="number" min="0" value={values.retentionDays ?? 0} onChange={(e) => setValues({ ...values, retentionDays: Number(e.target.value) })}/><small>Reserved for retention policies. Use 0 to keep files indefinitely.</small></label></div><button className="primary" onClick={saveAutomation}><Check size={16}/>Save changes</button></section>}
+        {category === "storage" && <section className="panel"><div className="panel-head"><div><p>STORAGE</p><h3>Media volume</h3></div></div><div className="path-box"><FolderOpen/><code>{settings.mediaRoot}</code></div><p className="muted">Files are organized as <code>Performer / source-domain / filename</code>. Mount this path into media managers that should index completed downloads.</p></section>}
+        {category === "subtitles" && <div className="library-mode embedded-subtitle-settings"><SubtitleSettingsPage setNotice={setNotice} embedded/></div>}
+      </div>
+    </div>
+  </section>;
 }
 
 function ItemList({ items, performers }: { items: Item[]; performers: Performer[] }) { return <div className="item-list">{items.map((item) => <div key={item.id}><span className={`media-icon ${item.mediaType}`}><Download/></span><div><strong>{item.title || item.id}</strong><small>{performers.find((p) => p.id === item.performerId)?.name ?? "Unknown performer"}</small></div><span className={`badge ${item.status}`}>{item.status}</span><time>{timeAgo(item.updatedAt)}</time></div>)}</div>; }
 function Empty({ icon: Icon, title, text, action, onAction }: { icon: any; title: string; text: string; action?: string; onAction?: () => void }) { return <div className="empty"><span><Icon/></span><h3>{title}</h3><p>{text}</p>{action && <button className="secondary" onClick={onAction}>{action}</button>}</div>; }
 
+const normalizedEntryPath = window.location.pathname.length > 1 ? window.location.pathname.replace(/\/+$/, "") : window.location.pathname;
 const entryPath = canonicalEntryPath(window.location.pathname);
-if (entryPath !== window.location.pathname) window.history.replaceState(window.history.state, "", `${entryPath}${window.location.search}${window.location.hash}`);
+if (entryPath !== window.location.pathname) {
+  const params = new URLSearchParams(window.location.search);
+  if (normalizedEntryPath === "/discover") params.set("discover", "1");
+  const search = params.toString();
+  window.history.replaceState(window.history.state, "", `${entryPath}${search ? `?${search}` : ""}${window.location.hash}`);
+}
 createRoot(document.getElementById("root")!).render(<React.StrictMode>{isLibraryRoute(window.location.pathname) ? <LibraryApp/> : <App/>}</React.StrictMode>);

@@ -1,0 +1,65 @@
+.categorized-settings { max-width: 1180px; margin: 0 auto; }
+
+.settings-page-heading { margin: 4px 0 24px; }
+.settings-page-heading p { margin: 0 0 7px; color: #686873; font-size: 9px; font-weight: 800; letter-spacing: .2em; }
+.settings-page-heading h2 { margin: 0 0 7px; font: 800 30px/1.1 'Manrope', sans-serif; letter-spacing: -.03em; }
+.settings-page-heading span { color: #797984; font-size: 11px; }
+
+.categorized-settings-layout {
+  display: grid;
+  grid-template-columns: 225px minmax(0, 1fr);
+  align-items: start;
+  gap: 18px;
+}
+
+.settings-category-menu {
+  position: sticky;
+  top: 110px;
+  padding: 9px;
+  background: #121216;
+  border: 1px solid #27272d;
+  border-radius: 14px;
+}
+
+.settings-category-menu > p { margin: 7px 9px 10px; color: #5f5f69; font-size: 8px; font-weight: 800; letter-spacing: .16em; }
+.settings-category-menu button {
+  width: 100%;
+  min-height: 62px;
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #85858f;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.settings-category-menu button:hover { color: #ddd; background: #18181d; }
+.settings-category-menu button.active { color: #fff; background: rgba(255, 64, 87, .08); border-color: rgba(255, 64, 87, .22); }
+.settings-category-menu button > svg:first-child { width: 19px; flex: none; color: #ff6c7f; }
+.settings-category-menu button > svg:last-child { width: 15px; flex: none; margin-left: auto; color: #696974; }
+.settings-category-menu span,.settings-category-menu b,.settings-category-menu small { display: block; }
+.settings-category-menu span { min-width: 0; }
+.settings-category-menu b { font-size: 11px; }
+.settings-category-menu small { margin-top: 4px; color: #72727c; font-size: 8px; }
+
+.settings-category-content { min-width: 0; }
+.settings-category-content > .panel { min-height: 310px; }
+.embedded-subtitle-settings { min-height: 0; background: transparent; }
+.embedded-subtitle-settings .settings-page { max-width: none; }
+.embedded-subtitle-settings .settings-panel { min-width: 0; }
+
+@media (max-width: 800px) {
+  .categorized-settings-layout { grid-template-columns: 1fr; }
+  .settings-category-menu { position: static; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 7px; }
+  .settings-category-menu > p { display: none; }
+  .settings-category-menu button { min-height: 54px; }
+  .settings-category-menu button > svg:last-child { display: none; }
+}
+
+@media (max-width: 560px) {
+  .settings-page-heading h2 { font-size: 25px; }
+  .settings-category-menu { grid-template-columns: 1fr; }
+}

@@ -1,6 +1,5 @@
 export const pageRoutes = {
   dashboard: "/overview",
-  discover: "/discover",
   library: "/performers",
   activity: "/activity",
   logs: "/logs",
@@ -12,6 +11,7 @@ export type PageKey = keyof typeof pageRoutes;
 
 export function canonicalEntryPath(pathname: string): string {
   const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  if (normalized === "/discover") return "/performers";
   return normalized === "/" || normalized === "/overview" ? "/media" : pathname;
 }
 

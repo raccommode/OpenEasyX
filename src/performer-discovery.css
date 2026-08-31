@@ -1,0 +1,50 @@
+.performer-discovery-backdrop {
+  z-index: 70;
+  padding: 24px;
+}
+
+.performer-discovery-modal {
+  width: min(1040px, 100%);
+  max-height: min(860px, 92vh);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.performer-discovery-head {
+  flex: none;
+  align-items: center;
+  padding: 20px 22px;
+  border-bottom: 1px solid #29292f;
+}
+
+.performer-discovery-head .icon-button {
+  flex: none;
+}
+
+.performer-discovery-modal .discover-page {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 22px 24px;
+}
+
+.performer-discovery-modal .search-stage {
+  padding-top: 30px;
+}
+
+@media (max-width: 720px) {
+  .performer-discovery-backdrop {
+    padding: 10px;
+  }
+
+  .performer-discovery-modal {
+    max-height: calc(100dvh - 20px);
+  }
+
+  .performer-discovery-head,
+  .performer-discovery-modal .discover-page {
+    padding-left: 15px;
+    padding-right: 15px;
+  }
+}

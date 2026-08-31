@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Menu, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
 import { UnifiedNavigation } from "./UnifiedNavigation";
 
-export function AppChrome({ title, scanningLibrary = false, onScanLibrary, children }: { title: string; scanningLibrary?: boolean; onScanLibrary: () => void; children: ReactNode }) {
+export function AppChrome({ title, scanningLibrary = false, onScanLibrary, onRefreshPerformers, children }: { title: string; scanningLibrary?: boolean; onScanLibrary: () => void; onRefreshPerformers: () => void; children: ReactNode }) {
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const pathname = typeof window === "undefined" ? "/media" : window.location.pathname;
 
@@ -26,7 +26,7 @@ export function AppChrome({ title, scanningLibrary = false, onScanLibrary, child
         <div className="easyx-header-title"><p>OPEN EASYX</p><h1>{title}</h1></div>
         <div className="easyx-header-actions">
           <button className="easyx-scan-button" disabled={scanningLibrary} onClick={onScanLibrary}><RefreshCw className={scanningLibrary ? "spin" : ""} size={17}/><span>Scan library</span></button>
-          <a className="primary" href="/discover"><Search size={17}/><span>Scan discover</span></a>
+          <button className="primary" onClick={onRefreshPerformers}><Search size={17}/><span>Refresh performers</span></button>
         </div>
       </header>
       {children}

@@ -10,7 +10,7 @@ describe("UnifiedNavigation", () => {
     expect(html).not.toContain("Overview");
     expect(html).toContain("Library");
     expect(html).toContain("Live Cam");
-    expect(html).toContain("Discover");
+    expect(html).not.toContain("Discover");
     expect(html).toContain("Plugins");
     expect(html).toContain("Settings");
     expect(html).not.toContain("Media &amp; Live");

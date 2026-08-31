@@ -3,7 +3,7 @@ import { canonicalEntryPath, pageFromPath, pagePath } from "./routes.js";
 
 describe("application routes", () => {
   it.each([
-    ["dashboard", "/overview"], ["discover", "/discover"], ["library", "/performers"],
+    ["dashboard", "/overview"], ["library", "/performers"],
     ["activity", "/activity"], ["logs", "/logs"], ["plugins", "/plugins"], ["settings", "/settings"],
   ] as const)("maps %s to %s", (page, path) => {
     expect(pagePath(page)).toBe(path);
@@ -20,6 +20,7 @@ describe("application routes", () => {
     expect(canonicalEntryPath("/")).toBe("/media");
     expect(canonicalEntryPath("/overview")).toBe("/media");
     expect(canonicalEntryPath("/overview/")).toBe("/media");
+    expect(canonicalEntryPath("/discover")).toBe("/performers");
     expect(canonicalEntryPath("/plugins")).toBe("/plugins");
   });
 });
