@@ -186,6 +186,13 @@ export function LibraryApp() {
     try { const result = await api<{ indexed: number }>("/api/scan", { method: "POST" }); await refresh(); setNotice(`Library refreshed — ${result.indexed} media files indexed.`); }
     catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   };
+  const refreshAllPerformers = async () => {
+    try {
+      const result = await api<{ refreshed: number }>("/api/performers/refresh", { method: "POST" });
+      await refresh();
+      setNotice(`${result.refreshed} performer${result.refreshed === 1 ? "" : "s"} refreshed.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+  };
   const updateFavorite = async (media: Media, favorite: boolean) => {
     try {
       const updated = await api<Media>(`/api/media/${media.id}/favorite`, { method: "PUT", body: JSON.stringify({ favorite }) });
@@ -221,7 +228,7 @@ export function LibraryApp() {
   useEffect(() => { document.title = selected ? `${selected.media.title} · Open EasyX` : `${nav.find(([key]) => key === page)?.[1]} · Open EasyX`; }, [page, selected?.media.id, routeLiveCam?.camId]);
 
   if (!dashboard) return <div className="boot"><span className="logo">EX</span><LoaderCircle className="spin"/><p>Opening your private library…</p></div>;
-  return <div className="library-mode"><AppChrome title={selected || routeLiveCam ? "Now playing" : nav.find(([key]) => key === page)?.[1] ?? "Home"} scanningLibrary={dashboard.scan.running} onScanLibrary={() => void rescan()} onRefreshPerformers={() => window.location.assign("/performers?discover=1")}>
+  return <div className="library-mode"><AppChrome title={selected || routeLiveCam ? "Now playing" : nav.find(([key]) => key === page)?.[1] ?? "Home"} scanningLibrary={dashboard.scan.running} onScanLibrary={() => void rescan()} onRefreshPerformers={() => void refreshAllPerformers()}>
       {routeMedia ? selected ? <PlayerViewer media={selected.media} context={selected.context} autoStart={selected.autoStart} close={() => { const target = location.state?.easyx?.from ?? "/library"; setSelected(null); navigate(target, { replace: true }); void refresh(); }} favorite={updateFavorite} advance={(media) => { const from = location.state?.easyx?.from ?? "/library"; setSelected({ media, context: selected.context, autoStart: true }); navigate(mediaUrl(media), { state: playbackLocationState(from, selected.context, true) }); }} setNotice={setNotice}/> : <div className="loading"><LoaderCircle className="spin"/>Loading media…</div> : routeLiveCam ? <LiveCamViewer providerId={routeLiveCam.providerId} camId={routeLiveCam.camId} close={() => navigate(location.state?.easyx?.from ?? "/live-cam", { replace: true })}/> : <div className="content">
         {page === "home" && <Home dashboard={dashboard} open={openMedia} go={go} favorite={updateFavorite}/>}
         {page === "live-cam" && <LiveCamPage preset={liveCamPreset} open={openLiveCam} route={(preset) => navigate(liveCamListUrl(preset), { replace: true })}/>}

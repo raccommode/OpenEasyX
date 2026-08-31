@@ -121,6 +121,16 @@ function App() {
     finally { setRefreshing(false); }
   };
 
+  const refreshAllPerformers = async () => {
+    try {
+      const result = await api<{ refreshed: number }>("/api/performers/refresh", { method: "POST" });
+      await refresh();
+      setNotice({ kind: "ok", text: `${result.refreshed} performer${result.refreshed === 1 ? "" : "s"} refreshed.` });
+    } catch (error) {
+      setNotice({ kind: "error", text: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
   const openPerformerDiscovery = () => {
     const target = "/performers?discover=1";
     if (`${window.location.pathname}${window.location.search}` !== target) window.history.pushState({}, "", target);
@@ -133,7 +143,7 @@ function App() {
 
   const title = nav.find(([key]) => key === page)?.[1] ?? "Home";
   document.title = `${title} · Open EasyX`;
-  return <AppChrome title={title} scanningLibrary={refreshing} onScanLibrary={() => void manualRefresh()} onRefreshPerformers={openPerformerDiscovery}>
+  return <AppChrome title={title} scanningLibrary={refreshing} onScanLibrary={() => void manualRefresh()} onRefreshPerformers={() => void refreshAllPerformers()}>
     <div className="content">
         {page === "dashboard" && <Overview dashboard={dashboard} plugins={plugins} go={navigate} discover={openPerformerDiscovery}/>}
         {page === "library" && <Library dashboard={dashboard} plugins={plugins} run={run}/>}

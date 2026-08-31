@@ -45,6 +45,7 @@ queue.start();
 
 const app = Fastify({ loggerInstance: appLogger, bodyLimit: 8 * 1024 * 1024 });
 const discoveryStatus = { running: false, completed: 0, total: 0, progress: 0, query: "", error: "" };
+const performerRefreshStatus = { running: false, completed: 0, total: 0, progress: 0, error: "" };
 
 function refreshLiveCamFavorites(providerId?: string) {
   if (providerId && !plugins.get(providerId, false).listFollowedLiveCams) return;
@@ -390,8 +391,8 @@ app.patch<{ Params: { id: string }; Body: unknown }>("/api/performers/:id", asyn
   renamePerformerDirectory(mediaDir, current.name, performer.name);
   return performer;
 });
-app.post<{ Params: { id: string } }>("/api/performers/:id/refresh", async (request) => {
-  let performer = db.getPerformer(request.params.id);
+async function refreshPerformer(performerId: string) {
+  let performer = db.getPerformer(performerId);
   if (!performer) throw Object.assign(new Error("Performer not found"), { statusCode: 404 });
   const providers: Array<{ pluginId: string; ok: boolean; error?: string }> = [];
   const sources = [];
@@ -423,6 +424,31 @@ app.post<{ Params: { id: string } }>("/api/performers/:id/refresh", async (reque
   }
   ensurePerformerDirectory(mediaDir, performer.name);
   return { performer, sources, providers };
+}
+
+app.get("/api/performers/refresh/status", async () => performerRefreshStatus);
+app.post("/api/performers/refresh", async () => {
+  if (performerRefreshStatus.running) throw Object.assign(new Error("Performer refresh is already running"), { statusCode: 409 });
+  const performers = db.listPerformers();
+  Object.assign(performerRefreshStatus, { running: true, completed: 0, total: performers.length, progress: 0, error: "" });
+  const results = [];
+  try {
+    for (const performer of performers) {
+      results.push(await refreshPerformer(performer.id));
+      performerRefreshStatus.completed += 1;
+      performerRefreshStatus.progress = performers.length ? Math.round(performerRefreshStatus.completed / performers.length * 100) : 100;
+    }
+    performerRefreshStatus.progress = 100;
+    return { refreshed: results.length, results };
+  } catch (error) {
+    performerRefreshStatus.error = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    performerRefreshStatus.running = false;
+  }
+});
+app.post<{ Params: { id: string } }>("/api/performers/:id/refresh", async (request) => {
+  return refreshPerformer(request.params.id);
 });
 app.post<{ Params: { id: string } }>("/api/performers/:id/discover-sources", async (request) => {
   const performer = db.getPerformer(request.params.id);

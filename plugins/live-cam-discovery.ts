@@ -93,17 +93,23 @@ export function bongacamsLiveCams(html: string): LiveCam[] {
   }).filter((cam): cam is LiveCam => Boolean(cam));
 }
 
-export function cam4LiveCams(html: string): LiveCam[] {
+function cam4Cams(html: string, includeOffline: boolean): LiveCam[] {
   const cams: LiveCam[] = [];
   for (const match of html.matchAll(/"BroadcastItem:\d+":/g)) {
     const raw = balancedObject(html, (match.index ?? 0) + match[0].length); if (!raw) continue;
     let item: Record<string, unknown> | undefined; try { item = record(JSON.parse(raw)); } catch { continue; }
-    const username = text(item?.username); const show = String(item?.showType ?? "PUBLIC_SHOW").toUpperCase(); if (!item || !username || show !== "PUBLIC_SHOW") continue;
+    const username = text(item?.username); const show = String(item?.showType ?? "").toUpperCase(); if (!item || !username || (!includeOffline && show !== "PUBLIC_SHOW")) continue;
     const preview = record(item.preview); let thumbnailUrl = text(preview?.poster) ?? text(item.profileImageURL); if (thumbnailUrl) thumbnailUrl = thumbnailUrl.replaceAll("\\u002F", "/");
     const gender = normalizedGender(item.broadcastType); const tags = tagList([gender, ...[...raw.matchAll(/"__ref":"BroadcastTag:([^"]+)"/g)].map((tag) => tag[1])]);
-    cams.push({ id: username.toLowerCase(), username, title: username, pageUrl: `https://www.cam4.com/${encodeURIComponent(username)}`, thumbnailUrl, viewers: whole(item.viewers) ?? 0, gender, tags });
+    const online = show === "PUBLIC_SHOW";
+    cams.push({ id: username.toLowerCase(), username, title: username, pageUrl: `https://www.cam4.com/${encodeURIComponent(username)}`, thumbnailUrl, viewers: online ? whole(item.viewers) ?? 0 : 0, gender, tags, ...(includeOffline ? { online } : {}) });
   }
   return dedupe(cams);
+}
+
+export function cam4LiveCams(html: string): LiveCam[] { return cam4Cams(html, false); }
+export function cam4FavoriteCams(html: string): Array<LiveCam & { online: boolean }> {
+  return cam4Cams(html, true).map((cam) => ({ ...cam, online: cam.online === true }));
 }
 
 export function camsLiveCams(html: string): LiveCam[] {
@@ -191,14 +197,22 @@ function stripchatModels(value: unknown): Record<string, unknown>[] {
   } else if (Array.isArray(value)) for (const child of value) result.push(...stripchatModels(child));
   return result;
 }
-export function stripchatLiveCams(payload: unknown): LiveCam[] {
+function stripchatCams(payload: unknown, includeOffline: boolean): LiveCam[] {
   return dedupe(stripchatModels(payload).map((item): LiveCam | undefined => {
-    const username = text(item.username ?? item.login); if (!username) return undefined; const status = String(item.status ?? "public").toLowerCase(); if (status !== "public" && item.isOnline !== true && item.isLive !== true) return undefined;
+    const username = text(item.username ?? item.login); if (!username) return undefined; const status = String(item.status ?? "").toLowerCase(); const online = item.isOnline === true || item.isLive === true || status === "public"; if (!includeOffline && !online) return undefined;
     const id = text(item.streamName) ?? (whole(item.id) !== undefined ? String(whole(item.id)) : undefined); const stamp = item.snapshotTimestamp !== undefined ? String(item.snapshotTimestamp) : item.verifiedSnapshotTimestamp !== undefined ? String(item.verifiedSnapshotTimestamp) : undefined; const gender = normalizedGender(item.broadcastGender ?? item.gender ?? item.genderGroup);
     let thumbnailUrl = id && stamp ? `https://img.doppiocdn.net/snapshot/${id}/${stamp}` : text(item.previewUrlThumbBig ?? item.previewUrl ?? item.avatarUrl);
     if (thumbnailUrl?.startsWith("/")) thumbnailUrl = `https://img.doppiocdn.net${thumbnailUrl}`;
-    return { id: username.toLowerCase(), username, title: text(item.groupShowTopic ?? item.name) ?? username, pageUrl: `https://stripchat.com/${encodeURIComponent(username)}`, thumbnailUrl, viewers: whole(item.viewersCount ?? item.viewers ?? item.usersCount) ?? 0, age: whole(item.age), gender, tags: tagList([gender, item.country, item.isHd ? "hd" : "", item.isVr ? "vr" : "", ...(Array.isArray(item.tags) ? item.tags : [])]) } satisfies LiveCam;
+    return { id: username.toLowerCase(), username, title: text(item.groupShowTopic ?? item.name) ?? username, pageUrl: `https://stripchat.com/${encodeURIComponent(username)}`, thumbnailUrl, viewers: online ? whole(item.viewersCount ?? item.viewers ?? item.usersCount) ?? 0 : 0, age: whole(item.age), gender, tags: tagList([gender, item.country, item.isHd ? "hd" : "", item.isVr ? "vr" : "", ...(Array.isArray(item.tags) ? item.tags : [])]), ...(includeOffline ? { online } : {}) } satisfies LiveCam;
   }).filter((cam): cam is LiveCam => Boolean(cam)));
+}
+
+export function stripchatLiveCams(payload: unknown): LiveCam[] { return stripchatCams(payload, false); }
+export function stripchatFavoriteCams(payload: unknown, online?: boolean): Array<LiveCam & { online: boolean }> {
+  return stripchatCams(payload, true).map((cam) => {
+    const actualOnline = online ?? cam.online === true;
+    return { ...cam, viewers: actualOnline ? cam.viewers : 0, online: actualOnline };
+  });
 }
 
 export type StripchatStreamConfig = { modelId: string; domains: string[]; playerScriptUrl?: string };

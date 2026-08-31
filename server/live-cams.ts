@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyReply } from "fastify";
-import type { LiveCam, LiveCamQuery, LiveStream } from "../packages/plugin-sdk/index.js";
+import type { LiveCam, LiveCamFavoriteSnapshot, LiveCamQuery, LiveStream } from "../packages/plugin-sdk/index.js";
 import type { Database, LiveCamFavorite } from "./database.js";
 import { PluginManager, pluginMatchesSource } from "./plugin-manager.js";
 
@@ -30,6 +30,7 @@ export class LiveCamService {
   private proxyReverse = new Map<string, string>();
   private recentCams = new Map<string, { cam: PublicLiveCam; expiresAt: number }>();
   private favoriteSyncs = new Map<string, Promise<LiveCamFavoriteSyncResult>>();
+  private favoriteSnapshots = new Map<string, { snapshot: LiveCamFavoriteSnapshot; expiresAt: number }>();
 
   constructor(private readonly db: Database, private readonly plugins: PluginManager, private readonly request: typeof fetch = fetch) {}
 
@@ -46,16 +47,34 @@ export class LiveCamService {
       let total = 0;
       if (plugin.listLiveCams) {
         if (favoritesOnly) {
-          const favorites = this.db.listLiveCamFavorites(entry.manifest.id);
-          const discovered = await Promise.all(favorites.map(async (favorite) => {
-            const result = await plugin.listLiveCams!(this.plugins.context(entry.manifest.id, signal), { page: 1, pageSize: 8, search: favorite.username });
-            const needle = favorite.username.toLowerCase();
-            return result.cams.find((cam) => cam.username.toLowerCase() === needle || cam.id.toLowerCase() === favorite.camId.toLowerCase());
-          }));
-          const unique = new Map(discovered.filter(Boolean).map((cam) => [cam!.username.toLowerCase(), cam!]));
-          const online = [...unique.values()].sort((left, right) => whole(right.viewers) - whole(left.viewers));
-          total = online.length;
-          cams = online.slice((query.page - 1) * query.pageSize, query.page * query.pageSize);
+          let favorites: LiveCam[];
+          if (plugin.listFollowedLiveCams) {
+            const cached = this.favoriteSnapshots.get(entry.manifest.id);
+            const snapshot = cached && cached.expiresAt > Date.now()
+              ? cached.snapshot
+              : await plugin.listFollowedLiveCams(this.plugins.context(entry.manifest.id, signal));
+            if (!snapshot.authoritative) throw new Error(snapshot.skippedReason ?? `${entry.manifest.name} did not return a complete followed list`);
+            this.favoriteSnapshots.set(entry.manifest.id, { snapshot, expiresAt: Date.now() + 30_000 });
+            this.reconcileFavorites(entry.manifest.id, snapshot.cams);
+            favorites = snapshot.cams.filter((cam) => {
+              if (query.search) {
+                const needle = query.search.toLowerCase();
+                if (!`${cam.username} ${cam.title ?? ""} ${(cam.tags ?? []).join(" ")}`.toLowerCase().includes(needle)) return false;
+              }
+              return !query.gender || cam.gender === query.gender || cam.gender === query.gender[0];
+            }).sort((left, right) => Number(right.online) - Number(left.online) || whole(right.viewers) - whole(left.viewers) || left.username.localeCompare(right.username));
+          } else {
+            const savedFavorites = this.db.listLiveCamFavorites(entry.manifest.id);
+            const discovered = await Promise.all(savedFavorites.map(async (favorite) => {
+              const result = await plugin.listLiveCams!(this.plugins.context(entry.manifest.id, signal), { page: 1, pageSize: 8, search: favorite.username });
+              const needle = favorite.username.toLowerCase();
+              return result.cams.find((cam) => cam.username.toLowerCase() === needle || cam.id.toLowerCase() === favorite.camId.toLowerCase());
+            }));
+            const unique = new Map(discovered.filter(Boolean).map((cam) => [cam!.username.toLowerCase(), cam!]));
+            favorites = [...unique.values()].map((cam) => ({ ...cam, online: true })).sort((left, right) => whole(right.viewers) - whole(left.viewers));
+          }
+          total = favorites.length;
+          cams = favorites.slice((query.page - 1) * query.pageSize, query.page * query.pageSize);
         } else {
           const result = await plugin.listLiveCams(this.plugins.context(entry.manifest.id, signal), query);
           cams = result.cams.slice(0, query.pageSize);
@@ -177,6 +196,7 @@ export class LiveCamService {
     const remote = plugin.setLiveCamFavorite
       ? await plugin.setLiveCamFavorite(this.plugins.context(providerId), cam, favorite)
       : undefined;
+    this.favoriteSnapshots.delete(providerId);
     const item = this.db.setLiveCamFavorite(providerId, {
       camId: cam.id, username: cam.username, title: cam.title, pageUrl: cam.pageUrl, thumbnailUrl: cam.thumbnailUrl,
     }, favorite);
@@ -209,8 +229,15 @@ export class LiveCamService {
       skippedReason: snapshot.skippedReason ?? "The provider did not return a complete followed list",
     };
 
+    this.favoriteSnapshots.set(providerId, { snapshot, expiresAt: Date.now() + 30_000 });
+    return { providerId, ...this.reconcileFavorites(providerId, snapshot.cams), authoritative: true };
+  }
+
+  private reconcileFavorites(providerId: string, cams: LiveCam[]): Pick<LiveCamFavoriteSyncResult, "synced" | "added" | "removed"> {
+    const entry = this.livePlugins(providerId)[0];
+    if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
     const unique = new Map<string, LiveCam>();
-    for (const cam of snapshot.cams) {
+    for (const cam of cams) {
       if (!cam.username.trim() || !cam.id.trim() || !pluginMatchesSource(entry.manifest, cam.pageUrl)) {
         throw new Error(`${entry.manifest.name} returned an invalid followed creator`);
       }
@@ -234,9 +261,9 @@ export class LiveCamService {
       if (cached.cam.providerId === providerId) cached.cam.favorite = unique.has(cached.cam.username.toLowerCase());
     }
     return {
-      providerId, synced: unique.size,
+      synced: unique.size,
       added: [...unique.keys()].filter((key) => !previous.some((favorite) => favorite.username.toLowerCase() === key)).length,
-      removed: previousKeys.size, authoritative: true,
+      removed: previousKeys.size,
     };
   }
 

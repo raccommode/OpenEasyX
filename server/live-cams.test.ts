@@ -59,8 +59,8 @@ describe("Open EasyX live cams", () => {
     plugins.get("test.live").listFollowedLiveCams = async () => ({
       authoritative: true,
       cams: [
-        { id: "alice", username: "alice", pageUrl: "https://live.test/alice" },
-        { id: "bob", username: "bob", pageUrl: "https://live.test/bob" },
+        { id: "alice", username: "alice", pageUrl: "https://live.test/alice", online: true },
+        { id: "bob", username: "bob", pageUrl: "https://live.test/bob", online: false },
       ],
     });
 
@@ -77,6 +77,20 @@ describe("Open EasyX live cams", () => {
     plugins.get("test.live").listFollowedLiveCams = async () => ({ cams: [], authoritative: false, skippedReason: "Session expired" });
     await expect(service.syncFavorites("test.live")).resolves.toMatchObject({ authoritative: false, skippedReason: "Session expired" });
     expect(database.listLiveCamFavorites("test.live").map((item) => item.username)).toEqual(["alice"]);
+  });
+
+  it("uses one followed snapshot to list online favorites without per-creator searches", async () => {
+    const { plugins, service } = await fixture(); plugins.install("test.live");
+    const plugin = plugins.get("test.live");
+    plugin.listLiveCams = async () => { throw new Error("Per-creator search should not run"); };
+    plugin.listFollowedLiveCams = async () => ({ authoritative: true, cams: [
+      { id: "alice", username: "alice", pageUrl: "https://live.test/alice", viewers: 25, online: true },
+      { id: "bob", username: "bob", pageUrl: "https://live.test/bob", viewers: 0, online: false },
+    ] });
+    await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({
+      total: 2, items: [{ username: "alice", favorite: true, online: true }, { username: "bob", favorite: true, online: false }], providers: [{ ok: true, count: 2 }],
+    });
+    expect(service.listFavorites().map((favorite) => favorite.username)).toEqual(["alice", "bob"]);
   });
 
   it("updates the provider account before changing the local favorite", async () => {

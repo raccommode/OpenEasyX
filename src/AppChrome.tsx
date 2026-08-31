@@ -57,7 +57,7 @@ export function AppChrome({ title, scanningLibrary = false, onScanLibrary, onRef
   const [version, setVersion] = useState("...");
   const pathname = typeof window === "undefined" ? "/media" : window.location.pathname;
   const scan = useLiveOperation("/api/scan/status");
-  const performers = useLiveOperation("/api/discover/status");
+  const performers = useLiveOperation("/api/performers/refresh/status");
   const scanRunning = scanningLibrary || scan.running;
   useEffect(() => { void api<{ version: string }>("/api/version").then((result) => setVersion(result.version || "unknown")).catch(() => setVersion("unknown")); }, []);
 

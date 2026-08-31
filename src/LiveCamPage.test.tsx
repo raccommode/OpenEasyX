@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { LiveCamFavoriteButton, LiveCamRecordButton, LiveCamUnavailable, LivePlayer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl, shouldRecoverNativeLiveMediaError } from "./LiveCamPage";
+import { LiveCamCard, LiveCamFavoriteButton, LiveCamRecordButton, LiveCamUnavailable, LivePlayer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl, shouldRecoverNativeLiveMediaError } from "./LiveCamPage";
 
 describe("Live Cam availability", () => {
   it("explains that a live source plugin is needed instead of presenting a broken empty grid", () => {
@@ -34,6 +34,12 @@ describe("Live Cam availability", () => {
   it("offers a persistent creator favorite action", () => {
     const html = renderToStaticMarkup(<LiveCamFavoriteButton cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live", favorite: true }}/>);
     expect(html).toContain("Favorited"); expect(html).toContain('aria-pressed="true"');
+  });
+
+  it("renders offline favorite cams separately without opening the player", () => {
+    const html = renderToStaticMarkup(<LiveCamCard cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live", favorite: true, online: false }} open={() => {}}/>);
+    expect(html).toContain("OFFLINE"); expect(html).toContain('aria-disabled="true"'); expect(html).toContain("Not broadcasting right now");
+    expect(html).not.toContain('href="/live-cam/');
   });
 
   it("recovers Safari media error 4 after a tab suspension without hiding real playback errors", () => {

@@ -6,6 +6,7 @@ import { configuredArgs, runYtDlpJson, testYtDlp, ytDlpDownload, ytDlpLiveStream
 const OFFLINE = ["offline", "not currently broadcasting", "room is currently away", "no videos found", "not live"];
 const FOLLOW_PAGE_SIZE = 90;
 const MAX_FOLLOWED_CAMS = 5_000;
+const verifiedAccountSessions = new Set<string>();
 let liveSearchCache: { key: string; expiresAt: number; cams: LiveCam[] } | undefined;
 
 function text(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
@@ -83,11 +84,24 @@ function strictTotal(value: unknown): number | undefined {
   return undefined;
 }
 
-function followedCam(room: Record<string, unknown>, offline: boolean): LiveCam | undefined {
+async function validateAccountSession(context: PluginContext, cookies: Map<string, string>): Promise<void> {
+  const fingerprint = createHash("sha256").update(cookies.get("sessionid") ?? "").digest("hex");
+  if (verifiedAccountSessions.has(fingerprint)) return;
+  const validation = await context.fetch("https://chaturbate.com/api/ts/chatmessages/pm_users/?offset=0", {
+    headers: accountHeaders(cookies), redirect: "manual", signal: requestSignal(context),
+  });
+  if (validation.status >= 300 && validation.status < 400) throw new Error("The Chaturbate session redirected to login. Reconnect the account.");
+  if (!validation.ok) throw new Error(`The Chaturbate account session could not be verified (HTTP ${validation.status})`);
+  verifiedAccountSessions.add(fingerprint);
+}
+
+function followedCam(room: Record<string, unknown>, offline: boolean): (LiveCam & { online: boolean }) | undefined {
   const cam = chaturbateLiveCam({ ...room, current_show: "public" });
   if (!cam) return undefined;
   const suppliedThumbnail = text(room.img) ?? text(room.thumbnail) ?? text(room.thumbnail_url);
-  return offline && !suppliedThumbnail ? { ...cam, thumbnailUrl: undefined, viewers: 0 } : { ...cam, viewers: offline ? 0 : cam.viewers };
+  return offline && !suppliedThumbnail
+    ? { ...cam, thumbnailUrl: undefined, viewers: 0, online: false }
+    : { ...cam, viewers: offline ? 0 : cam.viewers, online: !offline };
 }
 
 async function followedSnapshot(context: PluginContext): Promise<LiveCamFavoriteSnapshot> {
@@ -96,13 +110,8 @@ async function followedSnapshot(context: PluginContext): Promise<LiveCamFavorite
   catch (error) { return { cams: [], authoritative: false, skippedReason: error instanceof Error ? error.message : String(error) }; }
   if (!cookies) return { cams: [], authoritative: false, skippedReason: "Connect a Chaturbate account to synchronize followed creators." };
 
-  const cams = new Map<string, LiveCam>();
+  const cams = new Map<string, LiveCam & { online: boolean }>();
   try {
-    const validation = await context.fetch("https://chaturbate.com/api/ts/chatmessages/pm_users/?offset=0", {
-      headers: accountHeaders(cookies), redirect: "manual", signal: requestSignal(context),
-    });
-    if (validation.status >= 300 && validation.status < 400) throw new Error("The Chaturbate session redirected to login. Reconnect the account.");
-    if (!validation.ok) throw new Error(`The Chaturbate account session could not be verified (HTTP ${validation.status})`);
     for (const offline of [false, true]) {
       let offset = 0;
       let expectedTotal: number | undefined;
@@ -127,9 +136,7 @@ async function followedSnapshot(context: PluginContext): Promise<LiveCamFavorite
         else if (total !== expectedTotal) throw new Error("The Chaturbate followed list changed during synchronization");
         if (!Array.isArray(value.rooms)) throw new Error("Chaturbate returned an invalid followed room list");
         const rooms = value.rooms;
-        if (rooms.length > FOLLOW_PAGE_SIZE || offset + rooms.length > total || (!rooms.length && offset < total)) {
-          throw new Error("The Chaturbate followed list is incomplete");
-        }
+        if (rooms.length > FOLLOW_PAGE_SIZE) throw new Error("The Chaturbate followed list exceeded its requested page size");
         for (const room of rooms) {
           if (!room || typeof room !== "object" || Array.isArray(room) || (room as Record<string, unknown>).is_following !== true) {
             throw new Error("Chaturbate ignored the followed-only filter");
@@ -142,12 +149,15 @@ async function followedSnapshot(context: PluginContext): Promise<LiveCamFavorite
           if (!cams.has(key)) cams.set(key, cam);
           if (cams.size > MAX_FOLLOWED_CAMS) throw new Error("The Chaturbate followed list exceeded its safety limit");
         }
-        const nextOffset = offset + rooms.length;
-        if (nextOffset === total) break;
-        if (rooms.length < FOLLOW_PAGE_SIZE) throw new Error("The Chaturbate followed list pagination is incomplete");
-        offset = nextOffset;
+        // The offset advances over Chaturbate's raw result window. Some
+        // unavailable/deleted followed rooms count toward total_count but are
+        // omitted from `rooms`, so advancing by rooms.length skips or loops.
+        if (offset + FOLLOW_PAGE_SIZE >= total) break;
+        offset += FOLLOW_PAGE_SIZE;
       }
     }
+    if (cams.size) verifiedAccountSessions.add(createHash("sha256").update(cookies.get("sessionid") ?? "").digest("hex"));
+    else await validateAccountSession(context, cookies);
     return { cams: [...cams.values()], authoritative: true };
   } catch (error) {
     const skippedReason = error instanceof Error ? error.message : String(error);
@@ -248,7 +258,18 @@ export default definePlugin({
       { key: "cookiesFile", label: "Account session", type: "session", cookieDomains: ["chaturbate.com"], help: "Optional. Public rooms normally do not require an account session." },
     ],
   },
-  async testConnection(context) { return testYtDlp(context, "Chaturbate"); },
+  async testConnection(context) {
+    const extractor = await testYtDlp(context, "Chaturbate");
+    if (!extractor.ok || !text(context.config.cookiesFile)) return extractor;
+    try {
+      const cookies = accountCookies(context.config);
+      if (!cookies) return { ok: false, message: "Connect a Chaturbate account in the integrated browser." };
+      await validateAccountSession(context, cookies);
+      return { ok: true, message: `${extractor.message} Chaturbate account session verified.` };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  },
   async listMedia(context, source) {
     try {
       const profileUrl = normalizedChaturbateUrl(source.profileUrl);

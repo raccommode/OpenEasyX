@@ -9,10 +9,10 @@ import { ytDlpDownload } from "../yt-dlp-utils.js";
 const temporaryDirectories: string[] = [];
 afterEach(() => { for (const directory of temporaryDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true }); });
 
-function accountContext(fetchImpl: typeof fetch): PluginContext {
+function accountContext(fetchImpl: typeof fetch, cookieLines = ".chaturbate.com\tTRUE\t/\tTRUE\t0\tsessionid\taccount-session\n.chaturbate.com\tTRUE\t/\tTRUE\t0\tcsrftoken\tcsrf-token"): PluginContext {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-chaturbate-")); temporaryDirectories.push(directory);
   const cookiesFile = path.join(directory, "cookies.txt");
-  fs.writeFileSync(cookiesFile, "# Netscape HTTP Cookie File\n.chaturbate.com\tTRUE\t/\tTRUE\t0\tsessionid\taccount-session\n.chaturbate.com\tTRUE\t/\tTRUE\t0\tcsrftoken\tcsrf-token\n");
+  fs.writeFileSync(cookiesFile, `# Netscape HTTP Cookie File\n${cookieLines}\n`);
   return { config: { cookiesFile }, fetch: fetchImpl, runCommand: vi.fn(), log: vi.fn() };
 }
 
@@ -68,8 +68,24 @@ describe("Chaturbate plugin", () => {
     });
     const result = await chaturbate.listFollowedLiveCams!(accountContext(fetchMock as typeof fetch));
     expect(result).toMatchObject({ authoritative: true, cams: [{ username: "online_model" }, { username: "offline_model", viewers: 0 }] });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ cookie: expect.stringContaining("sessionid=account-session") });
+  });
+
+  it("rejects a captured browser session that is not actually signed in", async () => {
+    const context = accountContext(fetch, ".chaturbate.com\tTRUE\t/\tTRUE\t0\tcsrftoken\tcsrf-token");
+    context.runCommand = vi.fn(async () => ({ exitCode: 0, stdout: "2026.08.19\n", stderr: "" }));
+    await expect(chaturbate.testConnection!(context)).resolves.toEqual({
+      ok: false, message: "The Chaturbate session is missing or expired. Reconnect the account in the integrated browser.",
+    });
+  });
+
+  it("verifies the authenticated Chaturbate API before accepting a captured session", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ users: [] }), { status: 200 }));
+    const context = accountContext(fetchMock as typeof fetch, ".chaturbate.com\tTRUE\t/\tTRUE\t0\tsessionid\tverified-session");
+    context.runCommand = vi.fn(async () => ({ exitCode: 0, stdout: "2026.08.19\n", stderr: "" }));
+    await expect(chaturbate.testConnection!(context)).resolves.toMatchObject({ ok: true, message: expect.stringContaining("account session verified") });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("refuses to replace favorites when Chaturbate ignores the followed-only filter", async () => {
@@ -77,6 +93,22 @@ describe("Chaturbate plugin", () => {
     await expect(chaturbate.listFollowedLiveCams!(accountContext(fetchMock as typeof fetch))).resolves.toMatchObject({
       authoritative: false, cams: [], skippedReason: "Chaturbate ignored the followed-only filter",
     });
+  });
+
+  it("advances followed pagination by the raw Chaturbate result window", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes("pm_users")) return new Response(JSON.stringify({ users: [] }), { status: 200 });
+      if (!url.searchParams.has("offline")) return new Response(JSON.stringify({ rooms: [], total_count: 0 }), { status: 200 });
+      const offset = Number(url.searchParams.get("offset"));
+      return new Response(JSON.stringify({
+        rooms: [{ username: offset === 0 ? "first_offline" : "last_offline", is_following: true }], total_count: 122,
+      }), { status: 200 });
+    });
+    const result = await chaturbate.listFollowedLiveCams!(accountContext(fetchMock as typeof fetch));
+    expect(result).toMatchObject({ authoritative: true, cams: [{ username: "first_offline" }, { username: "last_offline" }] });
+    const requestedOffsets = fetchMock.mock.calls.map((call) => String(call[0])).filter((url) => url.includes("offline=true")).map((url) => new URL(url).searchParams.get("offset"));
+    expect(requestedOffsets).toEqual(["0", "90"]);
   });
 
   it("mirrors favorite changes to Chaturbate and verifies the remote result", async () => {

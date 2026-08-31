@@ -297,15 +297,179 @@ def captured_media(url: str, cookies_file: str | None = None) -> str:
                 process.wait(timeout=5)
 
 
+async def _stripchat_favorite_cdp(
+    websocket_url: str,
+    url: str,
+    cookies: list[dict[str, object]],
+    model_id: int,
+    follow: bool,
+) -> dict[str, object]:
+    message_id = 0
+    favorite_statuses: list[int] = []
+    request_methods: dict[str, str] = {}
+    async with connect(websocket_url, origin=None, max_size=16 * 1024 * 1024) as websocket:
+        pending: dict[int, asyncio.Future] = {}
+
+        async def receive_messages() -> None:
+            while True:
+                message = json.loads(await websocket.recv())
+                response_id = message.get("id")
+                if isinstance(response_id, int) and response_id in pending:
+                    future = pending.pop(response_id)
+                    if not future.done():
+                        future.set_result(message)
+                    continue
+                if message.get("method") == "Network.requestWillBeSent":
+                    params = message.get("params") or {}
+                    request = params.get("request") or {}
+                    request_methods[str(params.get("requestId") or "")] = str(request.get("method") or "").upper()
+                elif message.get("method") == "Network.responseReceived":
+                    params = message.get("params") or {}
+                    response = params.get("response") or {}
+                    response_url = str(response.get("url") or "")
+                    request_method = request_methods.get(str(params.get("requestId") or ""), "")
+                    if request_method in {"PUT", "DELETE"} and "/api/front/users/" in response_url and "/favorites" in response_url:
+                        favorite_statuses.append(int(response.get("status") or 0))
+
+        async def command(method: str, params: dict[str, object] | None = None) -> dict[str, object]:
+            nonlocal message_id
+            message_id += 1
+            future = asyncio.get_running_loop().create_future()
+            pending[message_id] = future
+            await websocket.send(json.dumps({"id": message_id, "method": method, "params": params or {}}))
+            try:
+                return await asyncio.wait_for(future, timeout=15)
+            finally:
+                pending.pop(message_id, None)
+
+        async def evaluate(expression: str) -> object:
+            response = await command("Runtime.evaluate", {
+                "expression": expression, "returnByValue": True, "awaitPromise": True,
+            })
+            result = ((response.get("result") or {}).get("result") or {})
+            if result.get("subtype") == "error":
+                raise RuntimeError(str(result.get("description") or "Stripchat browser action failed"))
+            return result.get("value")
+
+        receiver = asyncio.create_task(receive_messages())
+        try:
+            await command("Network.enable")
+            await command("Network.setCookies", {"cookies": cookies})
+            await command("Page.enable")
+            await command("Page.navigate", {"url": url})
+            inspect = f"""(() => {{
+              const state = (() => {{ try {{ return window.getState && window.getState(); }} catch {{ return null; }} }})();
+              const ids = state?.favorites?.favoriteIds;
+              const pageModel = state?.viewCam?.model || state?.viewCam?.user || state?.viewCam?.item;
+              const resolvedModelId = Number({model_id}) || Number(pageModel?.id || pageModel?.streamName || 0);
+              const selectors = ['[data-testid*="favorite" i]','[data-test*="favorite" i]','[aria-label*="favorite" i]','[aria-label*="favourite" i]','[title*="favorite" i]','[title*="favourite" i]'];
+              const elements = [...new Set(selectors.flatMap(selector => [...document.querySelectorAll(selector)]))];
+              const buttons = [...new Set(elements.map(element => element.closest('button,[role="button"],a') || element))];
+              const descriptions = buttons.map(element => `${{element.getAttribute('aria-label') || ''}} ${{element.getAttribute('title') || ''}} ${{element.getAttribute('data-testid') || ''}} ${{element.innerText || element.textContent || ''}}`.toLowerCase());
+              const uiCurrent = descriptions.some(label => /remove|delete|unfavorite|unfavourite/.test(label))
+                ? true : descriptions.some(label => /add\\s+(?:to\\s+)?favou?rites?|favou?rite/.test(label)) ? false : null;
+              return {{
+                loggedIn: Boolean(state?.userSession?.currentUser?.id),
+                modelId: resolvedModelId,
+                current: Array.isArray(ids) && resolvedModelId ? ids.map(Number).includes(resolvedModelId) : uiCurrent,
+                candidates: buttons.map((element, index) => ({{
+                  index, aria: element.getAttribute('aria-label') || '', title: element.getAttribute('title') || '',
+                  testid: element.getAttribute('data-testid') || element.getAttribute('data-test') || '',
+                  text: (element.innerText || element.textContent || '').trim().replace(/\\s+/g,' ').slice(0,120),
+                  pressed: element.getAttribute('aria-pressed'), disabled: Boolean(element.disabled)
+                }}))
+              }};
+            }})()"""
+            clicked = False
+            last: dict[str, object] = {}
+            deadline = time.monotonic() + 35
+            while time.monotonic() < deadline:
+                value = await evaluate(inspect)
+                last = value if isinstance(value, dict) else {}
+                if last.get("current") is follow:
+                    return {"success": True, "favorite": follow, "modelId": last.get("modelId")}
+                if not clicked and last.get("candidates"):
+                    clicked = bool(await evaluate(f"""(() => {{
+                      const desired = {str(follow).lower()};
+                      const selectors = ['[data-testid*="favorite" i]','[data-test*="favorite" i]','[aria-label*="favorite" i]','[aria-label*="favourite" i]','[title*="favorite" i]','[title*="favourite" i]'];
+                      const elements = [...new Set(selectors.flatMap(selector => [...document.querySelectorAll(selector)]))];
+                      const buttons = [...new Set(elements.map(element => element.closest('button,[role="button"],a') || element))];
+                      const description = element => `${{element.getAttribute('aria-label') || ''}} ${{element.getAttribute('title') || ''}} ${{element.getAttribute('data-testid') || ''}} ${{element.innerText || element.textContent || ''}}`.toLowerCase();
+                      const target = buttons.find(element => {{
+                        const label = description(element);
+                        const removes = /remove|delete|unfavorite|unfavourite/.test(label) || element.getAttribute('aria-pressed') === 'true';
+                        return !element.disabled && /favou?rite/.test(label) && (desired ? !removes : removes);
+                      }});
+                      if (!target) return false;
+                      target.click(); return true;
+                    }})()"""))
+                if clicked and favorite_statuses:
+                    status = favorite_statuses[-1]
+                    if status < 200 or status >= 300:
+                        raise RuntimeError(f"Stripchat favorite request returned HTTP {status}")
+                    return {"success": True, "favorite": follow, "modelId": last.get("modelId")}
+                await asyncio.sleep(0.5)
+            labels = [
+                " | ".join(str(candidate.get(key) or "") for key in ("aria", "title", "testid", "text")).strip(" |")
+                for candidate in (last.get("candidates") or [])[:6] if isinstance(candidate, dict)
+            ]
+            raise RuntimeError("Stripchat favorite control was not confirmed" + (f" ({'; '.join(labels)})" if labels else ""))
+        finally:
+            receiver.cancel()
+            try:
+                await receiver
+            except asyncio.CancelledError:
+                pass
+
+
+def stripchat_favorite(url: str, cookies_file: str, model_id: int, follow: bool) -> str:
+    executable = next((value for value in (shutil.which("chromium"), shutil.which("chromium-browser"), shutil.which("google-chrome")) if value), None)
+    if not executable:
+        raise RuntimeError("Chromium is not installed")
+    port = _free_port()
+    with tempfile.TemporaryDirectory(prefix="easyx-stripchat-favorite-", ignore_cleanup_errors=True) as profile:
+        process = subprocess.Popen([
+            executable, "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+            "--remote-allow-origins=*", f"--remote-debugging-port={port}", f"--user-data-dir={profile}", "about:blank",
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, "LANG": "en_US.UTF-8"})
+        try:
+            page = None
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    pages = requests.get(f"http://127.0.0.1:{port}/json/list", timeout=1).json()
+                    page = next((item for item in pages if item.get("type") == "page"), None)
+                    if page:
+                        break
+                except Exception:
+                    time.sleep(0.1)
+            if not page or not page.get("webSocketDebuggerUrl"):
+                raise RuntimeError("Chromium debugging page did not start")
+            result = asyncio.run(_stripchat_favorite_cdp(page["webSocketDebuggerUrl"], url, _netscape_cookies(cookies_file), model_id, follow))
+            return json.dumps(result, ensure_ascii=False)
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def main() -> int:
     render = len(sys.argv) == 3 and sys.argv[1] == "--render"
     mfc_models = len(sys.argv) in (3, 4) and sys.argv[1] == "--mfc-models"
     capture_media = len(sys.argv) in (3, 4) and sys.argv[1] == "--capture-media"
-    if not render and not mfc_models and not capture_media and len(sys.argv) != 2:
-        print("usage: easyx-browser-fetch [--render|--capture-media] URL | --mfc-models PAGE [SEARCH]", file=sys.stderr)
+    stripchat_favorite_action = len(sys.argv) == 6 and sys.argv[1] == "--stripchat-favorite"
+    if not render and not mfc_models and not capture_media and not stripchat_favorite_action and len(sys.argv) != 2:
+        print("usage: easyx-browser-fetch [--render|--capture-media] URL | --mfc-models PAGE [SEARCH] | --stripchat-favorite URL COOKIES MODEL_ID follow|unfollow", file=sys.stderr)
         return 2
     try:
-        if mfc_models:
+        if stripchat_favorite_action:
+            if sys.argv[5] not in {"follow", "unfollow"}:
+                raise RuntimeError("Stripchat favorite action must be follow or unfollow")
+            content = stripchat_favorite(sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5] == "follow")
+        elif mfc_models:
             content = myfreecams_models(int(sys.argv[2]), sys.argv[3] if len(sys.argv) == 4 else "")
         elif capture_media:
             content = captured_media(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else None)

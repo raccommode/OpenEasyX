@@ -147,6 +147,7 @@ export type LiveCam = {
   age?: number;
   gender?: string;
   tags?: string[];
+  online?: boolean;
 };
 
 export type LiveCamPage = {
@@ -158,7 +159,7 @@ export type LiveCamPage = {
 };
 
 export type LiveCamFavoriteSnapshot = {
-  cams: LiveCam[];
+  cams: Array<LiveCam & { online: boolean }>;
   authoritative: boolean;
   skippedReason?: string;
 };
