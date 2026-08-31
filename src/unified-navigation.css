@@ -7,4 +7,4 @@
 .unified-nav .nav-group > a.active { color: #fff; background: #1a1a1f; }
 .unified-nav .nav-group > a.active svg { color: #fa4058; }
 .unified-nav .nav-group > a svg { width: 17px; flex: none; }
-.brand-wordmark { justify-content: flex-start; padding-left: 12px; padding-bottom: 22px; }
+.brand-wordmark { justify-content: flex-start; padding-left: 12px; padding-bottom: 22px; color: inherit; text-decoration: none; }

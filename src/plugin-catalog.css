@@ -1,0 +1,95 @@
+.plugin-browser {
+  overflow: hidden;
+  background: #101014;
+  border: 1px solid #28282e;
+  border-radius: 15px;
+}
+
+.plugin-browser-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 17px 18px;
+  background: #141419;
+}
+
+.plugin-browser-head p {
+  margin: 0 0 5px;
+  color: #686873;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .18em;
+}
+
+.plugin-browser-head h3 { margin: 0; font: 700 15px 'Manrope'; }
+.plugin-browser-head > span { color: #686873; font-size: 10px; }
+
+.plugin-browser .plugin-toolbar {
+  grid-template-columns: 1fr;
+  margin: 0;
+  padding: 12px 16px;
+  background: #111115;
+  border: 0;
+  border-top: 1px solid #25252b;
+  border-radius: 0;
+}
+
+.plugin-menu {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 7px;
+  gap: 5px;
+  background: #0d0d10;
+  border-top: 1px solid #25252b;
+}
+
+.plugin-menu button {
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #777781;
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.plugin-menu button:hover { color: #d4d4d9; background: #18181d; }
+.plugin-menu button:focus-visible { outline: 2px solid rgba(250, 64, 88, .72); outline-offset: 1px; }
+.plugin-menu button.active { color: #fff; background: #24242a; border-color: #34343c; }
+
+.plugin-menu button b {
+  min-width: 21px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  color: #91919b;
+  background: #1e1e24;
+  font-size: 8px;
+  text-align: center;
+}
+
+.plugin-menu button.active b { color: #ff8291; background: rgba(250, 64, 88, .15); }
+.installation-menu button { flex: 1; min-height: 42px; }
+
+.category-menu {
+  overflow-x: auto;
+  padding: 9px 14px;
+  background: #121216;
+  scrollbar-width: thin;
+}
+
+.category-menu button { flex: 0 0 auto; }
+.plugin-browser-list { border-top: 1px solid #25252b; }
+.plugin-browser > .empty { border-top: 1px solid #25252b; }
+
+@media (max-width: 720px) {
+  .plugin-browser-head { padding: 14px; }
+  .plugin-browser .plugin-toolbar { padding: 10px; }
+  .plugin-menu button { padding: 8px 9px; }
+  .category-menu { justify-content: flex-start; padding: 8px 10px; }
+}

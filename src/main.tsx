@@ -7,13 +7,15 @@ import { pluginFaviconUrl } from "./plugin-icon.js";
 import { canonicalEntryPath, pageFromPath, pagePath, type PageKey } from "./routes.js";
 import { LogsPage } from "./logs.js";
 import { isLibraryRoute, LibraryApp } from "./library-app.js";
-import { UnifiedNavigation } from "./UnifiedNavigation.js";
+import { AppChrome } from "./AppChrome.js";
 import { SettingsPage as SubtitleSettingsPage } from "./SettingsPage.js";
 import "./styles.css";
 import "./scraper.css";
 import "./activity.css";
 import "./repositories.css";
 import "./unified-navigation.css";
+import "./plugin-catalog.css";
+import "./app-chrome.css";
 
 type Plugin = { manifest: { id: string; name: string; version: string; description: string; author: string; homepage?: string; capabilities: string[]; settings?: Array<{ key: string; label: string; type: string; required?: boolean; default?: unknown; placeholder?: string; help?: string; cookieDomains?: string[]; sessionFormat?: "cookies" | "raw-json" }>; browserAuth?: { loginUrl: string; sessionSetting: string; capture?: "cookies" | "onlyfans" | "manyvids" | "authorization-header"; requestDomains?: string[] }; sourceUrlPatterns?: string[]; fallback?: boolean; polling?: { mode: "periodic" | "live"; defaultIntervalSeconds: number; minimumIntervalSeconds: number } }; installed: boolean; enabled: boolean; config: Record<string, unknown>; origin: string };
 type PluginRepository = { id: string; name: string; url: string; official: boolean; removable: boolean; addedAt: string; updatedAt: string; pluginCount: number };
@@ -112,7 +114,7 @@ function App() {
 
   const manualRefresh = async () => {
     setRefreshing(true);
-    try { await refresh(); setNotice({ kind: "ok", text: "Open EasyX refreshed" }); }
+    try { const result = await api<{ indexed: number }>("/api/scan", { method: "POST" }); await refresh(); setNotice({ kind: "ok", text: `Library refreshed — ${result.indexed} media files indexed.` }); }
     catch (error) { setNotice({ kind: "error", text: error instanceof Error ? error.message : String(error) }); }
     finally { setRefreshing(false); }
   };
@@ -122,15 +124,8 @@ function App() {
 
   const title = nav.find(([key]) => key === page)?.[1] ?? "Home";
   document.title = `${title} · Open EasyX`;
-  return <div className="shell">
-    <aside className="sidebar">
-      <a className="brand brand-wordmark" href="/media"><span><strong>Open EasyX</strong><small>ONE PRIVATE SUITE</small></span></a>
-      <UnifiedNavigation/>
-      <div className="sidebar-foot"><div className="privacy"><ShieldCheck size={18}/><span><strong>Private by design</strong><small>Your data stays on this server.</small></span></div><span className="version">Open EasyX v1.0.0</span></div>
-    </aside>
-    <main>
-      <header><div><p>OPEN EASYX</p><h1>{title}</h1></div><div className="header-actions"><button className="icon-button" title="Refresh Open EasyX" aria-label="Refresh Open EasyX" disabled={refreshing} onClick={() => void manualRefresh()}><RefreshCw className={refreshing ? "spin" : ""} size={18}/></button><button className="primary" onClick={() => navigate("discover")}><Search size={17}/>Find a performer</button></div></header>
-      <div className="content">
+  return <AppChrome title={title} scanningLibrary={refreshing} onScanLibrary={() => void manualRefresh()}>
+    <div className="content">
         {page === "dashboard" && <Overview dashboard={dashboard} plugins={plugins} go={navigate}/>}
         {page === "discover" && <Discover plugins={plugins} run={run}/>}
         {page === "library" && <Library dashboard={dashboard} plugins={plugins} run={run}/>}
@@ -138,10 +133,9 @@ function App() {
         {page === "logs" && <LogsPage/>}
         {page === "plugins" && <PluginsPage plugins={plugins} repositories={repositories} run={run}/>}
         {page === "settings" && <SettingsPage settings={settings} run={run} setNotice={(text) => setNotice({ kind: "ok", text })}/>}
-      </div>
-    </main>
+    </div>
     {notice && <div className={`toast ${notice.kind}`}><span>{notice.kind === "ok" ? <Check size={17}/> : <CircleAlert size={17}/>}</span>{notice.text}<button onClick={() => setNotice(null)}><X size={15}/></button></div>}
-  </div>;
+  </AppChrome>;
 }
 
 function Welcome({ onAccept, busy }: { onAccept: () => void; busy: boolean }) {
@@ -195,7 +189,7 @@ function Library({ dashboard, plugins, run }: { dashboard: Dashboard; plugins: P
   const people = dashboard.performers.filter((person) => [person.name, ...person.aliases].some((value) => value.toLowerCase().includes(needle)));
   const selected = dashboard.performers.find((person) => person.id === selectedId);
   return <>
-    <div className="performer-intro"><div><p>PERFORMER DIRECTORY</p><h2>People and profiles</h2><span>Manage identities, images, URLs, plugin ownership, and local media from one place.</span></div><div><button className="secondary" onClick={() => setAdding(true)}><Plus size={16}/>Add manually</button></div></div>
+    <div className="performer-intro"><div><p>PERFORMER DIRECTORY</p><h2>People and profiles</h2><span>Manage identities, images, URLs, plugin ownership, and local media from one place.</span></div><div className="performer-intro-actions"><a className="primary" href="/discover"><Search size={16}/>Find a performer</a><button className="secondary" onClick={() => setAdding(true)}><Plus size={16}/>Add manually</button></div></div>
     <div className="performer-toolbar"><div className="mini-search"><Search/><input aria-label="Search performers" placeholder="Search names or aliases…" value={filter} onChange={(event) => setFilter(event.target.value)}/></div><span><strong>{people.length}</strong> performer{people.length === 1 ? "" : "s"}</span></div>
     {people.length ? <div className="people-grid">{people.map((person) => {
       const sources = dashboard.sources.filter((source) => source.performerId === person.id); const items = dashboard.items.filter((item) => item.performerId === person.id);
@@ -333,7 +327,7 @@ function ActivityPage({ performers, sources, run }: { performers: Performer[]; s
     </div>
     {loadError && <div className="activity-load-error"><CircleAlert size={15}/>{loadError}</div>}
     {loading && !data ? <div className="activity-loading"><LoaderCircle className="spin"/>Loading activity…</div> : data?.items.length ? <>
-      <div className="activity-table"><div className="table-head"><span>Item &amp; output</span><span>Source</span><span>Type</span><span>Status &amp; progress</span><span>Download time</span><span>Updated</span><span>Controls</span></div>{data.items.map((item) => { const source = sources.find((entry) => entry.id === item.sourceId); const performer = performers.find((p) => p.id === item.performerId); const percent = Math.max(0, Math.min(100, Math.round(item.progress * 100))); const downloadedBytes = Number(item.downloadedBytes ?? 0); return <div className="table-row" key={item.id}><div><strong>{item.title || item.id}</strong><small>{performer?.name}</small>{item.outputPath && <small className="output-path" title={item.outputPath}><FolderOpen size={11}/>{item.outputPath}</small>}</div><span className="activity-source"><span>{source?.label || source?.domain || "Unknown source"}</span>{source?.domain && source.label !== source.domain && <small>{source.domain}</small>}</span><span className="capitalize">{item.mediaType}</span><span className="activity-status"><span className={`badge ${item.status}`}>{item.status}</span>{["downloading", "paused", "stopping", "cancelling"].includes(item.status) && <span className="progress-wrap"><span className={`download-progress ${percent === 0 && item.status === "downloading" ? "indeterminate" : ""}`} role="progressbar" aria-label={`Download progress for ${item.title || item.id}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent || undefined}><i style={percent ? { width: `${percent}%` } : undefined}/></span><small>{item.status === "paused" ? "Paused" : percent ? downloadedBytes ? `${percent}% · ${formatBytes(downloadedBytes)}` : `Preparing · ${percent}%` : downloadedBytes ? formatBytes(downloadedBytes) : "Preparing extractor…"}</small></span>}</span><span className="download-time">{downloadTime(item, clock)}</span><span>{timeAgo(item.updatedAt)}</span><span className="activity-actions">{["available", "failed"].includes(item.status) && <button className="icon-button" title={item.status === "failed" ? "Retry download" : "Queue download"} onClick={() => void itemAction(item, "resume").catch(async () => { await run(() => api(`/api/items/${item.id}/queue`, { method: "POST" }), "Download queued"); await loadActivity(); })}><Download size={16}/></button>}{item.status === "downloading" && <button className="icon-button" title="Pause recording" onClick={() => void itemAction(item, "pause")}><Pause size={15}/></button>}{item.status === "paused" && <button className="icon-button" title="Resume recording" onClick={() => void itemAction(item, "resume")}><Play size={15}/></button>}{["downloading", "paused"].includes(item.status) && <button className="icon-button" title="Stop and save recording" onClick={() => void itemAction(item, "stop")}><Square size={14}/></button>}{["queued", "downloading", "paused"].includes(item.status) && <button className="icon-button" title="Cancel recording" onClick={() => void itemAction(item, "cancel")}><X size={15}/></button>}{["queued", "downloading", "paused", "cancelled", "failed"].includes(item.status) && <button className="icon-button danger" title="Delete item" onClick={() => void itemAction(item, "delete")}><Trash2 size={15}/></button>}{item.status === "completed" && <><a className="icon-button" title="Open in library" href={`/library?performer=${encodeURIComponent(performer?.name ?? "")}&kind=${item.mediaType === "video" ? "video" : "image"}`}><FolderOpen size={15}/></a><button className="icon-button danger" title="Delete completed recording" aria-label={`Delete completed recording ${item.title || item.id}`} onClick={() => void itemAction(item, "delete")}><Trash2 size={15}/></button></>}</span>{item.error && <p className="row-error">{item.error}</p>}</div>; })}</div>
+      <div className="activity-table"><div className="table-head"><span>Item &amp; output</span><span>Source</span><span>Type</span><span>Status &amp; progress</span><span>Download time</span><span>Updated</span><span>Controls</span></div>{data.items.map((item) => { const source = sources.find((entry) => entry.id === item.sourceId); const performer = performers.find((p) => p.id === item.performerId); const percent = Math.max(0, Math.min(100, Math.round(item.progress * 100))); const downloadedBytes = Number(item.downloadedBytes ?? 0); return <div className="table-row" key={item.id}><div><strong>{item.title || item.id}</strong><small>{performer?.name}</small>{item.outputPath && <small className="output-path" title={item.outputPath}><FolderOpen size={11}/>{item.outputPath}</small>}</div><span className="activity-source"><span>{source?.label || source?.domain || "Unknown source"}</span>{source?.domain && source.label !== source.domain && <small>{source.domain}</small>}</span><span className="capitalize">{item.mediaType}</span><span className="activity-status"><span className={`badge ${item.status}`}>{item.status}</span>{["downloading", "paused", "stopping", "cancelling"].includes(item.status) && <span className="progress-wrap"><span className={`download-progress ${percent === 0 && item.status === "downloading" ? "indeterminate" : ""}`} role="progressbar" aria-label={`Download progress for ${item.title || item.id}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent || undefined}><i style={percent ? { width: `${percent}%` } : undefined}/></span><small>{item.status === "paused" ? "Paused" : percent ? downloadedBytes ? `${percent}% · ${formatBytes(downloadedBytes)}` : `Preparing · ${percent}%` : downloadedBytes ? formatBytes(downloadedBytes) : "Preparing extractor…"}</small></span>}</span><span className="download-time">{downloadTime(item, clock)}</span><span>{timeAgo(item.updatedAt)}</span><span className="activity-actions">{["available", "failed"].includes(item.status) && <button className="icon-button" title={item.status === "failed" ? "Retry download" : "Queue download"} onClick={() => void itemAction(item, "resume").catch(async () => { await run(() => api(`/api/items/${item.id}/queue`, { method: "POST" }), "Download queued"); await loadActivity(); })}><Download size={16}/></button>}{item.status === "failed" && <button className="danger-soft activity-delete-error" title="Delete error" aria-label={`Delete error for ${item.title || item.id}`} onClick={() => void itemAction(item, "delete")}><Trash2 size={14}/>Delete error</button>}{item.status === "downloading" && <button className="icon-button" title="Pause recording" onClick={() => void itemAction(item, "pause")}><Pause size={15}/></button>}{item.status === "paused" && <button className="icon-button" title="Resume recording" onClick={() => void itemAction(item, "resume")}><Play size={15}/></button>}{["downloading", "paused"].includes(item.status) && <button className="icon-button" title="Stop and save recording" onClick={() => void itemAction(item, "stop")}><Square size={14}/></button>}{["queued", "downloading", "paused"].includes(item.status) && <button className="icon-button" title="Cancel recording" onClick={() => void itemAction(item, "cancel")}><X size={15}/></button>}{["queued", "downloading", "paused", "cancelled"].includes(item.status) && <button className="icon-button danger" title="Delete item" onClick={() => void itemAction(item, "delete")}><Trash2 size={15}/></button>}{item.status === "completed" && <><a className="icon-button" title="Open in library" href={`/library?performer=${encodeURIComponent(performer?.name ?? "")}&kind=${item.mediaType === "video" ? "video" : "image"}`}><FolderOpen size={15}/></a><button className="icon-button danger" title="Delete completed recording" aria-label={`Delete completed recording ${item.title || item.id}`} onClick={() => void itemAction(item, "delete")}><Trash2 size={15}/></button></>}</span>{item.error && <p className="row-error">{item.error}</p>}</div>; })}</div>
       <div className="activity-pagination"><span>Showing <strong>{(data.page - 1) * data.pageSize + 1}–{Math.min(data.page * data.pageSize, data.total)}</strong> of <strong>{data.total}</strong></span><label>Per page <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option></select></label><div><button className="icon-button" aria-label="Previous page" disabled={data.page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}><ChevronLeft size={17}/></button><span>Page <strong>{data.page}</strong> / {data.totalPages}</span><button className="icon-button" aria-label="Next page" disabled={data.page >= data.totalPages} onClick={() => setPage((value) => value + 1)}><ChevronRight size={17}/></button></div></div>
     </> : <Empty icon={Activity} title={totalTracked ? "No items match these filters" : "No activity yet"} text={totalTracked ? "Change or clear the filters to see more items." : "Items discovered by source plugins will appear in this pipeline."}/>}
   </section>;
@@ -342,21 +336,26 @@ function ActivityPage({ performers, sources, run }: { performers: Performer[]; s
 function PluginsPage({ plugins, repositories, run }: { plugins: Plugin[]; repositories: PluginRepository[]; run: (op: () => Promise<unknown>, msg: string) => Promise<void> }) {
   const [configuring, setConfiguring] = useState<{ plugin: Plugin; installing: boolean } | null>(null);
   const [query, setQuery] = useState("");
+  const [installationFilter, setInstallationFilter] = useState<"installed" | "available">("installed");
+  const [categoryFilter, setCategoryFilter] = useState<"all" | "sources" | "live" | "features">("all");
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [repositoryName, setRepositoryName] = useState("");
   const installed = plugins.filter((plugin) => plugin.installed).length;
   const active = plugins.filter((plugin) => plugin.installed && plugin.enabled).length;
   const needle = query.trim().toLowerCase();
-  const visible = plugins
-    .filter((plugin) => !needle || [plugin.manifest.name, plugin.manifest.description, plugin.manifest.author, ...plugin.manifest.capabilities, ...(plugin.manifest.sourceUrlPatterns ?? [])].some((value) => value.toLowerCase().includes(needle)))
-    .sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
   const pluginCategory = (plugin: Plugin) => plugin.manifest.capabilities.includes("live-cam") ? "live"
     : plugin.manifest.capabilities.some((capability) => ["identity-search", "source-discovery", "media-listing", "download-resolver"].includes(capability)) ? "sources" : "features";
-  const groups = [
-    { key: "sources", title: "Sources & discovery", subtitle: "Search people, discover pages, and download media", plugins: visible.filter((plugin) => pluginCategory(plugin) === "sources" && !plugin.manifest.capabilities.includes("live-cam")) },
-    { key: "live", title: "Live cam", subtitle: "Browse and play live providers directly in Open EasyX", plugins: visible.filter((plugin) => pluginCategory(plugin) === "live") },
-    { key: "features", title: "Features & addons", subtitle: "Extend library behavior and local media features", plugins: visible.filter((plugin) => pluginCategory(plugin) === "features") },
-  ];
+  const searched = plugins.filter((plugin) => !needle || [plugin.manifest.name, plugin.manifest.description, plugin.manifest.author, ...plugin.manifest.capabilities, ...(plugin.manifest.sourceUrlPatterns ?? [])].some((value) => value.toLowerCase().includes(needle)));
+  const byInstallation = searched.filter((plugin) => installationFilter === "installed" ? plugin.installed : !plugin.installed);
+  const categoryOptions = [
+    { key: "all", label: "All", count: byInstallation.length },
+    { key: "sources", label: "Sources & discovery", count: byInstallation.filter((plugin) => pluginCategory(plugin) === "sources").length },
+    { key: "live", label: "Live cam", count: byInstallation.filter((plugin) => pluginCategory(plugin) === "live").length },
+    { key: "features", label: "Features & addons", count: byInstallation.filter((plugin) => pluginCategory(plugin) === "features").length },
+  ] as const;
+  const visible = byInstallation
+    .filter((plugin) => categoryFilter === "all" || pluginCategory(plugin) === categoryFilter)
+    .sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
   const row = (plugin: Plugin) => {
     const needsSetup = (plugin.manifest.settings ?? []).some((field) => field.required && plugin.config[field.key] === undefined && field.default === undefined);
     const install = () => needsSetup ? setConfiguring({ plugin, installing: true }) : void run(() => api(`/api/plugins/${plugin.manifest.id}/install`, { method: "POST" }), `${plugin.manifest.name} installed and active`);
@@ -374,8 +373,18 @@ function PluginsPage({ plugins, repositories, run }: { plugins: Plugin[]; reposi
       <div className="repository-list">{repositories.map((repository) => <article key={repository.id}><span className={`repository-mark ${repository.official ? "official" : ""}`}><Plug/></span><div><strong>{repository.name}{repository.official && <i>Official</i>}</strong><code>{repository.url}</code><small>{repository.pluginCount} {repository.pluginCount === 1 ? "plugin" : "plugins"}</small></div><div>{!repository.official && <><button className="secondary" onClick={() => void run(() => api(`/api/plugin-repositories/${repository.id}/refresh`, { method: "POST" }), `${repository.name} updated`)}><RefreshCw size={14}/>Update</button><button className="danger-soft" onClick={() => void run(() => api(`/api/plugin-repositories/${repository.id}`, { method: "DELETE" }), `${repository.name} removed`)}><Trash2 size={14}/>Remove</button></>}</div></article>)}</div>
       <div className="repository-add"><input aria-label="Repository name" placeholder="Name (optional)" value={repositoryName} onChange={(event) => setRepositoryName(event.target.value)}/><input aria-label="Git repository URL" placeholder="https://gitea.example/user/open-easyx-plugins.git" value={repositoryUrl} onChange={(event) => setRepositoryUrl(event.target.value)}/><button className="primary" disabled={!repositoryUrl.trim()} onClick={async () => { await run(() => api("/api/plugin-repositories", { method: "POST", body: JSON.stringify({ url: repositoryUrl, name: repositoryName }) }), "Plugin repository installed"); setRepositoryUrl(""); setRepositoryName(""); }}><Plus size={15}/>Install new repository</button></div>
     </section>
-    <div className="plugin-toolbar"><div className="plugin-search"><Search size={18}/><input aria-label="Search plugins" placeholder="Search by name, capability, or author…" value={query} onChange={(event) => setQuery(event.target.value)}/>{query && <button aria-label="Clear plugin search" onClick={() => setQuery("")}><X size={15}/></button>}</div><span className="plugin-result-count">{visible.length} shown</span></div>
-    {visible.length ? <div className="plugin-groups">{groups.map((group) => <section className="plugin-group" key={group.key}><div className="plugin-group-head"><div><h3>{group.title}</h3><p>{group.subtitle}</p></div><span>{group.plugins.length}</span></div>{group.plugins.length ? <div className="plugin-list">{group.plugins.sort((a, b) => Number(b.installed) - Number(a.installed) || a.manifest.name.localeCompare(b.manifest.name)).map(row)}</div> : <div className="plugin-group-empty">No matching plugins in this category.</div>}</section>)}</div> : <Empty icon={Plug} title="No plugins match" text="Try another search." action="Clear search" onAction={() => setQuery("")}/>}
+    <section className="plugin-browser">
+      <div className="plugin-browser-head"><div><p>PLUGIN CATALOG</p><h3>Browse plugins</h3></div><span>{visible.length} shown</span></div>
+      <div className="plugin-toolbar"><div className="plugin-search"><Search size={18}/><input aria-label="Search plugins" placeholder="Search by name, capability, or author…" value={query} onChange={(event) => setQuery(event.target.value)}/>{query && <button aria-label="Clear plugin search" onClick={() => setQuery("")}><X size={15}/></button>}</div></div>
+      <nav className="plugin-menu installation-menu" aria-label="Plugin installation status">
+        <button className={installationFilter === "installed" ? "active" : ""} aria-pressed={installationFilter === "installed"} onClick={() => setInstallationFilter("installed")}><span>Installed</span><b>{installed}</b></button>
+        <button className={installationFilter === "available" ? "active" : ""} aria-pressed={installationFilter === "available"} onClick={() => setInstallationFilter("available")}><span>Not installed</span><b>{plugins.length - installed}</b></button>
+      </nav>
+      <nav className="plugin-menu category-menu" aria-label="Plugin categories">
+        {categoryOptions.map((category) => <button key={category.key} className={categoryFilter === category.key ? "active" : ""} aria-pressed={categoryFilter === category.key} onClick={() => setCategoryFilter(category.key)}><span>{category.label}</span><b>{category.count}</b></button>)}
+      </nav>
+      {visible.length ? <div className="plugin-list plugin-browser-list">{visible.map(row)}</div> : query ? <Empty icon={Plug} title="No plugins match" text="Try another search or category." action="Clear search" onAction={() => setQuery("")}/> : <Empty icon={Plug} title={installationFilter === "installed" ? "No installed plugins here" : "No uninstalled plugins here"} text="Choose another category to continue browsing." action={categoryFilter !== "all" ? "Show all categories" : undefined} onAction={categoryFilter !== "all" ? () => setCategoryFilter("all") : undefined}/>}
+    </section>
     {configuring && <PluginConfig plugin={configuring.plugin} installing={configuring.installing} close={() => setConfiguring(null)} run={run}/>} {/* Plugin configuration */}
   </>;
 }

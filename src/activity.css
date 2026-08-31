@@ -90,6 +90,7 @@
 .activity-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
 .activity-actions .icon-button { width: 29px; height: 29px; }
 .activity-actions .icon-button.danger { color: #ff7182; }
+.activity-actions .activity-delete-error { min-height: 29px; padding: 5px 8px; white-space: nowrap; font-size: 9px; }
 
 .activity-source > span {
   color: #aaa;

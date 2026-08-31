@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Aperture, BarChart3, ChevronLeft, ChevronRight, Clock3, Eye, Film, FolderSearch2, HardDrive, Heart, History, Image as ImageIcon,
-  Library as LibraryIcon, ListChecks, LoaderCircle, Menu, Play, RefreshCw, Search, SlidersHorizontal, Sparkles,
+  Library as LibraryIcon, ListChecks, LoaderCircle, Play, Search, SlidersHorizontal, Sparkles,
   Radio, Settings as SettingsIcon, Square, CheckSquare, Trash2, UserRound, Users, X,
 } from "lucide-react";
 import { api } from "./api";
@@ -10,7 +10,7 @@ import { autoplayOnOpen } from "./playback";
 import { playbackAutoStart, playbackLocationState, type EasyXLocationState } from "./playbackRoute";
 import { SettingsPage } from "./SettingsPage";
 import { LiveCamPage, LiveCamViewer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl, type LiveCam } from "./LiveCamPage";
-import { UnifiedNavigation } from "./UnifiedNavigation";
+import { AppChrome } from "./AppChrome";
 import "./library.css";
 
 type Media = {
@@ -124,7 +124,6 @@ export function LibraryApp() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [performers, setPerformers] = useState<Performer[]>([]);
   const [selected, setSelected] = useState<Selection | null>(null);
-  const [mobileNav, setMobileNav] = useState(false);
   const [notice, setNotice] = useState("");
   const routeMedia = mediaRoute(location.pathname);
   const routeLiveCam = liveCamRoute(location.pathname);
@@ -160,7 +159,7 @@ export function LibraryApp() {
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(""), 4500); return () => clearTimeout(timer); }, [notice]);
 
   const go = (next: Page, preset: LibraryPreset = {}) => {
-    navigate(pageUrl(next, preset)); if (next === "live-cam") window.dispatchEvent(new Event("easyx:navigate")); setMobileNav(false);
+    navigate(pageUrl(next, preset)); if (next === "live-cam") window.dispatchEvent(new Event("easyx:navigate"));
   };
   const openMedia: OpenMedia = (media, context = {}) => {
     const from = `${window.location.pathname}${window.location.search}`;
@@ -211,19 +210,7 @@ export function LibraryApp() {
   useEffect(() => { document.title = selected ? `${selected.media.title} · Open EasyX` : `${nav.find(([key]) => key === page)?.[1]} · Open EasyX`; }, [page, selected?.media.id, routeLiveCam?.camId]);
 
   if (!dashboard) return <div className="boot"><span className="logo">EX</span><LoaderCircle className="spin"/><p>Opening your private library…</p></div>;
-  return <div className="library-mode"><div className="app-shell">
-    <aside className={mobileNav ? "sidebar open" : "sidebar"}>
-      <a className="brand brand-wordmark" href="/media"><span><b>Open EasyX</b><small>ONE PRIVATE SUITE</small></span></a>
-      <UnifiedNavigation/>
-      <div className="storage"><HardDrive/><div><b>{formatBytes(dashboard.stats.bytes)}</b><small>{dashboard.stats.total.toLocaleString()} local files</small></div></div>
-      <div className="sidebar-foot"><span className={dashboard.scan.running ? "status scanning" : "status"}></span><div><b>{dashboard.scan.running ? "Indexing library" : "Library online"}</b><small>{dashboard.scan.lastScanAt ? `Scanned ${timeAgo(dashboard.scan.lastScanAt)}` : "First scan pending"}</small></div></div>
-    </aside>
-    <main>
-      <header>
-        <button className="menu-button" onClick={() => setMobileNav(!mobileNav)}><Menu/></button>
-        <div><p>YOUR PRIVATE COLLECTION</p><h1>{selected || routeLiveCam ? "Now playing" : nav.find(([key]) => key === page)?.[1]}</h1></div>
-        <div className="header-actions"><button className="quiet" onClick={() => void rescan()} disabled={dashboard.scan.running}><RefreshCw className={dashboard.scan.running ? "spin" : ""}/><span>Scan library</span></button><button className="primary" onClick={() => go("library")}><Search/><span>Browse media</span></button></div>
-      </header>
+  return <div className="library-mode"><AppChrome title={selected || routeLiveCam ? "Now playing" : nav.find(([key]) => key === page)?.[1] ?? "Home"} scanningLibrary={dashboard.scan.running} onScanLibrary={() => void rescan()}>
       {routeMedia ? selected ? <PlayerViewer media={selected.media} context={selected.context} autoStart={selected.autoStart} close={() => { const target = location.state?.easyx?.from ?? "/library"; setSelected(null); navigate(target, { replace: true }); void refresh(); }} favorite={updateFavorite} advance={(media) => { const from = location.state?.easyx?.from ?? "/library"; setSelected({ media, context: selected.context, autoStart: true }); navigate(mediaUrl(media), { state: playbackLocationState(from, selected.context, true) }); }} setNotice={setNotice}/> : <div className="loading"><LoaderCircle className="spin"/>Loading media…</div> : routeLiveCam ? <LiveCamViewer providerId={routeLiveCam.providerId} camId={routeLiveCam.camId} close={() => navigate(location.state?.easyx?.from ?? "/live-cam", { replace: true })}/> : <div className="content">
         {page === "home" && <Home dashboard={dashboard} open={openMedia} go={go} favorite={updateFavorite}/>}
         {page === "live-cam" && <LiveCamPage preset={liveCamPreset} open={openLiveCam} route={(preset) => navigate(liveCamListUrl(preset), { replace: true })}/>}
@@ -234,9 +221,8 @@ export function LibraryApp() {
         {page === "statistics" && <Statistics stats={dashboard.stats}/>}
         {page === "settings" && <SettingsPage setNotice={setNotice}/>}
       </div>}
-    </main>
     {notice && <div className="toast">{notice}<button onClick={() => setNotice("")}><X/></button></div>}
-  </div></div>;
+  </AppChrome></div>;
 }
 
 function Home({ dashboard, open, go, favorite }: { dashboard: Dashboard; open: OpenMedia; go: (page: Page, preset?: LibraryPreset) => void; favorite: (media: Media, value: boolean) => void }) {
