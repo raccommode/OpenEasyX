@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPlayerAudio, savePlayerAudio } from "./player-audio";
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("player audio preferences", () => {
   it("restores a saved volume and mute state", () => {
@@ -11,6 +13,12 @@ describe("player audio preferences", () => {
     expect(loadPlayerAudio({ getItem: () => "not-json" })).toEqual({ volume: 1, muted: false });
     expect(loadPlayerAudio({ getItem: () => JSON.stringify({ volume: 4, muted: false }) })).toEqual({ volume: 1, muted: false });
     expect(loadPlayerAudio({ getItem: () => null }, { volume: 1, muted: true })).toEqual({ volume: 1, muted: true });
+  });
+
+  it("uses the requested fallback when browser storage does not exist", () => {
+    vi.stubGlobal("localStorage", undefined);
+    expect(loadPlayerAudio(undefined, { volume: 1, muted: true })).toEqual({ volume: 1, muted: true });
+    expect(() => savePlayerAudio({ volume: 0.4, muted: false })).not.toThrow();
   });
 
   it("persists audio preferences under the shared player key", () => {

@@ -48,7 +48,7 @@ export function shouldRecoverNativeLiveMediaError(code: number | undefined, hidd
 
 export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) {
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const hideTimer = useRef<number | undefined>(undefined);
-  const initialAudio = useRef(loadPlayerAudio(localStorage, { volume: 1, muted: true }));
+  const initialAudio = useRef(loadPlayerAudio(undefined, { volume: 1, muted: true }));
   const [streamUrl, setStreamUrl] = useState(""); const [error, setError] = useState(""); const [retry, setRetry] = useState(0);
   const [playing, setPlaying] = useState(false); const [waiting, setWaiting] = useState(true); const [controls, setControls] = useState(true);
   const [volume, setVolume] = useState(initialAudio.current.volume); const [muted, setMuted] = useState(initialAudio.current.muted); const [fullscreen, setFullscreen] = useState(false);
