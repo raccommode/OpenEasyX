@@ -10,7 +10,7 @@ import "./live-player.css";
 
 export type LiveCam = {
   id: string; username: string; title?: string; pageUrl: string; thumbnailUrl?: string; viewers?: number; age?: number; gender?: string; tags?: string[];
-  providerId: string; providerName: string; favorite?: boolean; online?: boolean;
+  providerId: string; providerName: string; favorite?: boolean; online?: boolean; performerId?: string;
 };
 type LiveCamFavorite = Pick<LiveCam, "providerId" | "id" | "username" | "title" | "pageUrl" | "thumbnailUrl">;
 type Provider = { id: string; name: string; ok: boolean; count: number; pending?: boolean; error?: string };
@@ -187,7 +187,8 @@ export function LiveCamFavoriteButton({ cam }: { cam: LiveCam }) {
 }
 
 export function LiveCamPerformerButton({ cam }: { cam: LiveCam }) {
-  const [saving, setSaving] = useState(false); const [performerId, setPerformerId] = useState(""); const [performerError, setPerformerError] = useState("");
+  const [saving, setSaving] = useState(false); const [performerId, setPerformerId] = useState(cam.performerId ?? ""); const [performerError, setPerformerError] = useState("");
+  useEffect(() => setPerformerId(cam.performerId ?? ""), [cam.performerId]);
   const create = async () => {
     if (saving || performerId) return;
     setSaving(true); setPerformerError("");

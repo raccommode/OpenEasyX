@@ -4,7 +4,7 @@ import type { LiveCam, LiveCamFavoriteSnapshot, LiveCamQuery, LiveStream } from 
 import type { Database, LiveCamFavorite, Performer, Source } from "./database.js";
 import { PluginManager, pluginMatchesSource } from "./plugin-manager.js";
 
-export type PublicLiveCam = LiveCam & { providerId: string; providerName: string; favorite: boolean };
+export type PublicLiveCam = LiveCam & { providerId: string; providerName: string; favorite: boolean; performerId?: string };
 export type LiveCamProviderStatus = { id: string; name: string; ok: boolean; count: number; pending?: boolean; error?: string };
 export type LiveCamResult = {
   items: PublicLiveCam[]; total: number; page: number; pageSize: number; pages: number;
@@ -33,6 +33,20 @@ export class LiveCamService {
   private favoriteSnapshots = new Map<string, { snapshot: LiveCamFavoriteSnapshot; expiresAt: number }>();
 
   constructor(private readonly db: Database, private readonly plugins: PluginManager, private readonly request: typeof fetch = fetch) {}
+
+  private findPerformer(providerId: string, cam: Pick<LiveCam, "id" | "username">, performers = this.db.listPerformers()): Performer | undefined {
+    const identities = new Set([cam.username, cam.id, `live:${cam.username}`].map((value) => value.trim().toLowerCase()));
+    return performers.find((performer) => {
+      const externalId = performer.externalRefs[providerId]?.trim().toLowerCase();
+      return Boolean(externalId && identities.has(externalId));
+    }) ?? performers.find((performer) => performer.name.localeCompare(cam.username.trim(), undefined, { sensitivity: "accent" }) === 0);
+  }
+
+  private linkPerformer(cam: PublicLiveCam, performers?: Performer[]): PublicLiveCam {
+    const { performerId: _previousPerformerId, ...unlinkedCam } = cam;
+    const performerId = this.findPerformer(cam.providerId, cam, performers)?.id;
+    return { ...unlinkedCam, ...(performerId ? { performerId } : {}) };
+  }
 
   private livePlugins(providerId?: string) {
     return this.plugins.list().filter((entry) => entry.installed && entry.enabled
@@ -106,8 +120,9 @@ export class LiveCamService {
         total = cams.length;
         cams = cams.slice((query.page - 1) * query.pageSize, query.page * query.pageSize);
       }
+      const performers = this.db.listPerformers();
       const normalized = cams.filter((cam) => pluginMatchesSource(entry.manifest, cam.pageUrl))
-        .map((cam) => ({ ...cam, providerId: entry.manifest.id, providerName: entry.manifest.name, favorite: this.db.isLiveCamFavorite(entry.manifest.id, cam.username) }));
+        .map((cam) => this.linkPerformer({ ...cam, providerId: entry.manifest.id, providerName: entry.manifest.name, favorite: this.db.isLiveCamFavorite(entry.manifest.id, cam.username) }, performers));
       for (const cam of normalized) this.recentCams.set(`${entry.manifest.id}:${cam.id.toLowerCase()}`, { cam, expiresAt: Date.now() + 120_000 });
       return {
         items: normalized,
@@ -175,7 +190,7 @@ export class LiveCamService {
     const entry = this.livePlugins(providerId)[0];
     if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
     const cached = this.recentCams.get(`${providerId}:${camId.toLowerCase()}`);
-    if (cached && cached.expiresAt > Date.now()) return { ...cached.cam, favorite: this.db.isLiveCamFavorite(providerId, cached.cam.username) };
+    if (cached && cached.expiresAt > Date.now()) return this.linkPerformer({ ...cached.cam, favorite: this.db.isLiveCamFavorite(providerId, cached.cam.username) });
     const result = await this.listProvider(entry, { page: 1, pageSize: 48, search: camId });
     if (!result.status.ok) throw Object.assign(new Error(result.status.error ?? "The live provider could not be reached"), { statusCode: 502 });
     const needle = camId.toLowerCase();
@@ -273,10 +288,7 @@ export class LiveCamService {
     if (!pluginMatchesSource(entry.manifest, cam.pageUrl)) throw Object.assign(new Error(`${entry.manifest.name} does not support this live URL`), { statusCode: 400 });
     const username = cam.username.trim();
     const identities = new Set([username, cam.id, `live:${username}`].map((value) => value.trim().toLowerCase()));
-    const existing = this.db.listPerformers().find((performer) => {
-      const externalId = performer.externalRefs[providerId]?.trim().toLowerCase();
-      return Boolean(externalId && identities.has(externalId));
-    }) ?? this.db.getPerformerByName(username);
+    const existing = this.findPerformer(providerId, cam);
     const performer = this.db.upsertPerformer({ externalId: username, name: username, imageUrl: existing?.imageUrl ?? cam.thumbnailUrl }, providerId, existing?.id);
     const profileUrl = new URL(cam.pageUrl).href;
     const existingSource = this.db.listSources(performer.id).find((source) => source.pluginId === providerId && (

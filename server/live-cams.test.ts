@@ -114,6 +114,7 @@ describe("Open EasyX live cams", () => {
     expect(service.createPerformer("test.live", { ...cam, pageUrl: "https://live.test/alice/" })).toMatchObject({ created: false, sourceCreated: false });
     expect(database.listPerformers()).toHaveLength(1);
     expect(database.listSources()).toHaveLength(1);
+    await expect(service.get("test.live", "alice")).resolves.toMatchObject({ performerId: database.listPerformers()[0].id });
   });
 
   it("resolves provider streams behind a short-lived Downloader proxy URL", async () => {

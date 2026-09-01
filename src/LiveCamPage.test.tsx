@@ -46,6 +46,13 @@ describe("Live Cam availability", () => {
     expect(html).toContain("Add performer");
   });
 
+  it("offers performer management after reloading an already linked live room", () => {
+    const html = renderToStaticMarkup(<LiveCamPerformerButton cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live", performerId: "person-alice" }}/>);
+    expect(html).toContain("Manage performer");
+    expect(html).toContain("/performers?performer=person-alice");
+    expect(html).not.toContain("Add performer");
+  });
+
   it("offers a persistent creator favorite action", () => {
     const html = renderToStaticMarkup(<LiveCamFavoriteButton cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live", favorite: true }}/>);
     expect(html).toContain("Favorited"); expect(html).toContain('aria-pressed="true"');
