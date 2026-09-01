@@ -77,18 +77,24 @@ describe("public live-cam discovery parsers", () => {
 });
 
 describe("public live-cam discovery paging", () => {
-  it("pages the Stripchat catalogue locally because its endpoint ignores offsets", async () => {
-    const models = Array.from({ length: 60 }, (_, index) => ({ username: `model-${index + 1}`, status: "public", viewersCount: 60 - index, broadcastGender: "female" }));
-    const fetch = vi.fn(async (_input: string | URL | Request) => new Response(JSON.stringify({ blocks: [{ models }], totalCount: 2_000 }), { status: 200 }));
+  it("loads every Stripchat catalogue batch before paging the stable snapshot", async () => {
+    const models = Array.from({ length: 125 }, (_, index) => ({ id: index + 1, username: `model-${index + 1}`, status: "public", viewersCount: 125 - index, broadcastGender: "female" }));
+    const fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { excludeModelIds: number[] };
+      const page = models.slice(body.excludeModelIds.length, body.excludeModelIds.length + 60);
+      return new Response(JSON.stringify({ models: page, totalCount: 60 }), { status: 200 });
+    });
     const context = { config: {}, fetch, log: vi.fn(), runCommand: vi.fn() };
     const first = await listDiscoveredLiveCams(context, "stripchat", { page: 1, pageSize: 24 });
     const second = await listDiscoveredLiveCams(context, "stripchat", { page: 2, pageSize: 24 });
-    expect(first).toMatchObject({ total: 60, pages: 3 });
+    expect(first).toMatchObject({ total: 125, pages: 6 });
     expect(first.cams[0]).toMatchObject({ username: "model-1" });
     expect(second.cams[0]).toMatchObject({ username: "model-25" });
     expect(new Set(first.cams.map((cam) => cam.username))).not.toContain(second.cams[0].username);
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(String(fetch.mock.calls[0][0])).not.toMatch(/[?&](?:offset|page)=/);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(String(fetch.mock.calls[0][0])).toContain("/api/front/v2/models/get-list");
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toMatchObject({ primaryTag: "girls", excludeModelIds: [] });
+    expect(JSON.parse(String(fetch.mock.calls[2][1]?.body)).excludeModelIds).toHaveLength(120);
   });
 
   it("applies search, gender, and pagination to a provider catalogue", async () => {

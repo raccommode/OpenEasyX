@@ -103,6 +103,19 @@ describe("Open EasyX live cams", () => {
     expect(database.isLiveCamFavorite("test.live", "alice")).toBe(true);
   });
 
+  it("creates one reusable performer profile directly from a live room", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    const cam = { id: "alice", username: "alice", pageUrl: "https://live.test/alice", thumbnailUrl: "https://live.test/alice.jpg" };
+    expect(service.createPerformer("test.live", cam)).toMatchObject({
+      created: true, sourceCreated: true,
+      performer: { name: "alice", imageUrl: "https://live.test/alice.jpg", externalRefs: { "test.live": "alice" } },
+      source: { pluginId: "test.live", profileUrl: "https://live.test/alice" },
+    });
+    expect(service.createPerformer("test.live", { ...cam, pageUrl: "https://live.test/alice/" })).toMatchObject({ created: false, sourceCreated: false });
+    expect(database.listPerformers()).toHaveLength(1);
+    expect(database.listSources()).toHaveLength(1);
+  });
+
   it("resolves provider streams behind a short-lived Downloader proxy URL", async () => {
     const { plugins, service } = await fixture(); plugins.install("org.easyx.viewer"); plugins.install("test.live");
     await expect(service.resolve("test.live", { id: "alice", username: "alice", pageUrl: "https://live.test/alice" }))

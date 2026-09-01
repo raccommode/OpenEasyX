@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LiveCamCard, LiveCamFavoriteButton, LiveCamRecordButton, LiveCamUnavailable, LivePlayer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl, shouldRecoverNativeLiveMediaError } from "./LiveCamPage";
+import { LiveCamCard, LiveCamFavoriteButton, LiveCamPerformerButton, LiveCamRecordButton, LiveCamUnavailable, LivePlayer, liveCamListUrl, liveCamPresetFromSearch, liveCamUrl, shouldRecoverNativeLiveMediaError } from "./LiveCamPage";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -39,6 +39,11 @@ describe("Live Cam availability", () => {
   it("offers direct recording from a live room", () => {
     const html = renderToStaticMarkup(<LiveCamRecordButton cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live" }}/>);
     expect(html).toContain("Record live");
+  });
+
+  it("offers direct performer creation from a live room", () => {
+    const html = renderToStaticMarkup(<LiveCamPerformerButton cam={{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", providerId: "test.live", providerName: "Test Live" }}/>);
+    expect(html).toContain("Add performer");
   });
 
   it("offers a persistent creator favorite action", () => {

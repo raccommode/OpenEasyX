@@ -236,6 +236,12 @@ app.post<{ Params: { providerId: string } }>("/api/live-cams/favorites/sync/:pro
   const providerId = z.string().trim().min(1).max(200).parse(request.params.providerId);
   return liveCams.syncFavorites(providerId);
 });
+app.post<{ Body: unknown }>("/api/live-cams/performer", async (request) => {
+  const body = liveCamBodySchema.parse(request.body);
+  const result = liveCams.createPerformer(body.providerId, body.cam);
+  ensurePerformerDirectory(mediaDir, result.performer.name);
+  return result;
+});
 app.get<{ Params: { providerId: string; camId: string } }>("/api/live-cams/:providerId/:camId", async (request) => {
   const params = z.object({
     providerId: z.string().trim().min(1).max(200),

@@ -210,7 +210,7 @@ function Discover({ plugins, run }: { plugins: Plugin[]; run: (op: () => Promise
 }
 
 function Library({ dashboard, plugins, run }: { dashboard: Dashboard; plugins: Plugin[]; run: (op: () => Promise<unknown>, msg: string) => Promise<void> }) {
-  const [filter, setFilter] = useState(""); const [selectedId, setSelectedId] = useState<string | null>(null); const [adding, setAdding] = useState(false);
+  const [filter, setFilter] = useState(""); const [selectedId, setSelectedId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("performer")); const [adding, setAdding] = useState(false);
   const [discovering, setDiscovering] = useState(() => new URLSearchParams(window.location.search).get("discover") === "1");
   const needle = filter.trim().toLowerCase();
   const people = dashboard.performers.filter((person) => [person.name, ...person.aliases].some((value) => value.toLowerCase().includes(needle)));

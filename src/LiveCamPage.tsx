@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type HlsInstance from "hls.js";
-import { AlertTriangle, ArrowLeft, Download, Eye, LoaderCircle, Maximize, Minimize, Pause, Play, Radio, RefreshCw, Search, Server, Star, Users, Volume2, VolumeX } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Download, Eye, LoaderCircle, Maximize, Minimize, Pause, Play, Radio, RefreshCw, Search, Server, Star, UserPlus, Users, Volume2, VolumeX } from "lucide-react";
 import { api } from "./api";
 import { loadPlayerAudio, savePlayerAudio } from "./player-audio";
 import { monitorVideoStalls } from "./video-stall-recovery";
@@ -186,6 +186,23 @@ export function LiveCamFavoriteButton({ cam }: { cam: LiveCam }) {
   return <>{<button className={`quiet live-favorite-button${favorite ? " active" : ""}`} onClick={() => void toggle()} disabled={saving} aria-pressed={favorite}><Star fill={favorite ? "currentColor" : "none"}/>{saving ? "Saving…" : favorite ? "Favorited" : "Favorite creator"}</button>}{favoriteError && <p className="row-error">{favoriteError}</p>}</>;
 }
 
+export function LiveCamPerformerButton({ cam }: { cam: LiveCam }) {
+  const [saving, setSaving] = useState(false); const [performerId, setPerformerId] = useState(""); const [performerError, setPerformerError] = useState("");
+  const create = async () => {
+    if (saving || performerId) return;
+    setSaving(true); setPerformerError("");
+    try {
+      const result = await api<{ performer: { id: string } }>("/api/live-cams/performer", { method: "POST", body: JSON.stringify({ providerId: cam.providerId, cam }) });
+      setPerformerId(result.performer.id);
+    } catch (reason) { setPerformerError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setSaving(false); }
+  };
+  return <>{performerId
+    ? <a className="quiet" href={`/performers?performer=${encodeURIComponent(performerId)}`}><UserPlus/>Manage performer</a>
+    : <button className="quiet" onClick={() => void create()} disabled={saving}><UserPlus/>{saving ? "Creating…" : "Add performer"}</button>}
+    {performerError && <p className="row-error">{performerError}</p>}</>;
+}
+
 export function LiveCamCard({ cam, open }: { cam: LiveCam; open: (cam: LiveCam) => void }) {
   const offline = cam.online === false;
   return <a className={`live-card${offline ? " offline" : ""}`} href={offline ? undefined : liveCamUrl(cam)} aria-disabled={offline || undefined} onClick={(event) => {
@@ -212,7 +229,7 @@ export function LiveCamViewer({ providerId, camId, close }: { providerId: string
   return <article className="watch-page live-watch-page">
     <section className="theater-stage"><LivePlayer cam={cam} close={close}/></section>
     <section className="watch-info">
-      <div className="watch-heading"><div><span className="watch-eyebrow">LIVE · {cam.providerName}</span><h1>{cam.username}</h1><p>{cam.title && cam.title !== cam.username ? cam.title : "Public live broadcast"}</p></div><div className="watch-actions"><LiveCamFavoriteButton cam={cam}/><LiveCamRecordButton cam={cam}/><button className="quiet" onClick={close}><ArrowLeft/>Back to Live Cam</button></div></div>
+      <div className="watch-heading"><div><span className="watch-eyebrow">LIVE · {cam.providerName}</span><h1>{cam.username}</h1><p>{cam.title && cam.title !== cam.username ? cam.title : "Public live broadcast"}</p></div><div className="watch-actions"><LiveCamPerformerButton cam={cam}/><LiveCamFavoriteButton cam={cam}/><LiveCamRecordButton cam={cam}/><button className="quiet" onClick={close}><ArrowLeft/>Back to Live Cam</button></div></div>
       <div className="watch-meta"><span className="live-meta-on-air"><Radio/>ON AIR</span><span><Eye/>{Number(cam.viewers ?? 0).toLocaleString()} viewers</span><span><Radio/>{cam.providerName}</span>{cam.age ? <span>{cam.age} years old</span> : null}</div>
       {cam.tags?.length ? <div className="live-watch-tags">{cam.tags.slice(0, 12).map((tag) => <span key={tag}>#{tag}</span>)}</div> : null}
     </section>

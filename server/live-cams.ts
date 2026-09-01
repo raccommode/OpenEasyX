@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyReply } from "fastify";
 import type { LiveCam, LiveCamFavoriteSnapshot, LiveCamQuery, LiveStream } from "../packages/plugin-sdk/index.js";
-import type { Database, LiveCamFavorite } from "./database.js";
+import type { Database, LiveCamFavorite, Performer, Source } from "./database.js";
 import { PluginManager, pluginMatchesSource } from "./plugin-manager.js";
 
 export type PublicLiveCam = LiveCam & { providerId: string; providerName: string; favorite: boolean };
@@ -267,6 +267,29 @@ export class LiveCamService {
     };
   }
 
+  createPerformer(providerId: string, cam: LiveCam): { performer: Performer; source: Source; created: boolean; sourceCreated: boolean } {
+    const entry = this.livePlugins(providerId)[0];
+    if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
+    if (!pluginMatchesSource(entry.manifest, cam.pageUrl)) throw Object.assign(new Error(`${entry.manifest.name} does not support this live URL`), { statusCode: 400 });
+    const username = cam.username.trim();
+    const identities = new Set([username, cam.id, `live:${username}`].map((value) => value.trim().toLowerCase()));
+    const existing = this.db.listPerformers().find((performer) => {
+      const externalId = performer.externalRefs[providerId]?.trim().toLowerCase();
+      return Boolean(externalId && identities.has(externalId));
+    }) ?? this.db.getPerformerByName(username);
+    const performer = this.db.upsertPerformer({ externalId: username, name: username, imageUrl: existing?.imageUrl ?? cam.thumbnailUrl }, providerId, existing?.id);
+    const profileUrl = new URL(cam.pageUrl).href;
+    const existingSource = this.db.listSources(performer.id).find((source) => source.pluginId === providerId && (
+      identities.has(source.externalId.trim().toLowerCase()) || source.profileUrl.replace(/\/+$/, "").toLowerCase() === profileUrl.replace(/\/+$/, "").toLowerCase()
+    ));
+    const source = existingSource
+      ? this.db.updateSource(existingSource.id, { label: `${username} profile`, profileUrl, domain: new URL(profileUrl).hostname.replace(/^www\./i, "") })!
+      : this.db.addSource(performer.id, providerId, {
+        externalId: username, label: `${username} profile`, profileUrl, domain: new URL(profileUrl).hostname.replace(/^www\./i, ""),
+      });
+    return { performer, source, created: !existing, sourceCreated: !existingSource };
+  }
+
   record(providerId: string, cam: LiveCam): { itemId: string; status: string } {
     const entry = this.livePlugins(providerId)[0];
     if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
@@ -280,10 +303,7 @@ export class LiveCamService {
     const session = startedAt.toISOString().replace(/[:.]/g, "-");
     const externalId = `manual-live:${username.toLowerCase()}:${session}`;
     const safeName = username.replace(/[^a-z0-9_.-]+/gi, "-").replace(/^-+|-+$/g, "") || "live";
-    const performer = this.db.upsertPerformer({ externalId: `live:${username.toLowerCase()}`, name: username, imageUrl: cam.thumbnailUrl }, providerId);
-    const source = this.db.addSource(performer.id, providerId, {
-      externalId: `live:${username.toLowerCase()}`, label: `${username} live`, profileUrl: cam.pageUrl, domain: new URL(cam.pageUrl).hostname.replace(/^www\./i, ""),
-    });
+    const { performer, source } = this.createPerformer(providerId, cam);
     this.db.ingestItems(source, [{
       externalId, title: cam.title ?? `${username} live`, pageUrl: cam.pageUrl, mediaType: "video",
       publishedAt: startedAt.toISOString(), filename: `${safeName}-${session}.mp4`, metadata: { extractorUrl: cam.pageUrl, live: true },
