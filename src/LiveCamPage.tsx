@@ -4,6 +4,7 @@ import { AlertTriangle, ArrowLeft, Download, Eye, LoaderCircle, Maximize, Minimi
 import { api } from "./api";
 import { loadPlayerAudio, savePlayerAudio } from "./player-audio";
 import { monitorVideoStalls } from "./video-stall-recovery";
+import { usePlayerFullscreen } from "./player-fullscreen";
 import "./player.css";
 import "./watch-page.css";
 import "./live-player.css";
@@ -51,7 +52,8 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
   const initialAudio = useRef(loadPlayerAudio(undefined, { volume: 1, muted: true }));
   const [streamUrl, setStreamUrl] = useState(""); const [error, setError] = useState(""); const [retry, setRetry] = useState(0);
   const [playing, setPlaying] = useState(false); const [waiting, setWaiting] = useState(true); const [controls, setControls] = useState(true);
-  const [volume, setVolume] = useState(initialAudio.current.volume); const [muted, setMuted] = useState(initialAudio.current.muted); const [fullscreen, setFullscreen] = useState(false);
+  const [volume, setVolume] = useState(initialAudio.current.volume); const [muted, setMuted] = useState(initialAudio.current.muted);
+  const { fullscreen, pageFullscreen, toggleFullscreen } = usePlayerFullscreen(player, video, cam.id);
   const reveal = () => {
     setControls(true); window.clearTimeout(hideTimer.current);
     if (!video.current?.paused) hideTimer.current = window.setTimeout(() => setControls(false), 2400);
@@ -64,23 +66,21 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
     const element = video.current; if (!element) return;
     element.muted = !element.muted; setMuted(element.muted); savePlayerAudio({ volume: element.volume, muted: element.muted });
   };
-  const toggleFullscreen = async () => { if (document.fullscreenElement) await document.exitFullscreen(); else await player.current?.requestFullscreen(); };
   useEffect(() => {
     const element = video.current; if (!element) return;
     element.volume = initialAudio.current.volume; element.muted = initialAudio.current.muted;
   }, []);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { close(); return; }
+      if (event.key === "Escape") { if (!fullscreen) close(); return; }
       if (["INPUT", "SELECT", "BUTTON"].includes((event.target as HTMLElement).tagName)) return;
       if (event.code === "Space" || event.key.toLowerCase() === "k") { event.preventDefault(); togglePlayback(); }
       else if (event.key.toLowerCase() === "m") toggleMute();
       else if (event.key.toLowerCase() === "f") void toggleFullscreen();
     };
-    const onFullscreen = () => setFullscreen(document.fullscreenElement === player.current);
-    window.addEventListener("keydown", onKey); document.addEventListener("fullscreenchange", onFullscreen);
-    return () => { window.removeEventListener("keydown", onKey); document.removeEventListener("fullscreenchange", onFullscreen); window.clearTimeout(hideTimer.current); };
-  }, [close]);
+    window.addEventListener("keydown", onKey);
+    return () => { window.removeEventListener("keydown", onKey); window.clearTimeout(hideTimer.current); };
+  }, [close, fullscreen, pageFullscreen]);
   useEffect(() => {
     let active = true; setStreamUrl(""); setError(""); setWaiting(true);
     void api<{ streamUrl: string }>("/api/live-cams/stream", { method: "POST", body: JSON.stringify({ providerId: cam.providerId, cam }) })
@@ -143,7 +143,7 @@ export function LivePlayer({ cam, close }: { cam: LiveCam; close: () => void }) 
     return monitorVideoStalls(element);
   }, [streamUrl]);
   return <div className="live-stage live-watch-stage">
-    <div ref={player} className={`custom-player live-custom-player ${controls || !playing ? "controls-visible" : "controls-hidden"}`} tabIndex={0} onMouseMove={reveal} onTouchStart={reveal} onMouseLeave={() => playing && setControls(false)}>
+    <div ref={player} className={`custom-player live-custom-player ${pageFullscreen ? "page-fullscreen" : ""} ${controls || !playing ? "controls-visible" : "controls-hidden"}`} tabIndex={0} onMouseMove={reveal} onTouchStart={reveal} onMouseLeave={() => playing && setControls(false)}>
       <div className="player-surface" onClick={togglePlayback} onDoubleClick={() => void toggleFullscreen()}><video ref={video} playsInline muted={muted} preload="auto"
         onPlay={() => { setPlaying(true); setWaiting(false); setError(""); reveal(); }} onPlaying={() => { setPlaying(true); setWaiting(false); setError(""); }} onPause={() => { setPlaying(false); setWaiting(false); }} onWaiting={() => setWaiting(true)} onCanPlay={() => setWaiting(false)}
         onVolumeChange={(event) => { const audio = { volume: event.currentTarget.volume, muted: event.currentTarget.muted }; setVolume(audio.volume); setMuted(audio.muted); initialAudio.current = audio; savePlayerAudio(audio); }}/></div>
@@ -173,17 +173,37 @@ export function LiveCamRecordButton({ cam }: { cam: LiveCam }) {
 
 export function LiveCamFavoriteButton({ cam }: { cam: LiveCam }) {
   const [favorite, setFavorite] = useState(Boolean(cam.favorite)); const [saving, setSaving] = useState(false); const [favoriteError, setFavoriteError] = useState("");
+  const [syncing, setSyncing] = useState(true); const [syncNotice, setSyncNotice] = useState("");
   useEffect(() => setFavorite(Boolean(cam.favorite)), [cam.favorite]);
+  useEffect(() => { setSyncing(true); setSyncNotice(""); }, [cam.providerId, cam.username]);
+  useEffect(() => {
+    if (!syncing) return;
+    let disposed = false;
+    const check = async () => {
+      try {
+        const result = await api<{ synchronization: Array<{ providerId: string; username: string; state: string; error?: string }> }>("/api/live-cams/favorites");
+        if (disposed) return;
+        const change = result.synchronization.find((entry) => entry.providerId === cam.providerId && entry.username.toLowerCase() === cam.username.toLowerCase());
+        if (!change || change.state !== "pending") {
+          setSyncing(false);
+          setSyncNotice(!change ? "" : change.state === "failed" ? `Saved locally. Account sync will retry: ${change.error}` : change.state === "local" ? "Saved locally. Connect an account to synchronize with the provider." : "Account synchronized.");
+        }
+      } catch { /* Local favorite remains saved while the server is temporarily unavailable. */ }
+    };
+    void check(); const timer = window.setInterval(() => void check(), 2000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [syncing, cam.providerId, cam.username]);
   const toggle = async () => {
     if (saving) return;
     const next = !favorite; setSaving(true); setFavoriteError("");
     try {
-      await api("/api/live-cams/favorites", { method: "PUT", body: JSON.stringify({ providerId: cam.providerId, cam, favorite: next }) });
+      const result = await api<{ synchronization?: string }>("/api/live-cams/favorites", { method: "PUT", signal: AbortSignal.timeout(15_000), body: JSON.stringify({ providerId: cam.providerId, cam, favorite: next }) });
+      setSyncing(result.synchronization === "pending"); setSyncNotice(result.synchronization === "pending" ? "Saved locally. Synchronizing your connected account…" : "");
       setFavorite(next); window.dispatchEvent(new CustomEvent("easyx:live-favorites"));
     } catch (reason) { setFavoriteError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setSaving(false); }
   };
-  return <>{<button className={`quiet live-favorite-button${favorite ? " active" : ""}`} onClick={() => void toggle()} disabled={saving} aria-pressed={favorite}><Star fill={favorite ? "currentColor" : "none"}/>{saving ? "Saving…" : favorite ? "Favorited" : "Favorite creator"}</button>}{favoriteError && <p className="row-error">{favoriteError}</p>}</>;
+  return <>{<button className={`quiet live-favorite-button${favorite ? " active" : ""}`} onClick={() => void toggle()} disabled={saving} aria-pressed={favorite}><Star fill={favorite ? "currentColor" : "none"}/>{saving ? "Saving…" : favorite ? "Favorited" : "Favorite creator"}</button>}{favoriteError && <p className="row-error" role="alert">{favoriteError}</p>}{syncNotice && <small className="favorite-sync-notice" role="status">{syncNotice}</small>}</>;
 }
 
 export function LiveCamPerformerButton({ cam }: { cam: LiveCam }) {

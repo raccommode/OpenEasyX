@@ -9,6 +9,7 @@ import { LogsPage } from "./logs.js";
 import { isLibraryRoute, LibraryApp } from "./library-app.js";
 import { AppChrome } from "./AppChrome.js";
 import { SettingsPage as SubtitleSettingsPage } from "./SettingsPage.js";
+import { OutputSettings } from "./OutputSettings.js";
 import "./styles.css";
 import "./scraper.css";
 import "./activity.css";
@@ -18,6 +19,7 @@ import "./plugin-catalog.css";
 import "./app-chrome.css";
 import "./settings-navigation.css";
 import "./performer-discovery.css";
+import "./responsive.css";
 
 type Plugin = { manifest: { id: string; name: string; version: string; description: string; author: string; homepage?: string; capabilities: string[]; settings?: Array<{ key: string; label: string; type: string; required?: boolean; default?: unknown; placeholder?: string; help?: string; cookieDomains?: string[]; sessionFormat?: "cookies" | "raw-json" }>; browserAuth?: { loginUrl: string; sessionSetting: string; capture?: "cookies" | "onlyfans" | "manyvids" | "authorization-header"; requestDomains?: string[] }; sourceUrlPatterns?: string[]; fallback?: boolean; polling?: { mode: "periodic" | "live"; defaultIntervalSeconds: number; minimumIntervalSeconds: number } }; installed: boolean; enabled: boolean; config: Record<string, unknown>; origin: string };
 type PluginRepository = { id: string; name: string; url: string; official: boolean; removable: boolean; addedAt: string; updatedAt: string; pluginCount: number };
@@ -150,7 +152,7 @@ function App() {
         {page === "activity" && <ActivityPage performers={dashboard.performers} sources={dashboard.sources} run={run}/>}
         {page === "logs" && <LogsPage/>}
         {page === "plugins" && <PluginsPage plugins={plugins} repositories={repositories} run={run}/>}
-        {page === "settings" && <SettingsPage settings={settings} run={run} setNotice={(text) => setNotice({ kind: "ok", text })}/>}
+        {page === "settings" && <SettingsPage settings={settings} run={run} onSettingsChange={setSettings} setNotice={(text) => setNotice({ kind: "ok", text })}/>}
     </div>
     {notice && <div className={`toast ${notice.kind}`}><span>{notice.kind === "ok" ? <Check size={17}/> : <CircleAlert size={17}/>}</span>{notice.text}<button onClick={() => setNotice(null)}><X size={15}/></button></div>}
   </AppChrome>;
@@ -516,7 +518,7 @@ function PluginConfig({ plugin, installing, close, run }: { plugin: Plugin; inst
   </div></div>{browserSession?.active && browserSession.viewerPath && <div className="modal-backdrop browser-backdrop"><div className="browser-modal"><div className="browser-modal-head"><div><p>INTEGRATED SECURE BROWSER</p><h2>Sign in to {plugin.manifest.name}</h2><span>EasyX captures the session only when you confirm below. This window closes automatically after 15 minutes.</span></div><button className="icon-button" aria-label="Close integrated browser" disabled={browserBusy} onClick={() => void stopBrowser()}><X/></button></div>{browserError && <div className="browser-error"><CircleAlert size={16}/><span><strong>Session not captured</strong>{browserError}</span></div>}<div className="browser-clipboard"><button className="secondary" onClick={() => void pasteFromMac()}><ClipboardPaste size={15}/>Paste from Mac</button><input aria-label="Clipboard fallback" placeholder="Fallback: click the site field, then paste here with ⌘V" onPaste={(event) => { const text = event.clipboardData.getData("text/plain"); if (text) { event.preventDefault(); void sendClipboard(text); } }}/><span>{clipboardStatus || "Click a field in the site, then press ⌘V directly."}</span></div><div className="browser-frame"><iframe title={`${plugin.manifest.name} sign-in browser`} src={browserSession.viewerPath} onLoad={(event) => attachClipboardBridge(event.currentTarget)}/></div><div className="browser-modal-foot"><p><ShieldCheck size={15}/>Keep this EasyX server private: anyone who can access this page can interact with the open browser.</p><div><button className="secondary" disabled={browserBusy} onClick={() => void stopBrowser()}>Cancel</button><button className="primary" disabled={browserBusy} onClick={() => void captureBrowser()}>{browserBusy ? <LoaderCircle className="spin" size={16}/> : <Check size={16}/>}I’m signed in — capture session</button></div></div></div></div>}</>;
 }
 
-function SettingsPage({ settings, run, setNotice }: { settings: Record<string, any>; run: (op: () => Promise<unknown>, msg: string) => Promise<void>; setNotice: (text: string) => void }) {
+function SettingsPage({ settings, run, setNotice, onSettingsChange }: { settings: Record<string, any>; run: (op: () => Promise<unknown>, msg: string) => Promise<void>; setNotice: (text: string) => void; onSettingsChange: (settings: Record<string, unknown>) => void }) {
   const [values, setValues] = useState(settings);
   const [category, setCategory] = useState<"automation" | "storage" | "subtitles">("automation");
   const categories = [
@@ -531,7 +533,7 @@ function SettingsPage({ settings, run, setNotice }: { settings: Record<string, a
       <nav className="settings-category-menu" aria-label="Settings categories"><p>CATEGORIES</p>{categories.map(({ key, label, description, icon: Icon }) => <button key={key} className={category === key ? "active" : ""} aria-pressed={category === key} onClick={() => setCategory(key)}><Icon/><span><b>{label}</b><small>{description}</small></span><ChevronRight/></button>)}</nav>
       <div className="settings-category-content">
         {category === "automation" && <section className="panel"><div className="panel-head"><div><p>AUTOMATION</p><h3>Scraping and downloads</h3></div></div><div className="form-stack"><label><span>Default periodic scrape interval (minutes)</span><input type="number" min="5" value={values.defaultScrapeIntervalMinutes ?? 360} onChange={(e) => setValues({ ...values, defaultScrapeIntervalMinutes: Number(e.target.value) })}/><small>Fallback for plugins that do not publish a recommended schedule. Each performer URL can override it.</small></label><label><span>Default live check interval (seconds)</span><input type="number" min="5" max="3600" value={values.defaultLiveIntervalSeconds ?? 10} onChange={(e) => setValues({ ...values, defaultLiveIntervalSeconds: Number(e.target.value) })}/><small>Reserved for live-aware plugins. A plugin can enforce a safer minimum interval.</small></label><label><span>Maximum concurrent downloads</span><input type="number" min="1" max="8" value={values.maxConcurrentDownloads ?? 2} onChange={(e) => setValues({ ...values, maxConcurrentDownloads: Number(e.target.value) })}/><small>Keep this low on slower storage or connections.</small></label><label className="toggle-row"><span><b>Automatically queue discovered media</b><small>New items from every source are queued without review.</small></span><input type="checkbox" checked={!!values.autoQueueDiscovered} onChange={(e) => setValues({ ...values, autoQueueDiscovered: e.target.checked })}/></label><label><span>Retention period (days)</span><input type="number" min="0" value={values.retentionDays ?? 0} onChange={(e) => setValues({ ...values, retentionDays: Number(e.target.value) })}/><small>Reserved for retention policies. Use 0 to keep files indefinitely.</small></label></div><button className="primary" onClick={saveAutomation}><Check size={16}/>Save changes</button></section>}
-        {category === "storage" && <section className="panel"><div className="panel-head"><div><p>STORAGE</p><h3>Media volume</h3></div></div><div className="path-box"><FolderOpen/><code>{settings.mediaRoot}</code></div><p className="muted">Files are organized as <code>Performer / source-domain / filename</code>. Mount this path into media managers that should index completed downloads.</p></section>}
+        {category === "storage" && <OutputSettings settings={settings} setNotice={setNotice} onSaved={onSettingsChange}/>}
         {category === "subtitles" && <div className="library-mode embedded-subtitle-settings"><SubtitleSettingsPage setNotice={setNotice} embedded/></div>}
       </div>
     </div>

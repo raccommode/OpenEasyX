@@ -167,15 +167,6 @@ export async function setStripchatFavorite(context: PluginContext, cam: LiveCam,
   if (!/^[a-z0-9_.-]{2,64}$/i.test(cam.username)) throw new Error("Stripchat received an invalid room name");
   let modelId = 0;
   const followedIds = await stripchatFavoriteIds(context, account);
-  for (let offset = 0; offset < followedIds.length && !modelId; offset += 100) {
-    const payload = await stripchatApi(context, account, "GET", "/models/list", {
-      params: new URLSearchParams({ modelIds: followedIds.slice(offset, offset + 100).join(",") }),
-    });
-    const followedModel = findModel(payload, cam.username);
-    const followedModelId = Number(followedModel?.id ?? followedModel?.streamName);
-    if (Number.isInteger(followedModelId) && followedModelId > 0) modelId = followedModelId;
-  }
-  if ((modelId > 0) === favorite) return { synchronized: true };
   let browserFallback = false;
   try {
     if (!modelId) {
@@ -184,6 +175,7 @@ export async function setStripchatFavorite(context: PluginContext, cam: LiveCam,
       modelId = Number(model?.id ?? model?.streamName);
     }
     if (!Number.isInteger(modelId) || modelId <= 0) throw new Error(`Stripchat could not identify ${cam.username}`);
+    if (followedIds.includes(modelId) === favorite) return { synchronized: true };
     if (favorite) {
       await stripchatApi(context, account, "PUT", `/users/${account.userId}/favorites/${modelId}`, { body: { uniq: Date.now() }, referer: cam.pageUrl });
     } else {

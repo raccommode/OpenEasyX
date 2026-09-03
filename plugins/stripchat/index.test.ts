@@ -102,6 +102,18 @@ describe("Stripchat direct live playback", () => {
 });
 
 describe("Stripchat account favorites", () => {
+  it("resolves only the requested creator even when the account follows thousands of models", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(accountPage()))
+      .mockResolvedValueOnce(Response.json({ modelIds: Array.from({ length: 4000 }, (_, i) => i + 1) }))
+      .mockResolvedValueOnce(Response.json({ model: { id: 5001, username: "Bob" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(Response.json({ modelIds: [5001] }));
+    const mock = { config: { cookiesFile: stripchatSession() }, fetch, log: vi.fn(), runCommand: vi.fn() } as unknown as PluginContext;
+    await expect(setStripchatFavorite(mock, { id: "bob", username: "Bob", pageUrl: "https://stripchat.com/Bob" }, true)).resolves.toEqual({ synchronized: true });
+    expect(fetch).toHaveBeenCalledTimes(5);
+    expect(fetch.mock.calls.map(([url]) => String(url)).some((url) => url.includes("/models/list"))).toBe(false);
+  });
   it("imports the authenticated online and offline favorite lists", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response(modernAccountPage()))

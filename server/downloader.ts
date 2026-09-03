@@ -8,8 +8,10 @@ import type { Database, DownloadItem } from "./database.js";
 import type { PluginManager } from "./plugin-manager.js";
 import type { LogWriter } from "./log-store.js";
 import { filenameFromUrl, safeSegment } from "./utils.js";
+import { downloadOutputPath, recordingEncodingArgs } from "./output-settings.js";
+import { outputSettings } from "../packages/output-settings.js";
 
-type ActiveDownload = { child?: ChildProcess; abort?: AbortController; paused: boolean; action?: "stop" | "cancel" | "delete" };
+type ActiveDownload = { child?: ChildProcess; abort?: AbortController; paused: boolean; encoding?: boolean; action?: "stop" | "cancel" | "delete" };
 
 export class DownloadQueue {
   private active = new Map<string, ActiveDownload>();
@@ -75,7 +77,7 @@ export class DownloadQueue {
     const item = this.requiredItem(itemId); if (item.storagePath) return item.storagePath;
     const performer = this.db.getPerformer(item.performerId); const source = this.db.getSource(item.sourceId);
     const fallback = `${item.externalId}.${item.mediaType === "image" ? "jpg" : item.mediaType === "video" ? "mp4" : "bin"}`;
-    return [safeSegment(performer?.name ?? "Unknown"), safeSegment(source?.domain ?? "unknown"), safeSegment(item.filename ?? fallback, fallback)].join("/");
+    return downloadOutputPath(this.db.getSettings(), item, performer?.name ?? "Unknown", source?.domain ?? "unknown", item.filename ?? fallback);
   }
 
   private requiredItem(itemId: string) {
@@ -86,6 +88,7 @@ export class DownloadQueue {
 
   private interrupt(itemId: string, action: ActiveDownload["action"]) {
     const item = this.requiredItem(itemId); const control = this.active.get(itemId);
+    if (action === "stop" && control?.encoding) return item;
     if (!control) {
       if (!["queued", "paused"].includes(item.status)) throw Object.assign(new Error(`Cannot ${action} an item with status '${item.status}'`), { statusCode: 409 });
       return this.db.setItemStatus(itemId, action === "delete" ? "deleted" : "cancelled");
@@ -111,6 +114,7 @@ export class DownloadQueue {
   private async download(item: DownloadItem, control: ActiveDownload) {
     let temporary = "";
     let temporaryDirectory = "";
+    let preserveTemporary = false;
     let lastProgress = 0; let lastBytes = 0; let lastProgressUpdate = 0;
     const reportProgress = (progress?: number, downloadedBytes?: number, force = false) => {
       const nextProgress = progress === undefined ? lastProgress : Math.max(lastProgress, Math.min(0.99, Math.max(0, progress)));
@@ -125,6 +129,7 @@ export class DownloadQueue {
       if (!plugin.resolveDownload) throw new Error("This plugin cannot resolve downloads");
       const performer = this.db.getPerformer(item.performerId); const source = this.db.getSource(item.sourceId);
       if (!performer || !source) throw new Error("The performer or source no longer exists");
+      const settings = outputSettings(this.db.getSettings());
       const request = await plugin.resolveDownload(this.plugins.context(item.pluginId), {
         externalId: item.externalId, identityKey: item.identityKey, title: item.title, pageUrl: item.pageUrl,
         mediaType: item.mediaType as any, filename: item.filename, qualityScore: item.qualityScore,
@@ -133,9 +138,8 @@ export class DownloadQueue {
       const fallback = `${item.externalId}.${item.mediaType === "image" ? "jpg" : item.mediaType === "video" ? "mp4" : "bin"}`;
       const requestUrl = request.kind === "command" ? item.pageUrl ?? item.externalId : request.url;
       const filename = safeSegment(request.filename ?? item.filename ?? filenameFromUrl(requestUrl, fallback), fallback);
-      const directory = path.join(this.mediaRoot, safeSegment(performer.name), safeSegment(source.domain));
-      fs.mkdirSync(directory, { recursive: true });
-      const destination = path.join(directory, filename);
+      const destination = path.join(this.mediaRoot, downloadOutputPath(settings, item, performer.name, source.domain, filename));
+      this.prepareOutputDirectory(path.dirname(destination));
       temporaryDirectory = path.join(this.downloadsRoot, safeSegment(item.id, "download"));
       fs.rmSync(temporaryDirectory, { recursive: true, force: true });
       fs.mkdirSync(temporaryDirectory, { recursive: true, mode: 0o700 });
@@ -169,7 +173,19 @@ export class DownloadQueue {
         reportProgress(contentLength ? received / contentLength : undefined, received, true);
         checksum = hash.digest("hex");
       }
-      await this.withFinalizeLock(item.performerId, async () => {
+      if (control.action === "cancel" || control.action === "delete") throw new Error("Download cancelled");
+      if (item.mediaType === "video" && item.metadata.live === true && settings.recordingPreset !== "source") {
+        const encoded = path.join(temporaryDirectory, "encoded.mp4");
+        control.action = undefined; control.encoding = true;
+        this.db.setItemStatus(item.id, "downloading", { progress: 0.99 });
+        this.writeLog?.("info", "download", "Encoding live recording", { itemId: item.id, preset: settings.recordingPreset });
+        await this.runCommandDownload("ffmpeg", recordingEncodingArgs(settings.recordingPreset, temporary, encoded), temporaryDirectory, undefined, () => {}, control);
+        if (control.action === "cancel" || control.action === "delete") throw new Error("Encoding cancelled");
+        if (!fs.existsSync(encoded) || !fs.statSync(encoded).size) throw new Error("Encoder completed without producing a media file");
+        fs.unlinkSync(temporary); temporary = encoded;
+        checksum = await this.hashFile(temporary);
+      }
+      await this.withFinalizeLock("output", async () => {
         const visual = await this.visualFingerprint(temporary, item.mediaType);
         const qualityScore = Math.max(item.qualityScore, visual?.qualityScore ?? 0);
         this.db.setDownloadFingerprint(item.id, visual?.hash, qualityScore);
@@ -189,9 +205,7 @@ export class DownloadQueue {
           this.db.setCanonicalMediaDate(item.id, canonicalDate);
           await this.applyMediaDate(temporary, item.mediaType, canonicalDate);
           const oldPath = duplicate.storagePath ? path.join(this.mediaRoot, duplicate.storagePath) : undefined;
-          const finalPath = fs.existsSync(destination) && path.resolve(destination) !== path.resolve(oldPath ?? "")
-            ? path.join(directory, `${path.parse(filename).name}-${item.id.slice(-6)}${path.extname(filename)}`)
-            : destination;
+          const finalPath = this.availableDestination(destination, item.id, oldPath);
           fs.renameSync(temporary, finalPath); temporary = "";
           if (oldPath && path.resolve(oldPath) !== path.resolve(finalPath) && fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
           const relativePath = path.relative(this.mediaRoot, finalPath);
@@ -204,7 +218,7 @@ export class DownloadQueue {
         }
         const canonicalDate = this.db.setCanonicalMediaDate(item.id, item.publishedAt);
         await this.applyMediaDate(temporary, item.mediaType, canonicalDate);
-        const finalPath = fs.existsSync(destination) ? path.join(directory, `${path.parse(filename).name}-${item.id.slice(-6)}${path.extname(filename)}`) : destination;
+        const finalPath = this.availableDestination(destination, item.id);
         fs.renameSync(temporary, finalPath); temporary = "";
         const relativePath = path.relative(this.mediaRoot, finalPath);
         this.db.setItemStatus(item.id, "completed", { progress: 1, checksum, storagePath: relativePath });
@@ -213,7 +227,19 @@ export class DownloadQueue {
         void Promise.resolve(this.onCompleted?.()).catch((error) => this.writeLog?.("warn", "library", "Library refresh after download failed", { error }));
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      let message = error instanceof Error ? error.message : String(error);
+      if (control.encoding && !control.action && temporary && fs.existsSync(temporary)) {
+        try {
+          const recoveryDirectory = path.join(this.mediaRoot, ".recording-recovery", safeSegment(item.id));
+          this.prepareOutputDirectory(recoveryDirectory);
+          const recovery = this.availableDestination(path.join(recoveryDirectory, path.basename(temporary)), item.id);
+          fs.renameSync(temporary, recovery); temporary = "";
+          message += ` Recording preserved for recovery at ${path.relative(this.mediaRoot, recovery)}.`;
+        } catch {
+          preserveTemporary = true;
+          message += ` Recording preserved in staging at ${path.relative(this.mediaRoot, temporary)}; recover it before retrying.`;
+        }
+      }
       if (control.action) {
         if (control.action !== "delete") this.db.setItemStatus(item.id, "cancelled", { error: null });
         this.writeLog?.("info", "download", control.action === "stop" ? "Recording stopped" : "Download cancelled", { itemId: item.id, title: item.title });
@@ -222,12 +248,34 @@ export class DownloadQueue {
         this.writeLog?.("error", "download", "Download failed", { itemId: item.id, pluginId: item.pluginId, title: item.title, error: message });
       }
     } finally {
-      if (temporaryDirectory) fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+      if (temporaryDirectory && !preserveTemporary) fs.rmSync(temporaryDirectory, { recursive: true, force: true });
       if (control.action === "delete") this.db.deleteItem(item.id);
     }
   }
 
   private get downloadsRoot() { return path.join(this.mediaRoot, ".downloads"); }
+
+  private prepareOutputDirectory(directory: string) {
+    const root = path.resolve(this.mediaRoot); const relative = path.relative(root, directory);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Output path must stay inside the media volume");
+    let current = root;
+    for (const part of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, part);
+      try { fs.mkdirSync(current); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      const stat = fs.lstatSync(current);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("Output folders must be real directories, not symbolic links");
+    }
+  }
+
+  private availableDestination(destination: string, itemId: string, replacedPath?: string) {
+    this.prepareOutputDirectory(path.dirname(destination));
+    let candidate = destination; let suffix = 0;
+    while (fs.existsSync(candidate) && path.resolve(candidate) !== path.resolve(replacedPath ?? "")) {
+      suffix++;
+      candidate = path.join(path.dirname(destination), `${path.parse(destination).name}-${itemId.slice(-6)}${suffix > 1 ? `-${suffix}` : ""}${path.extname(destination)}`);
+    }
+    return candidate;
+  }
 
   private signal(control: ActiveDownload, signal: NodeJS.Signals) {
     const child = control.child; if (!child?.pid) return;
@@ -329,7 +377,7 @@ export class DownloadQueue {
     for (const itemId of [...new Set(itemIds)]) {
       const item = this.db.getItem(itemId);
       if (!item?.storagePath || item.status !== "completed") continue;
-      await this.withFinalizeLock(item.performerId, () => this.applyMediaDate(path.join(this.mediaRoot, item.storagePath!), item.mediaType, item.publishedAt));
+      await this.withFinalizeLock("output", () => this.applyMediaDate(path.join(this.mediaRoot, item.storagePath!), item.mediaType, item.publishedAt));
     }
   }
 

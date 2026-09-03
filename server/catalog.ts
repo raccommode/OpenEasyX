@@ -93,6 +93,7 @@ export class Catalog {
     readonly mediaRoot: string,
     readonly dataDir: string,
     readonly eagerThumbnails = process.env.NODE_ENV !== "test" && process.env.EASYX_EAGER_THUMBNAILS !== "false",
+    private readonly storedMetadata?: (relativePath: string) => Record<string, unknown>,
   ) {
     fs.mkdirSync(mediaRoot, { recursive: true });
     fs.mkdirSync(path.join(dataDir, "thumbnails"), { recursive: true, mode: 0o700 });
@@ -124,7 +125,7 @@ export class Catalog {
           const stat = fs.statSync(absolute);
           const relativePath = path.relative(this.mediaRoot, absolute).split(path.sep).join("/");
           const parts = relativePath.split("/");
-          const metadata = readSidecar(absolute);
+          const metadata = { ...readSidecar(absolute), ...this.storedMetadata?.(relativePath) };
           const titleValue = metadataString(metadata, ["title"]);
           const performerValue = metadataString(metadata, ["performer"]);
           const sourceValue = metadataString(metadata, ["source", "sourceUrl", "source_url", "webpage_url", "url"]);

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Database } from "./database.js";
 import { LiveCamService } from "./live-cams.js";
 import { PluginManager } from "./plugin-manager.js";
@@ -93,14 +93,83 @@ describe("Open EasyX live cams", () => {
     expect(service.listFavorites().map((favorite) => favorite.username)).toEqual(["alice", "bob"]);
   });
 
-  it("updates the provider account before changing the local favorite", async () => {
+  it("saves locally immediately and synchronizes the provider account in the background", async () => {
     const { database, plugins, service } = await fixture(); plugins.install("test.live");
     let remoteFavorite: boolean | undefined;
     plugins.get("test.live").setLiveCamFavorite = async (_context, _cam, favorite) => { remoteFavorite = favorite; return { synchronized: true }; };
     await expect(service.setFavorite("test.live", { id: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true))
-      .resolves.toMatchObject({ favorite: true, synchronized: true });
+      .resolves.toMatchObject({ favorite: true, synchronization: "pending" });
+    await service.flushFavoriteChanges("test.live");
     expect(remoteFavorite).toBe(true);
     expect(database.isLiveCamFavorite("test.live", "alice")).toBe(true);
+  });
+
+  it("does not wait for a slow provider and protects the saved favorite from a stale snapshot", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    let finish!: (value: { synchronized: boolean }) => void;
+    plugins.get("test.live").setLiveCamFavorite = () => new Promise((resolve) => { finish = resolve; });
+    plugins.get("test.live").listFollowedLiveCams = async () => ({ authoritative: true, cams: [] });
+    const cam = (await service.list({ page: 1, pageSize: 24 })).items[0];
+    await expect(service.setFavorite("test.live", cam, true)).resolves.toMatchObject({ favorite: true });
+    expect(database.isLiveCamFavorite("test.live", "alice")).toBe(true);
+    await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({ items: [{ username: "alice", favorite: true }], total: 1 });
+    finish({ synchronized: true }); await service.flushFavoriteChanges("test.live");
+  });
+
+  it("retains failed and disconnected local favorites across service restarts and retries them", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    plugins.get("test.live").setLiveCamFavorite = async () => { throw new Error("Session expired"); };
+    plugins.get("test.live").listFollowedLiveCams = async () => ({ authoritative: false, cams: [], skippedReason: "Session expired" });
+    await service.setFavorite("test.live", { id: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true);
+    await service.flushFavoriteChanges("test.live");
+    expect(service.favoriteChanges()).toEqual([expect.objectContaining({ state: "failed", error: "Session expired" })]);
+    const restarted = new LiveCamService(database, plugins);
+    await expect(restarted.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({ total: 1, items: [{ username: "alice", favorite: true }] });
+    plugins.get("test.live").setLiveCamFavorite = async () => ({ synchronized: true });
+    plugins.get("test.live").listFollowedLiveCams = async () => ({ authoritative: true, cams: [{ id: "alice", username: "alice", pageUrl: "https://live.test/alice", online: true }] });
+    await restarted.syncFavorites("test.live");
+    expect(restarted.favoriteChanges()).toEqual([]);
+    expect(database.isLiveCamFavorite("test.live", "alice")).toBe(true);
+  });
+
+  it("serializes rapid toggles and never lets an older follow override a newer unfollow", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    let finish!: (value: { synchronized: boolean }) => void; const writes: boolean[] = [];
+    plugins.get("test.live").setLiveCamFavorite = async (_context, _cam, favorite) => {
+      writes.push(favorite);
+      if (favorite) return new Promise((resolve) => { finish = resolve; });
+      return { synchronized: true };
+    };
+    const cam = { id: "alice", username: "alice", pageUrl: "https://live.test/alice" };
+    await service.setFavorite("test.live", cam, true);
+    await service.setFavorite("test.live", cam, false);
+    finish({ synchronized: true }); await service.flushFavoriteChanges("test.live");
+    expect(writes).toEqual([true, false]);
+    expect(database.isLiveCamFavorite("test.live", "alice")).toBe(false);
+    plugins.get("test.live").listFollowedLiveCams = async () => ({ authoritative: true, cams: [{ ...cam, online: true }] });
+    await service.syncFavorites("test.live");
+    expect(database.isLiveCamFavorite("test.live", "alice")).toBe(false);
+  });
+
+  it("bounds a stuck provider operation, aborts its context, and preserves the local choice", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      plugins.get("test.live").setLiveCamFavorite = (context) => { signal = context.signal; return new Promise(() => {}); };
+      await service.setFavorite("test.live", { id: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true);
+      const pending = service.flushFavoriteChanges("test.live");
+      await vi.advanceTimersByTimeAsync(45_001); await pending;
+      expect(signal?.aborted).toBe(true); expect(database.isLiveCamFavorite("test.live", "alice")).toBe(true);
+      expect(service.favoriteChanges()[0]).toMatchObject({ state: "failed", error: expect.stringContaining("timed out") });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("still lists saved favorites when the provider's snapshot throws", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    database.setLiveCamFavorite("test.live", { camId: "alice", username: "alice", pageUrl: "https://live.test/alice" }, true);
+    plugins.get("test.live").listFollowedLiveCams = async () => { throw new Error("Network unreachable"); };
+    await expect(service.list({ page: 1, pageSize: 24, favoritesOnly: true })).resolves.toMatchObject({ total: 1, items: [{ username: "alice", favorite: true }] });
   });
 
   it("creates one reusable performer profile directly from a live room", async () => {

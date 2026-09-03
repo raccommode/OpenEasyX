@@ -112,6 +112,7 @@ export class PluginManager {
           timeout: Math.max(1_000, Math.min(30 * 60_000, options.timeoutMs ?? 120_000)),
           maxBuffer: Math.max(64 * 1024, Math.min(50 * 1024 * 1024, options.maxOutputBytes ?? 10 * 1024 * 1024)),
           encoding: "utf8",
+          signal,
         }, (error, stdout, stderr) => {
           if (error && typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === "string") return reject(error);
           resolve({ exitCode: typeof (error as { code?: unknown } | null)?.code === "number" ? Number((error as { code: number }).code) : error ? 1 : 0, stdout, stderr });

@@ -28,7 +28,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Install recording test codecs
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm run check
+        env:
+          NODE_OPTIONS: --no-experimental-webstorage
       - run: python -m py_compile worker/subtitles.py
       - run: docker build --build-arg APP_VERSION=ci-test -t open-easyx:ci .
       - name: Test Docker runtime with an Unraid-style volume

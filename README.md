@@ -35,7 +35,15 @@ docker compose up -d
 
 Open [http://localhost:3210](http://localhost:3210). The default Compose project starts one container named `open-easyx`.
 
-Completed media is organized below `/media/<performer>/<source>/`. Active transfers stay below `/media/.downloads` and are never exposed to the library. On restart, interrupted transfers are discarded and queued again from zero.
+Completed media is organized below `/media/<performer>/<source>/` by default. In **Settings → Storage**, customize the folder and filename templates for new downloads, with a live example before saving. Existing files are not moved or renamed.
+
+For example, folder `{performer}` and filename `{site}-{date}-{filename}` store files directly in the model's folder while keeping the source in the filename. An empty folder template uses the media volume root. Available variables are `{performer}`, `{site}`, `{filename}` (original name without extension), `{title}`, `{id}`, `{date}`, `{time}`, `{year}`, `{month}`, and `{day}`. Dates use the publication/recording timestamp in UTC. Extensions are added automatically, unsafe path components are rejected, and name collisions receive a suffix without overwriting existing files. Library performer/source metadata is retained independently of the chosen folder layout.
+
+The **Live recording preset** setting defaults to the original stream without re-encoding. Optional presets produce MP4 with H.264 high quality, H.264 smaller files (up to 720p), or H.265/HEVC. Encoding runs after a live recording ends or **Stop and save** is selected; it requires extra CPU and temporary storage. The file is added to the library only after encoding completes. Ordinary video downloads and photos are not re-encoded. If encoding fails, the captured source is kept under `.recording-recovery` and its recovery path is shown in the Activity error.
+
+Active transfers stay below `/media/.downloads` and are never exposed to the library. On restart, interrupted transfers are discarded and queued again from zero.
+
+Live creator favorites are saved locally immediately. Connected-provider synchronization runs in the background with a visible status, and pending changes survive restarts and retry during account synchronization. A provider outage or expired login does not discard a saved local favorite.
 
 ## Local development
 

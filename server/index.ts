@@ -19,6 +19,7 @@ import { PluginRepositoryManager } from "./plugin-repositories.js";
 import { LibraryDatabase } from "./library-database.js";
 import { Catalog } from "./catalog.js";
 import { registerLibraryRoutes } from "./library-routes.js";
+import { settingsSchema } from "./output-settings.js";
 
 const port = Number(process.env.PORT ?? 3210);
 const dataDir = path.resolve(process.env.EASYX_DATA_DIR ?? "data");
@@ -31,7 +32,7 @@ const appLogger = pino({ level: process.env.EASYX_LOG_LEVEL ?? "info" }, logStor
 const writeLog: LogWriter = (level, scope, message, details) => appLogger[level]({ scope, ...(details === undefined ? {} : { details }) }, message);
 const db = new Database(dataDir);
 const libraryDb = new LibraryDatabase(dataDir);
-const catalog = new Catalog(libraryDb, mediaDir, dataDir);
+const catalog = new Catalog(libraryDb, mediaDir, dataDir, undefined, (relativePath) => db.storedMediaMetadata(relativePath));
 const pluginRepositories = new PluginRepositoryManager(dataDir, path.resolve("plugins"), externalPluginsDir);
 const plugins = new PluginManager(db, pluginRepositories.roots(), path.join(dataDir, "sessions"), writeLog);
 await plugins.load();
@@ -227,7 +228,7 @@ app.get<{ Querystring: Record<string, unknown> }>("/api/live-cams/events", async
     if (!reply.raw.destroyed) reply.raw.end();
   }
 });
-app.get("/api/live-cams/favorites", async () => ({ items: liveCams.listFavorites() }));
+app.get("/api/live-cams/favorites", async () => ({ items: liveCams.listFavorites(), synchronization: liveCams.favoriteChanges() }));
 app.put<{ Body: unknown }>("/api/live-cams/favorites", async (request) => {
   const body = liveCamBodySchema.extend({ favorite: z.boolean() }).parse(request.body);
   return liveCams.setFavorite(body.providerId, body.cam, body.favorite);
@@ -575,7 +576,9 @@ app.delete<{ Params: { id: string } }>("/api/items/:id", async (request) => queu
 
 app.get("/api/settings", async () => ({ ...db.getSettings(), mediaRoot: mediaDir, ...library.settings() }));
 app.put<{ Body: Record<string, unknown> }>("/api/settings", async (request) => {
-  const settings = z.object({ retentionDays: z.number().int().min(0).max(36500).optional(), maxConcurrentDownloads: z.number().int().min(1).max(8).optional(), autoQueueDiscovered: z.boolean().optional(), legalAccepted: z.boolean().optional(), defaultScrapeIntervalMinutes: z.number().int().min(5).max(525600).optional(), defaultLiveIntervalSeconds: z.number().int().min(5).max(3600).optional() }).parse(request.body);
+  const parsed = settingsSchema.safeParse(request.body);
+  if (!parsed.success) throw Object.assign(new Error(parsed.error.issues.map((issue) => issue.message).join(" ")), { statusCode: 400 });
+  const settings = parsed.data;
   return db.updateSettings(settings);
 });
 

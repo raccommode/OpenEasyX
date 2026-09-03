@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { asJson, id, now } from "./utils.js";
 import type { MediaCandidate, PersonCandidate, SourceCandidate } from "../packages/plugin-sdk/index.js";
+import { outputDefaults } from "../packages/output-settings.js";
 
 export type Performer = {
   id: string; name: string; aliases: string[]; imageUrl?: string; externalRefs: Record<string, string>;
@@ -42,6 +43,7 @@ export type LiveCamFavorite = {
   createdAt: string; updatedAt: string;
 };
 export type LiveCamFavoriteInput = Pick<LiveCamFavorite, "camId" | "username" | "pageUrl"> & Partial<Pick<LiveCamFavorite, "title" | "thumbnailUrl">>;
+export type LiveCamFavoriteChange = { providerId: string; cam: LiveCamFavoriteInput; favorite: boolean; revision: string; state: "pending" | "sent" | "local" | "failed"; error?: string };
 
 export class Database {
   readonly sqlite: DatabaseSync;
@@ -95,6 +97,11 @@ export class Database {
         title TEXT, page_url TEXT NOT NULL, thumbnail_url TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         PRIMARY KEY(provider_id, username_key)
       );
+      CREATE TABLE IF NOT EXISTS live_cam_favorite_changes (
+        provider_id TEXT NOT NULL, username_key TEXT NOT NULL, cam_json TEXT NOT NULL,
+        favorite INTEGER NOT NULL, revision TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', error TEXT,
+        PRIMARY KEY(provider_id, username_key)
+      );
     `);
     const sourceColumns = new Set((this.sqlite.prepare("PRAGMA table_info(sources)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!sourceColumns.has("scraper_plugin_id")) this.sqlite.exec("ALTER TABLE sources ADD COLUMN scraper_plugin_id TEXT");
@@ -109,12 +116,14 @@ export class Database {
     if (!itemColumns.has("download_finished_at")) this.sqlite.exec("ALTER TABLE items ADD COLUMN download_finished_at TEXT");
     if (!itemColumns.has("downloaded_bytes")) this.sqlite.exec("ALTER TABLE items ADD COLUMN downloaded_bytes INTEGER NOT NULL DEFAULT 0");
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS items_visual_hash_idx ON items(performer_id,media_type,visual_hash)");
+    this.sqlite.exec("CREATE INDEX IF NOT EXISTS items_storage_path_idx ON items(storage_path)");
     this.migrateNitterToPublicX();
     this.setDefault("retentionDays", 0);
     this.setDefault("maxConcurrentDownloads", 2);
     this.setDefault("autoQueueDiscovered", true);
     this.setDefault("defaultScrapeIntervalMinutes", 360);
     this.setDefault("defaultLiveIntervalSeconds", 10);
+    for (const [key, value] of Object.entries(outputDefaults)) this.setDefault(key, value);
   }
 
   private migrateNitterToPublicX() {
@@ -145,6 +154,13 @@ export class Database {
   getSettings(): Record<string, unknown> {
     return Object.fromEntries((this.sqlite.prepare("SELECT * FROM settings").all() as any[])
       .map((row) => [row.key, asJson(row.value_json, null)]));
+  }
+
+  storedMediaMetadata(relativePath: string): Record<string, unknown> {
+    const row = this.sqlite.prepare(`SELECT p.name AS performer,s.domain AS source,i.title FROM items i
+      JOIN performers p ON p.id=i.performer_id JOIN sources s ON s.id=i.source_id
+      WHERE i.storage_path=? AND i.status='completed' LIMIT 1`).get(relativePath) as { performer: string; source: string; title?: string } | undefined;
+    return row ? { performer: row.performer, source: row.source, ...(row.title ? { title: row.title } : {}) } : {};
   }
 
   updateSettings(values: Record<string, unknown>) {
@@ -178,6 +194,32 @@ export class Database {
       .run(providerId, usernameKey, cam.camId, cam.username, cam.title ?? null, cam.pageUrl, cam.thumbnailUrl ?? null, stamp, stamp);
     const row = this.sqlite.prepare("SELECT * FROM live_cam_favorites WHERE provider_id=? AND username_key=?").get(providerId, usernameKey) as any;
     return row ? this.mapLiveCamFavorite(row) : undefined;
+  }
+
+  saveLiveCamFavoriteChange(providerId: string, cam: LiveCamFavoriteInput, favorite: boolean) {
+    this.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      const item = this.setLiveCamFavorite(providerId, cam, favorite);
+      this.sqlite.prepare(`INSERT INTO live_cam_favorite_changes(provider_id,username_key,cam_json,favorite,revision,state)
+        VALUES(?,?,?,?,?,'pending') ON CONFLICT(provider_id,username_key) DO UPDATE SET
+        cam_json=excluded.cam_json,favorite=excluded.favorite,revision=excluded.revision,state='pending',error=NULL`)
+        .run(providerId, cam.username.toLowerCase(), JSON.stringify(cam), favorite ? 1 : 0, id("favorite"));
+      this.sqlite.exec("COMMIT"); return item;
+    } catch (error) { this.sqlite.exec("ROLLBACK"); throw error; }
+  }
+
+  listLiveCamFavoriteChanges(providerId?: string): LiveCamFavoriteChange[] {
+    const rows = providerId ? this.sqlite.prepare("SELECT * FROM live_cam_favorite_changes WHERE provider_id=?").all(providerId)
+      : this.sqlite.prepare("SELECT * FROM live_cam_favorite_changes").all();
+    return (rows as any[]).map((row) => ({ providerId: row.provider_id, cam: asJson<LiveCamFavoriteInput>(row.cam_json, { camId: "", username: "", pageUrl: "" }), favorite: !!row.favorite, revision: row.revision, state: row.state, ...(row.error ? { error: row.error } : {}) }));
+  }
+
+  updateLiveCamFavoriteChange(revision: string, state: LiveCamFavoriteChange["state"], error?: string) {
+    this.sqlite.prepare("UPDATE live_cam_favorite_changes SET state=?,error=? WHERE revision=?").run(state, error ?? null, revision);
+  }
+
+  confirmLiveCamFavoriteChange(revision: string) {
+    this.sqlite.prepare("DELETE FROM live_cam_favorite_changes WHERE revision=?").run(revision);
   }
 
   getPluginState(pluginId: string) {
