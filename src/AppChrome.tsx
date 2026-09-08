@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Menu, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
+import { LogOut, Menu, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
 import { api } from "./api";
 import { UnifiedNavigation } from "./UnifiedNavigation";
 
@@ -85,6 +85,11 @@ export function AppChrome({ title, scanningLibrary = false, onScanLibrary, onRef
   const scanRunning = scanningLibrary || scan.running;
   useEffect(() => { void api<{ version: string }>("/api/version").then((result) => setVersion(result.version || "unknown")).catch(() => setVersion("unknown")); }, []);
 
+  const signOut = async () => {
+    try { await api("/api/auth/logout", { method: "POST" }); } catch { /* ignore network errors; we still drop the session locally */ }
+    window.dispatchEvent(new Event("easyx:unauthorized"));
+  };
+
   return <div className="easyx-shell">
     <aside ref={sidebar} id="primary-navigation" aria-label="Main navigation" role={compactNavigation ? "dialog" : undefined} aria-modal={compactNavigation && mobileNavigationOpen ? true : undefined} inert={compactNavigation && !mobileNavigationOpen} className={`sidebar easyx-sidebar ${mobileNavigationOpen ? "open" : ""}`} onClick={(event) => { if ((event.target as HTMLElement).closest("a")) setMobileNavigationOpen(false); }}>
       <div className="easyx-brand-row">
@@ -106,6 +111,7 @@ export function AppChrome({ title, scanningLibrary = false, onScanLibrary, onRef
         <div className="easyx-header-actions">
           <button className="easyx-scan-button easyx-header-operation" aria-label={operationLabel("Scan library", { running: scanRunning, percent: scan.percent })} disabled={scanRunning} aria-busy={scanRunning} onClick={() => { scan.begin(); onScanLibrary(); }}><RefreshCw className={scanRunning ? "spin" : ""} size={17}/><span>{operationLabel("Scan library", { running: scanRunning, percent: scan.percent })}</span></button>
           <button className="primary easyx-header-operation" aria-label={operationLabel("Refresh performers", performers)} disabled={performers.running} aria-busy={performers.running} onClick={() => { performers.begin(); onRefreshPerformers(); }}><Search className={performers.running ? "spin" : ""} size={17}/><span>{operationLabel("Refresh performers", performers)}</span></button>
+          <button className="easyx-header-operation" aria-label="Sign out" onClick={() => void signOut()}><LogOut size={17}/><span>Sign out</span></button>
         </div>
       </header>
       {children}

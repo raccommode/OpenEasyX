@@ -18,16 +18,18 @@ export function downloadOutputPath(settings: Record<string, unknown>, item: Down
   const options = outputSettings(settings); const original = path.parse(originalFilename);
   const date = new Date(item.publishedAt || item.createdAt);
   const stamp = Number.isNaN(date.valueOf()) ? "unknown" : date.toISOString();
-  const extension = item.metadata.live === true && item.mediaType === "video" && options.recordingPreset !== "source" ? ".mp4" : original.ext;
+  const extension = item.metadata.live === true && item.mediaType === "video" && options.recordingPreset && options.recordingPreset !== "source" ? ".mp4" : original.ext;
   return renderOutputPath(options, {
     performer, site, filename: original.name, title: item.title || original.name, id: item.id,
     date: stamp.slice(0, 10), time: stamp.slice(11, 19).replaceAll(":", "-"), year: stamp.slice(0, 4), month: stamp.slice(5, 7), day: stamp.slice(8, 10),
   }, extension);
 }
 
-export function recordingEncodingArgs(preset: RecordingPreset, input: string, output: string): string[] {
+export function recordingEncodingArgs(preset: RecordingPreset, input: string, output: string, audioUrl?: string): string[] {
   if (preset === "source") return [];
-  return ["-y", "-nostdin", "-v", "error", "-i", input, "-map", "0:v:0", "-map", "0:a:0?",
+  const inputs = ["-y", "-nostdin", "-v", "error", "-i", input];
+  if (audioUrl) inputs.push("-i", audioUrl);
+  return [...inputs, "-map", "0:v:0", "-map", audioUrl ? "1:a:0?" : "0:a:0?",
     "-c:v", preset === "h265" ? "libx265" : "libx264", "-preset", preset === "h264-small" ? "fast" : "medium",
     "-crf", preset === "h264-high" ? "18" : "26", "-pix_fmt", "yuv420p",
     "-vf", preset === "h264-small" ? "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2" : "scale=trunc(iw/2)*2:trunc(ih/2)*2",

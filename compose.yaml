@@ -14,6 +14,13 @@ services:
       EASYX_EXTERNAL_PLUGINS_DIR: /plugins
       EASYX_SCAN_INTERVAL_MINUTES: ${EASYX_SCAN_INTERVAL_MINUTES:-10}
       EASYX_WHISPER_MODEL: ${EASYX_WHISPER_MODEL:-small}
+      # Values come from the .env file next to this compose file (compose reads it
+      # automatically for variable substitution).
+      EASYX_EMBEDDED_SUBTITLE_WORKER: ${EASYX_EMBEDDED_SUBTITLE_WORKER:-false}
+      EASYX_ENABLE_BROWSER_LOGIN: ${EASYX_ENABLE_BROWSER_LOGIN:-false}
+      EASYX_SESSION_SECRET: ${EASYX_SESSION_SECRET:-}
+      EASYX_ADMIN_PASSWORD: ${EASYX_ADMIN_PASSWORD:-}
+      EASYX_COOKIE_SECURE: ${EASYX_COOKIE_SECURE:-false}
     volumes:
       - ./data:/data
       - ./media:/media
@@ -30,3 +37,19 @@ services:
     restart: unless-stopped
     environment:
       LOG_LEVEL: info
+
+  # Optional TLS reverse proxy. Start with: docker compose --profile tls up -d
+  # Edit deploy/Caddyfile.example first (set your domain), or mount your own.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      EASYX_DOMAIN: ${EASYX_DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/caddy-data:/data
+      - ./deploy/caddy-config:/config

@@ -11,7 +11,7 @@ import { filenameFromUrl, safeSegment } from "./utils.js";
 import { downloadOutputPath, recordingEncodingArgs } from "./output-settings.js";
 import { outputSettings } from "../packages/output-settings.js";
 
-type ActiveDownload = { child?: ChildProcess; abort?: AbortController; paused: boolean; encoding?: boolean; action?: "stop" | "cancel" | "delete" };
+type ActiveDownload = { child?: ChildProcess; abort?: AbortController; paused: boolean; encoding?: boolean; action?: "stop" | "cancel" | "delete"; stalled?: boolean };
 
 export class DownloadQueue {
   private active = new Map<string, ActiveDownload>();
@@ -30,6 +30,7 @@ export class DownloadQueue {
     fs.mkdirSync(this.mediaRoot, { recursive: true });
     fs.mkdirSync(this.downloadsRoot, { recursive: true, mode: 0o700 });
     this.db.requeueInterruptedDownloads();
+    this.cleanupStaleDownloads();
     this.timer = setInterval(() => void this.tick(), 1000);
     this.timer.unref();
     void this.tick();
@@ -45,7 +46,9 @@ export class DownloadQueue {
     if (item.status === "queued") return this.db.setItemStatus(itemId, "paused");
     const control = this.active.get(itemId);
     if (item.status !== "downloading" || !control) throw Object.assign(new Error(`Cannot pause an item with status '${item.status}'`), { statusCode: 409 });
-    control.paused = true; this.signal(control, "SIGSTOP");
+    control.paused = true;
+    if (control.child) this.signal(control, "SIGSTOP");
+    else control.abort?.abort();
     return this.db.setItemStatus(itemId, "paused");
   }
 
@@ -115,15 +118,22 @@ export class DownloadQueue {
     let temporary = "";
     let temporaryDirectory = "";
     let preserveTemporary = false;
-    let lastProgress = 0; let lastBytes = 0; let lastProgressUpdate = 0;
+    let lastProgress = 0; let lastBytes = 0; let lastProgressUpdate = 0; let lastActivity = Date.now();
     const reportProgress = (progress?: number, downloadedBytes?: number, force = false) => {
       const nextProgress = progress === undefined ? lastProgress : Math.max(lastProgress, Math.min(0.99, Math.max(0, progress)));
       const nextBytes = downloadedBytes === undefined ? lastBytes : Math.max(lastBytes, downloadedBytes);
       const stamp = Date.now();
-      if (!force && stamp - lastProgressUpdate < 250 && nextProgress - lastProgress < 0.005 && nextBytes - lastBytes < 256 * 1024) return;
-      lastProgress = nextProgress; lastBytes = nextBytes; lastProgressUpdate = stamp;
+      if (!force && stamp - lastProgressUpdate < 250 && nextProgress - lastProgress < 0.005 && nextBytes - lastBytes < 256 * 1024) { lastActivity = stamp; return; }
+      lastProgress = nextProgress; lastBytes = nextBytes; lastProgressUpdate = stamp; lastActivity = stamp;
       if (!control.action) this.db.setItemStatus(item.id, control.paused ? "paused" : "downloading", { progress: nextProgress, downloadedBytes: nextBytes });
     };
+    const stallTimeoutMs = Math.max(0, Number(this.db.getSettings().downloadStallTimeoutSeconds ?? 120)) * 1000;
+    const stallTimer = stallTimeoutMs > 0 ? setInterval(() => {
+      if (!control.action && !control.paused && Date.now() - lastActivity > stallTimeoutMs) {
+        control.stalled = true; control.abort?.abort(); this.signal(control, "SIGKILL");
+      }
+    }, 5000) : undefined;
+    stallTimer?.unref();
     try {
       const plugin = this.plugins.get(item.pluginId);
       if (!plugin.resolveDownload) throw new Error("This plugin cannot resolve downloads");
@@ -174,7 +184,7 @@ export class DownloadQueue {
         checksum = hash.digest("hex");
       }
       if (control.action === "cancel" || control.action === "delete") throw new Error("Download cancelled");
-      if (item.mediaType === "video" && item.metadata.live === true && settings.recordingPreset !== "source") {
+      if (item.mediaType === "video" && item.metadata.live === true && settings.recordingPreset && settings.recordingPreset !== "source") {
         const encoded = path.join(temporaryDirectory, "encoded.mp4");
         control.action = undefined; control.encoding = true;
         this.db.setItemStatus(item.id, "downloading", { progress: 0.99 });
@@ -228,29 +238,65 @@ export class DownloadQueue {
       });
     } catch (error) {
       let message = error instanceof Error ? error.message : String(error);
-      if (control.encoding && !control.action && temporary && fs.existsSync(temporary)) {
-        try {
-          const recoveryDirectory = path.join(this.mediaRoot, ".recording-recovery", safeSegment(item.id));
-          this.prepareOutputDirectory(recoveryDirectory);
-          const recovery = this.availableDestination(path.join(recoveryDirectory, path.basename(temporary)), item.id);
-          fs.renameSync(temporary, recovery); temporary = "";
-          message += ` Recording preserved for recovery at ${path.relative(this.mediaRoot, recovery)}.`;
-        } catch {
-          preserveTemporary = true;
-          message += ` Recording preserved in staging at ${path.relative(this.mediaRoot, temporary)}; recover it before retrying.`;
+      if (!control.action && !control.paused && temporary && fs.existsSync(temporary)) {
+        const partialBytes = fs.statSync(temporary).size;
+        const isLiveRecording = (item.metadata as Record<string, unknown> | undefined)?.live === true;
+        if (control.encoding || (isLiveRecording && partialBytes > 0)) {
+          try {
+            const recoveryDirectory = path.join(this.mediaRoot, ".recording-recovery", safeSegment(item.id));
+            this.prepareOutputDirectory(recoveryDirectory);
+            const recovery = this.availableDestination(path.join(recoveryDirectory, path.basename(temporary)), item.id);
+            fs.renameSync(temporary, recovery); temporary = "";
+            message += ` Recording preserved for recovery at ${path.relative(this.mediaRoot, recovery)}.`;
+          } catch {
+            preserveTemporary = true;
+            message += ` Recording preserved in staging at ${path.relative(this.mediaRoot, temporary)}; recover it before retrying.`;
+          }
         }
       }
       if (control.action) {
         if (control.action !== "delete") this.db.setItemStatus(item.id, "cancelled", { error: null });
         this.writeLog?.("info", "download", control.action === "stop" ? "Recording stopped" : "Download cancelled", { itemId: item.id, title: item.title });
+      } else if (control.paused) {
+        this.db.setItemStatus(item.id, "paused", { error: null });
       } else {
-        this.db.setItemStatus(item.id, "failed", { error: message });
-        this.writeLog?.("error", "download", "Download failed", { itemId: item.id, pluginId: item.pluginId, title: item.title, error: message });
+        if (control.stalled) message = "Download timed out (no progress received within the configured stall timeout)";
+        this.handleFailure(item.id, message, control);
       }
     } finally {
+      if (stallTimer) clearInterval(stallTimer);
       if (temporaryDirectory && !preserveTemporary) fs.rmSync(temporaryDirectory, { recursive: true, force: true });
       if (control.action === "delete") this.db.deleteItem(item.id);
     }
+  }
+
+  private handleFailure(itemId: string, message: string, control: ActiveDownload) {
+    const settings = this.db.getSettings();
+    const maxAttempts = Math.max(0, Number(settings.downloadRetryAttempts ?? 5));
+    const attempts = (this.db.getItem(itemId)?.attempts ?? 0) + 1;
+    if (attempts < maxAttempts) {
+      const base = Math.max(1, Number(settings.downloadRetryBaseSeconds ?? 30));
+      const delay = Math.min(base * 2 ** (attempts - 1), 3600) * 1000;
+      const jitter = Math.floor(Math.random() * Math.min(delay, 30_000));
+      const nextRetryAt = new Date(Date.now() + delay + jitter).toISOString();
+      this.db.scheduleRetry(itemId, message, attempts, nextRetryAt);
+      this.writeLog?.("warn", "download", "Download failed, scheduling automatic retry", { itemId, attempt: attempts, maxAttempts, nextRetryAt, error: message });
+    } else {
+      this.db.setItemStatus(itemId, "failed", { error: message });
+      this.writeLog?.("error", "download", "Download failed permanently after exhausting retries", { itemId, attempts, error: message });
+    }
+  }
+
+  private cleanupStaleDownloads() {
+    try {
+      const root = this.downloadsRoot;
+      if (!fs.existsSync(root)) return;
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        if (this.active.has(entry.name)) continue;
+        fs.rmSync(path.join(root, entry.name), { recursive: true, force: true });
+      }
+    } catch { /* Best-effort startup cleanup; never blocks startup. */ }
   }
 
   private get downloadsRoot() { return path.join(this.mediaRoot, ".downloads"); }

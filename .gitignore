@@ -9,3 +9,14 @@ coverage/
 plugins-external/
 __pycache__/
 *.pyc
+
+# 本地分析与部署文档（含安全评估，不随公开仓库发布）
+docs/architecture-analysis.md
+docs/download-analysis.md
+docs/download-stability-improvements.md
+docs/login-implementation-plan.md
+docs/login-implementation-report.md
+docs/optimization-implementation-report.md
+docs/optimization-plan.md
+docs/optimization-review.md
+docs/upstream-merge-2026-09-08.md

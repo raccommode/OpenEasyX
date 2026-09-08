@@ -1,0 +1,104 @@
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+  background:
+    radial-gradient(1200px 600px at 50% -10%, rgba(99, 102, 241, 0.18), transparent 60%),
+    radial-gradient(900px 500px at 100% 100%, rgba(236, 72, 153, 0.12), transparent 55%),
+    #0b0d12;
+  color: #e7e9ee;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 36px 32px;
+  border-radius: 18px;
+  background: rgba(20, 23, 31, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  text-align: center;
+}
+
+.login-card .logo-mark.big {
+  width: 64px;
+  height: 64px;
+  font-size: 26px;
+  margin-bottom: 4px;
+}
+
+.login-card .eyebrow {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: #8a90a2;
+}
+
+.login-card h1 {
+  margin: 2px 0 0;
+  font-size: 26px;
+  color: #fff;
+}
+
+.login-card .lede {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #9aa0b0;
+}
+
+.login-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #fecaca;
+  font-size: 13px;
+}
+
+.login-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #9aa0b0;
+}
+
+.login-field:focus-within {
+  border-color: rgba(99, 102, 241, 0.7);
+}
+
+.login-field input {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  font-size: 15px;
+  padding: 12px 0;
+  outline: none;
+}
+
+.login-card .primary.wide {
+  width: 100%;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.login-card .fineprint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #6b7180;
+}

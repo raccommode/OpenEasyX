@@ -20,6 +20,8 @@ import { LibraryDatabase } from "./library-database.js";
 import { Catalog } from "./catalog.js";
 import { registerLibraryRoutes } from "./library-routes.js";
 import { settingsSchema } from "./output-settings.js";
+import { AuthService } from "./auth.js";
+import type { FastifyRequest, FastifyReply } from "fastify";
 
 const port = Number(process.env.PORT ?? 3210);
 const dataDir = path.resolve(process.env.EASYX_DATA_DIR ?? "data");
@@ -31,6 +33,8 @@ const logStore = new LogStore();
 const appLogger = pino({ level: process.env.EASYX_LOG_LEVEL ?? "info" }, logStore.stream);
 const writeLog: LogWriter = (level, scope, message, details) => appLogger[level]({ scope, ...(details === undefined ? {} : { details }) }, message);
 const db = new Database(dataDir);
+const auth = new AuthService(db, process.env.EASYX_SESSION_SECRET, (line) => appLogger.info({ scope: "auth" }, line));
+await auth.bootstrap();
 const libraryDb = new LibraryDatabase(dataDir);
 const catalog = new Catalog(libraryDb, mediaDir, dataDir, undefined, (relativePath) => db.storedMediaMetadata(relativePath));
 const pluginRepositories = new PluginRepositoryManager(dataDir, path.resolve("plugins"), externalPluginsDir);
@@ -41,12 +45,18 @@ const queue = new DownloadQueue(
   (item) => catalog.deleteStoredMedia(item.storagePath!),
 );
 const browserLogin = new BrowserLoginManager(dataDir);
-const liveCams = new LiveCamService(db, plugins);
+const liveCams = new LiveCamService(db, plugins, undefined, path.join(dataDir, ".proxy-cache"));
 queue.start();
 
 const app = Fastify({ loggerInstance: appLogger, bodyLimit: 8 * 1024 * 1024 });
 const discoveryStatus = { running: false, completed: 0, total: 0, progress: 0, query: "", error: "" };
 const performerRefreshStatus = { running: false, completed: 0, total: 0, progress: 0, error: "" };
+
+function ensureBrowserLoginEnabled() {
+  if (process.env.EASYX_ENABLE_BROWSER_LOGIN !== "true") {
+    throw Object.assign(new Error("Integrated browser login is disabled on this instance (set EASYX_ENABLE_BROWSER_LOGIN=true to enable it)"), { statusCode: 503 });
+  }
+}
 
 function refreshLiveCamFavorites(providerId?: string) {
   if (providerId && !plugins.get(providerId, false).listFollowedLiveCams) return;
@@ -66,11 +76,73 @@ app.setErrorHandler((error, request, reply) => {
   reply.status(status >= 400 && status < 600 ? status : 500).send({ error: message });
 });
 
+const SESSION_COOKIE = "easyx_session";
+function parseCookies(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const raw of header.split(";")) {
+    const index = raw.indexOf("=");
+    if (index < 0) continue;
+    const key = raw.slice(0, index).trim();
+    if (key) out[key] = decodeURIComponent(raw.slice(index + 1).trim());
+  }
+  return out;
+}
+function cookieSecure(request: FastifyRequest): boolean {
+  return request.headers["x-forwarded-proto"] === "https" || process.env.EASYX_COOKIE_SECURE === "true";
+}
+function sessionCookie(request: FastifyRequest): string | undefined {
+  return parseCookies(request.headers.cookie)[SESSION_COOKIE];
+}
+// Global authentication gate. Added before any route registration so it wraps
+// every endpoint (including those registered via plugins) and the static UI.
+app.addHook("onRequest", (request, reply, done) => {
+  const path = new URL(request.url, "http://localhost").pathname;
+  // Endpoints that must work without a session.
+  if (path === "/api/auth/login" || path === "/api/auth/me" || path === "/api/health" || path === "/api/version") return done();
+  // Static assets and the internal browser proxy are served without authentication so the SPA shell can render.
+  if (!path.startsWith("/api/")) return done();
+  if (!auth.verifySession(sessionCookie(request))) return reply.status(401).send({ error: "unauthorized" });
+  // CSRF protection for state-changing requests: the cookie is SameSite=Lax and a
+  // custom header that browsers cannot attach on cross-site requests is required.
+  if (request.method !== "GET" && request.method !== "OPTIONS" && request.headers["x-requested-with"] !== "EasyX") {
+    return reply.status(403).send({ error: "csrf" });
+  }
+  done();
+});
+
 await app.register(fastifyHttpProxy, { upstream: "http://127.0.0.1:6080", prefix: "/browser", websocket: true });
 const library = registerLibraryRoutes(app, libraryDb, catalog, db, dataDir);
 
 app.get("/api/health", async () => ({ ok: true, product: "Open EasyX", version: appVersion, plugins: plugins.list().length, library: libraryDb.stats().total, scan: catalog.status }));
 app.get("/api/version", async () => ({ version: appVersion }));
+
+app.post("/api/auth/login", async (request, reply) => {
+  const limit = auth.checkRateLimit(request.ip);
+  if (!limit.allowed) return reply.status(429).header("retry-after", String(limit.retryAfter)).send({ error: "Too many attempts; please wait and try again" });
+  const { password } = z.object({ password: z.string().min(1).max(200) }).parse(request.body);
+  if (!(await auth.verifyLogin(password))) {
+    auth.recordFailure(request.ip);
+    return reply.status(401).send({ error: "Invalid password" });
+  }
+  auth.resetFailures(request.ip);
+  const maxAge = 30 * 24 * 60 * 60;
+  reply.header("set-cookie", `${SESSION_COOKIE}=${auth.createSession()}; Max-Age=${maxAge}; Path=/; HttpOnly; SameSite=Lax${cookieSecure(request) ? "; Secure" : ""}`);
+  return { ok: true };
+});
+app.post("/api/auth/logout", async (request, reply) => {
+  reply.header("set-cookie", `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax${cookieSecure(request) ? "; Secure" : ""}`);
+  return { ok: true };
+});
+app.post("/api/auth/change-password", async (request) => {
+  const body = z.object({ current: z.string().min(1).max(200), next: z.string().min(8).max(200) }).parse(request.body);
+  await auth.changePassword(body.current, body.next);
+  return { ok: true };
+});
+app.get("/api/auth/me", async (request, reply) => {
+  if (auth.verifySession(sessionCookie(request))) return { authenticated: true, user: "admin" };
+  return reply.status(401).send({ error: "unauthorized" });
+});
 app.get("/api/dashboard", async () => ({ stats: db.stats(), performers: db.listPerformers(), sources: db.listSources(), items: db.listItems(30) }));
 app.get<{ Querystring: Record<string, string | undefined> }>("/api/logs", async (request) => {
   const query = z.object({ limit: z.coerce.number().int().min(1).max(1_000).default(500), level: z.enum(["debug", "info", "warn", "error"]).optional(), search: z.string().trim().max(200).optional() }).parse(request.query);
@@ -169,6 +241,7 @@ app.post<{ Params: { id: string }; Body: Record<string, unknown> | undefined }>(
   return { plugin: plugins.list().find((entry) => entry.manifest.id === request.params.id), test };
 });
 app.post<{ Params: { id: string }; Body: { text?: unknown } }>("/api/plugins/:id/browser-login/paste", async (request) => {
+  ensureBrowserLoginEnabled();
   plugins.get(request.params.id, false);
   const value = z.string().min(1).max(100_000).parse(request.body?.text);
   return browserLogin.paste(request.params.id, value);
@@ -574,7 +647,11 @@ app.post<{ Params: { id: string } }>("/api/items/:id/stop", async (request) => q
 app.post<{ Params: { id: string } }>("/api/items/:id/cancel", async (request) => queue.cancel(request.params.id));
 app.delete<{ Params: { id: string } }>("/api/items/:id", async (request) => queue.delete(request.params.id));
 
-app.get("/api/settings", async () => ({ ...db.getSettings(), mediaRoot: mediaDir, ...library.settings() }));
+app.get("/api/settings", async () => {
+  // Never expose the admin password hash to the client.
+  const { admin_password_hash: _omitted, ...settings } = db.getSettings();
+  return { ...settings, mediaRoot: mediaDir, ...library.settings() };
+});
 app.put<{ Body: Record<string, unknown> }>("/api/settings", async (request) => {
   const parsed = settingsSchema.safeParse(request.body);
   if (!parsed.success) throw Object.assign(new Error(parsed.error.issues.map((issue) => issue.message).join(" ")), { statusCode: 400 });

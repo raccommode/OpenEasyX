@@ -24,6 +24,7 @@ export type DownloadItem = {
   identityKey?: string; title?: string; pageUrl?: string; mediaType: string; filename?: string;
   qualityScore: number; expectedBytes?: number; publishedAt?: string; metadata: Record<string, unknown>;
   status: string; progress: number; downloadedBytes: number; checksumSha256?: string; visualHash?: string; storagePath?: string; error?: string;
+  attempts?: number; nextRetryAt?: string;
   downloadStartedAt?: string; downloadFinishedAt?: string;
   createdAt: string; updatedAt: string;
 };
@@ -115,14 +116,20 @@ export class Database {
     if (!itemColumns.has("download_started_at")) this.sqlite.exec("ALTER TABLE items ADD COLUMN download_started_at TEXT");
     if (!itemColumns.has("download_finished_at")) this.sqlite.exec("ALTER TABLE items ADD COLUMN download_finished_at TEXT");
     if (!itemColumns.has("downloaded_bytes")) this.sqlite.exec("ALTER TABLE items ADD COLUMN downloaded_bytes INTEGER NOT NULL DEFAULT 0");
+    if (!itemColumns.has("attempts")) this.sqlite.exec("ALTER TABLE items ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");
+    if (!itemColumns.has("next_retry_at")) this.sqlite.exec("ALTER TABLE items ADD COLUMN next_retry_at TEXT");
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS items_visual_hash_idx ON items(performer_id,media_type,visual_hash)");
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS items_storage_path_idx ON items(storage_path)");
     this.migrateNitterToPublicX();
     this.setDefault("retentionDays", 0);
     this.setDefault("maxConcurrentDownloads", 2);
+    this.setDefault("downloadRetryAttempts", 5);
+    this.setDefault("downloadRetryBaseSeconds", 30);
+    this.setDefault("downloadStallTimeoutSeconds", 120);
     this.setDefault("autoQueueDiscovered", true);
     this.setDefault("defaultScrapeIntervalMinutes", 360);
     this.setDefault("defaultLiveIntervalSeconds", 10);
+    this.setDefault("admin_password_hash", "");
     for (const [key, value] of Object.entries(outputDefaults)) this.setDefault(key, value);
   }
 
@@ -451,30 +458,36 @@ export class Database {
   }
 
   nextQueued(): DownloadItem | undefined {
-    const row = this.sqlite.prepare("SELECT * FROM items WHERE status='queued' ORDER BY created_at LIMIT 1").get() as any;
+    const row = this.sqlite.prepare("SELECT * FROM items WHERE status='queued' AND (next_retry_at IS NULL OR next_retry_at<=?) ORDER BY created_at LIMIT 1").get(now()) as any;
     return row ? this.mapItem(row) : undefined;
   }
 
   requeueInterruptedDownloads() {
     const stamp = now();
-    const queued = this.sqlite.prepare("UPDATE items SET status='queued',progress=0,downloaded_bytes=0,error=NULL,download_started_at=NULL,download_finished_at=NULL,updated_at=? WHERE status='downloading'").run(stamp);
+    const queued = this.sqlite.prepare("UPDATE items SET status='queued',progress=0,downloaded_bytes=0,error=NULL,attempts=0,next_retry_at=NULL,download_started_at=NULL,download_finished_at=NULL,updated_at=? WHERE status='downloading'").run(stamp);
     const cancelled = this.sqlite.prepare("UPDATE items SET status='cancelled',error=NULL,download_finished_at=?,updated_at=? WHERE status IN ('stopping','cancelling')").run(stamp, stamp);
     return Number(queued.changes) + Number(cancelled.changes);
   }
 
   retryFailedItems() {
-    const result = this.sqlite.prepare("UPDATE items SET status='queued',progress=0,downloaded_bytes=0,error=NULL,download_started_at=NULL,download_finished_at=NULL,updated_at=? WHERE status='failed'").run(now());
+    const result = this.sqlite.prepare("UPDATE items SET status='queued',progress=0,downloaded_bytes=0,error=NULL,attempts=0,next_retry_at=NULL,download_started_at=NULL,download_finished_at=NULL,updated_at=? WHERE status='failed'").run(now());
     return Number(result.changes);
+  }
+
+  scheduleRetry(itemId: string, error: string, attempts: number, nextRetryAt: string) {
+    this.sqlite.prepare("UPDATE items SET status='queued',progress=0,downloaded_bytes=0,error=?,attempts=?,next_retry_at=?,download_started_at=NULL,download_finished_at=NULL,updated_at=? WHERE id=?")
+      .run(error, attempts, nextRetryAt, now(), itemId);
   }
 
   setItemStatus(itemId: string, status: string, values: { progress?: number; downloadedBytes?: number; error?: string | null; checksum?: string; storagePath?: string; duplicateOf?: string } = {}) {
     const stamp = now();
     this.sqlite.prepare(`UPDATE items SET status=?,progress=COALESCE(?,progress),downloaded_bytes=CASE WHEN ?='queued' THEN 0 ELSE COALESCE(?,downloaded_bytes) END,error=?,checksum_sha256=COALESCE(?,checksum_sha256),storage_path=COALESCE(?,storage_path),duplicate_of=COALESCE(?,duplicate_of),
+      attempts=CASE WHEN ? IN ('completed','duplicate') THEN 0 ELSE attempts END,next_retry_at=CASE WHEN ? IN ('completed','duplicate') THEN NULL ELSE next_retry_at END,
       download_started_at=CASE WHEN ?='queued' THEN NULL WHEN ?='downloading' AND download_started_at IS NULL THEN ? ELSE download_started_at END,
       download_finished_at=CASE WHEN ? IN ('queued','downloading','paused','stopping','cancelling') THEN NULL WHEN ? IN ('completed','duplicate','failed','cancelled','deleted') THEN ? ELSE download_finished_at END,
       updated_at=? WHERE id=?`)
       .run(status, values.progress ?? null, status, values.downloadedBytes ?? null, values.error ?? null, values.checksum ?? null, values.storagePath ?? null, values.duplicateOf ?? null,
-        status, status, stamp, status, status, stamp, stamp, itemId);
+        status, status, status, status, stamp, status, status, stamp, stamp, itemId);
     return this.getItem(itemId);
   }
 
@@ -489,7 +502,7 @@ export class Database {
   }
 
   findVisualDuplicate(visualHash: string, exceptId: string, performerId: string, mediaType: string, maximumDistance = 5): DownloadItem | undefined {
-    const candidates = (this.sqlite.prepare("SELECT * FROM items WHERE performer_id=? AND media_type=? AND visual_hash IS NOT NULL AND id<>? AND status='completed'").all(performerId, mediaType, exceptId) as any[])
+    const candidates = (this.sqlite.prepare("SELECT * FROM items WHERE performer_id=? AND media_type=? AND visual_hash IS NOT NULL AND id<>? AND status='completed' ORDER BY updated_at DESC LIMIT 200").all(performerId, mediaType, exceptId) as any[])
       .map((row) => ({ row, distance: hammingDistance(visualHash, String(row.visual_hash)) }))
       .filter((candidate) => candidate.distance <= maximumDistance)
       .sort((left, right) => left.distance - right.distance || Number(right.row.quality_score) - Number(left.row.quality_score));
@@ -529,6 +542,7 @@ export class Database {
       filename: row.filename ?? undefined, qualityScore: row.quality_score, expectedBytes: row.expected_bytes ?? undefined, publishedAt: row.published_at ?? undefined,
       metadata: asJson(row.metadata_json, {}), status: row.status, progress: row.progress, downloadedBytes: Number(row.downloaded_bytes ?? 0), checksumSha256: row.checksum_sha256 ?? undefined, visualHash: row.visual_hash ?? undefined,
       storagePath: row.storage_path ?? undefined, error: row.error ?? undefined,
+      attempts: Number(row.attempts ?? 0), nextRetryAt: row.next_retry_at ?? undefined,
       downloadStartedAt: row.download_started_at ?? undefined, downloadFinishedAt: row.download_finished_at ?? undefined,
       createdAt: row.created_at, updatedAt: row.updated_at };
   }

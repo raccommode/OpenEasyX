@@ -1,0 +1,23 @@
+# TLS reverse proxy for OpenEasyX (terminates HTTPS, issues certificates
+# automatically via Let's Encrypt, and forwards the protocol so the app sets
+# the `Secure` cookie flag).
+#
+# Setup:
+#   1. Replace easyx.example.com with your DNS name (it must resolve to this host).
+#   2. Open UDP/TCP 80 + 443 on your firewall/router.
+#   3. docker compose --profile tls up -d
+#   4. Put your real secret into .env:  EASYX_SESSION_SECRET=<openssl rand -hex 32>
+#
+# Local/LAN-only testing without a domain: replace the site block with
+#   :8443 { reverse_proxy open-easyx:3210 }
+# and browse https://<host-ip>:8443 (self-signed certificate).
+
+{$EASYX_DOMAIN} {
+	encode zstd gzip
+
+	reverse_proxy open-easyx:3210 {
+		# Required: lets the app detect HTTPS and mark the session cookie Secure.
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-For {remote_host}
+	}
+}

@@ -7,9 +7,9 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n api,web -c cyan,magenta \"tsx watch server/index.ts\" \"vite\"",
+    "dev": "concurrently -n api,web -c cyan,magenta \"tsx watch --env-file-if-exists=.env server/index.ts\" \"vite\"",
     "build": "tsc --noEmit && vite build",
-    "start": "tsx server/index.ts",
+    "start": "tsx --env-file-if-exists=.env server/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run test && npm run build"

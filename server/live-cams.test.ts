@@ -309,7 +309,7 @@ describe("Open EasyX live cams", () => {
     const cam = await service.get("test.live", "alice");
     expect(searched).toBe(false);
     expect(cam).toMatchObject({ username: "alice", providerId: "test.live" });
-    const recording = service.record("test.live", cam);
+    const recording = await service.record("test.live", cam);
     expect(recording.status).toBe("queued");
     expect(database.getItem(recording.itemId)).toMatchObject({ status: "queued", mediaType: "video", pageUrl: "https://live.test/alice", filename: expect.stringMatching(/^alice-.*\.mp4$/) });
   });

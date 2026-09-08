@@ -1,4 +1,6 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { FastifyReply } from "fastify";
 import type { LiveCam, LiveCamFavoriteSnapshot, LiveCamQuery, LiveStream } from "../packages/plugin-sdk/index.js";
 import type { Database, LiveCamFavorite, Performer, Source } from "./database.js";
@@ -35,7 +37,10 @@ export class LiveCamService {
   private favoriteWrites = new Map<string, Promise<void>>();
   private favoriteEpoch = new Map<string, number>();
 
-  constructor(private readonly db: Database, private readonly plugins: PluginManager, private readonly request: typeof fetch = fetch) {}
+  private readonly cacheDir?: string;
+  constructor(private readonly db: Database, private readonly plugins: PluginManager, private readonly request: typeof fetch = fetch, cacheDir?: string) {
+    this.cacheDir = cacheDir;
+  }
 
   private findPerformer(providerId: string, cam: Pick<LiveCam, "id" | "username">, performers = this.db.listPerformers()): Performer | undefined {
     const identities = new Set([cam.username, cam.id, `live:${cam.username}`].map((value) => value.trim().toLowerCase()));
@@ -376,7 +381,7 @@ export class LiveCamService {
     return { performer, source, created: !existing, sourceCreated: !existingSource };
   }
 
-  record(providerId: string, cam: LiveCam): { itemId: string; status: string } {
+  async record(providerId: string, cam: LiveCam): Promise<{ itemId: string; status: string }> {
     const entry = this.livePlugins(providerId)[0];
     if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
     const plugin = this.plugins.get(providerId);
@@ -390,9 +395,16 @@ export class LiveCamService {
     const externalId = `manual-live:${username.toLowerCase()}:${session}`;
     const safeName = username.replace(/[^a-z0-9_.-]+/gi, "-").replace(/^-+|-+$/g, "") || "live";
     const { performer, source } = this.createPerformer(providerId, cam);
+    let recordingAudioUrl: string | undefined;
+    if (plugin.resolveLiveStream) {
+      try {
+        const stream = await plugin.resolveLiveStream(this.plugins.context(providerId), cam);
+        if (stream.audioUrl) recordingAudioUrl = stream.audioUrl;
+      } catch { /* Audio merge is best-effort; the capture tool may already include audio. */ }
+    }
     this.db.ingestItems(source, [{
       externalId, title: cam.title ?? `${username} live`, pageUrl: cam.pageUrl, mediaType: "video",
-      publishedAt: startedAt.toISOString(), filename: `${safeName}-${session}.mp4`, metadata: { extractorUrl: cam.pageUrl, live: true },
+      publishedAt: startedAt.toISOString(), filename: `${safeName}-${session}.mp4`, metadata: { extractorUrl: cam.pageUrl, live: true, ...(recordingAudioUrl ? { recordingAudioUrl } : {}) },
     }]);
     const item = this.db.getItemBySourceExternalId(source.id, externalId);
     if (!item) throw new Error("The live recording could not be added to the download queue");
@@ -475,14 +487,67 @@ export class LiveCamService {
     for (const key of ["_HLS_msn", "_HLS_part", "_HLS_skip"]) {
       const value = text(query[key]); if (value) sourceUrl.searchParams.set(key, value);
     }
-    const response = await this.request(sourceUrl, { headers: { ...entry.headers, ...(range ? { range } : {}) }, signal: AbortSignal.timeout(25_000) });
+    const cacheKey = this.proxyCacheKey(sourceUrl.toString(), range, entry.headers);
+    const cached = this.readProxyCache(cacheKey);
+    if (cached) return reply.status(200).type(cached.contentType).header("cache-control", "no-store").send(cached.buffer);
+    let response: Response;
+    try { response = await this.fetchUpstream(sourceUrl, entry.headers, range); }
+    catch (error) {
+      return reply.status(502).send({ error: `Upstream live provider unreachable: ${error instanceof Error ? error.message : String(error)}` });
+    }
     if (!response.ok) return reply.status(response.status).send({ error: `Live provider returned HTTP ${response.status}` });
     const contentType = response.headers.get("content-type") ?? "application/octet-stream";
     const buffer = Buffer.from(await response.arrayBuffer());
     const playlist = contentType.includes("mpegurl") || buffer.subarray(0, 7).toString() === "#EXTM3U";
+    if (!playlist) this.writeProxyCache(cacheKey, buffer, contentType);
     reply.status(response.status).type(playlist ? "application/vnd.apple.mpegurl" : contentType).header("cache-control", "no-store");
     const contentRange = response.headers.get("content-range"); const acceptRanges = response.headers.get("accept-ranges");
     if (contentRange) reply.header("content-range", contentRange); if (acceptRanges) reply.header("accept-ranges", acceptRanges);
     return reply.send(playlist ? this.rewritePlaylist(buffer.toString("utf8"), response.url, entry.headers) : buffer);
+  }
+
+  private proxyCacheKey(url: string, range: string | undefined, headers: Record<string, string>): string {
+    return createHash("sha256").update(`${url}|${range ?? ""}|${JSON.stringify(Object.entries(headers).sort())}`).digest("hex").slice(0, 32);
+  }
+
+  private readProxyCache(key: string): { buffer: Buffer; contentType: string } | undefined {
+    if (!this.cacheDir) return undefined;
+    try {
+      const dataPath = path.join(this.cacheDir, `${key}.bin`);
+      const metaPath = path.join(this.cacheDir, `${key}.ct`);
+      const stat = fs.statSync(dataPath);
+      if (Date.now() - stat.mtimeMs > 5 * 60_000) { fs.rmSync(dataPath, { force: true }); fs.rmSync(metaPath, { force: true }); return undefined; }
+      return { buffer: fs.readFileSync(dataPath), contentType: fs.readFileSync(metaPath, "utf8") || "application/octet-stream" };
+    } catch { return undefined; }
+  }
+
+  private writeProxyCache(key: string, buffer: Buffer, contentType: string): void {
+    if (!this.cacheDir) return;
+    try {
+      if (!fs.existsSync(this.cacheDir)) fs.mkdirSync(this.cacheDir, { recursive: true });
+      fs.writeFileSync(path.join(this.cacheDir, `${key}.bin`), buffer, { mode: 0o600 });
+      fs.writeFileSync(path.join(this.cacheDir, `${key}.ct`), contentType, { mode: 0o600 });
+      const entries = fs.readdirSync(this.cacheDir).filter((name) => name.endsWith(".bin")).map((name) => ({ name, mtime: fs.statSync(path.join(this.cacheDir!, name)).mtimeMs }));
+      const cap = 500;
+      if (entries.length > cap) {
+        for (const stale of entries.sort((a, b) => a.mtime - b.mtime).slice(0, entries.length - cap)) {
+          fs.rmSync(path.join(this.cacheDir!, stale.name), { force: true });
+          fs.rmSync(path.join(this.cacheDir!, `${stale.name.slice(0, -4)}.ct`), { force: true });
+        }
+      }
+    } catch { /* Disk cache is best-effort; never blocks the proxy. */ }
+  }
+
+  private async fetchUpstream(url: URL, headers: Record<string, string>, range: string | undefined): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await this.request(url, { headers: { ...headers, ...(range ? { range } : {}) }, signal: AbortSignal.timeout(60_000) });
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) await new Promise<void>((resolve) => { const timer = setTimeout(resolve, 1000 * (attempt + 1)); timer.unref?.(); });
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("Upstream fetch failed");
   }
 }

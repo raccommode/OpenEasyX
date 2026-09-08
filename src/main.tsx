@@ -7,6 +7,7 @@ import { pluginFaviconUrl } from "./plugin-icon.js";
 import { canonicalEntryPath, pageFromPath, pagePath, type PageKey } from "./routes.js";
 import { LogsPage } from "./logs.js";
 import { isLibraryRoute, LibraryApp } from "./library-app.js";
+import { AuthGate } from "./AuthGate.js";
 import { AppChrome } from "./AppChrome.js";
 import { SettingsPage as SubtitleSettingsPage } from "./SettingsPage.js";
 import { OutputSettings } from "./OutputSettings.js";
@@ -551,4 +552,4 @@ if (entryPath !== window.location.pathname) {
   const search = params.toString();
   window.history.replaceState(window.history.state, "", `${entryPath}${search ? `?${search}` : ""}${window.location.hash}`);
 }
-createRoot(document.getElementById("root")!).render(<React.StrictMode>{isLibraryRoute(window.location.pathname) ? <LibraryApp/> : <App/>}</React.StrictMode>);
+createRoot(document.getElementById("root")!).render(<React.StrictMode><AuthGate>{isLibraryRoute(window.location.pathname) ? <LibraryApp/> : <App/>}</AuthGate></React.StrictMode>);
