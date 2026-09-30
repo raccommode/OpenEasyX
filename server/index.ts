@@ -71,7 +71,7 @@ function refreshLiveCamFavorites(providerId?: string) {
       if (result.authoritative) app.log.info({ scope: "live-cams", ...result }, "Provider favorites synchronized");
       else if (result.skippedReason && !result.skippedReason.startsWith("Connect a Chaturbate account")) app.log.warn({ scope: "live-cams", ...result }, "Provider favorite synchronization skipped");
     }
-  }).catch((error) => app.log.warn({ scope: "live-cams", error, providerId }, "Provider favorite synchronization failed"));
+  }).catch((error) => app.log.warn({ scope: "live-cams", err: error, reason: error instanceof Error ? error.message : String(error), providerId }, "Provider favorite synchronization failed"));
 }
 
 app.setErrorHandler((error, request, reply) => {
@@ -603,7 +603,7 @@ setInterval(() => {
     const owner = plugins.list().find((entry) => entry.manifest.id === source.scraperPluginId);
     if (!owner?.installed || !owner.enabled || !owner.manifest.capabilities.includes("media-listing")) continue;
     scheduledInFlight.add(source.id);
-    void syncSource(source.id).catch((error) => app.log.warn({ error, sourceId: source.id }, "Scheduled source sync failed")).finally(() => scheduledInFlight.delete(source.id));
+    void syncSource(source.id).catch((error) => app.log.warn({ err: error, reason: error instanceof Error ? error.message : String(error), sourceId: source.id }, "Scheduled source sync failed")).finally(() => scheduledInFlight.delete(source.id));
   }
 }, 1000).unref();
 
