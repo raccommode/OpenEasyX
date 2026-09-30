@@ -40,7 +40,11 @@ export class PluginManager {
           if (state.installed && !state.enabled) this.db.setPluginState(plugin.manifest.id, { installed: false, enabled: false });
           this.writeLog?.("debug", "plugins", "Plugin loaded", { pluginId: plugin.manifest.id, version: plugin.manifest.version });
         } catch (error) {
-          if (this.writeLog) this.writeLog("error", "plugins", "Failed to load plugin", { file, error });
+          if (this.writeLog) this.writeLog("error", "plugins", "Failed to load plugin", {
+            file,
+            error: error instanceof Error ? error.message : String(error),
+            ...(error && typeof error === "object" && "code" in error ? { code: String(error.code) } : {}),
+          });
           else console.error(`[plugins] Failed to load ${file}`, error);
         }
       }
