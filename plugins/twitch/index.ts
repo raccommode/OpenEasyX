@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { recordingMaxHeight } from "../hls-quality.js";
 import { definePlugin, type MediaCandidate } from "../../packages/plugin-sdk/index.js";
 import { listDiscoveredLiveCams } from "../live-cam-discovery.js";
 import { configuredArgs, runYtDlpJson, testYtDlp, ytDlpDownload, ytDlpLiveStream } from "../yt-dlp-utils.js";
@@ -45,5 +46,5 @@ export default definePlugin({
   },
   async resolveLiveStream(context, cam) { return ytDlpLiveStream(context, cam, { referer: "https://www.twitch.tv/" }); },
   async listLiveCams(context, query) { return listDiscoveredLiveCams(context, "twitch", query); },
-  async resolveDownload(context, item) { return ytDlpDownload(item, context.config, { referer: "https://www.twitch.tv/", live: true }); },
+  async resolveDownload(context, item) { return ytDlpDownload(item, context.config, { referer: "https://www.twitch.tv/", live: true, maxHeight: recordingMaxHeight(context.config) }); },
 });

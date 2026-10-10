@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { recordingMaxHeight } from "./hls-quality.js";
 import { definePlugin, type EasyXPlugin, type MediaCandidate, type PluginManifest } from "../packages/plugin-sdk/index.js";
 import { browserCapturedLiveStream } from "./browser-html-utils.js";
 import { listDiscoveredLiveCams, type LiveCamDiscoveryProvider } from "./live-cam-discovery.js";
@@ -126,6 +127,6 @@ export function createLiveCamPlugin(options: LiveCamPluginOptions): EasyXPlugin 
       }
     },
     ...(options.discovery ? { async listLiveCams(context, query) { return listDiscoveredLiveCams(context, options.discovery!, query); } } : {}),
-    async resolveDownload(context, item) { return ytDlpDownload(item, context.config, { referer, live: true }); },
+    async resolveDownload(context, item) { return ytDlpDownload(item, context.config, { referer, live: true, maxHeight: recordingMaxHeight(context.config) }); },
   });
 }

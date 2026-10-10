@@ -36,7 +36,8 @@ describe("Chaturbate plugin", () => {
     const context = { config: { recordingMaxHeight: 720 }, fetch, log: vi.fn(), runCommand: vi.fn(async () => ({ exitCode: 0, stderr: "", stdout: '{"url":"https://cdn.test/master.m3u8"}' })) };
     const request = await chaturbate.resolveDownload!(context, { externalId: "live", mediaType: "video", pageUrl: "https://chaturbate.com/alice/" });
     if (request.kind !== "command") throw new Error("Expected yt-dlp recording");
-    expect(request.args[request.args.indexOf("--format") + 1]).toBe("bestvideo[height<=720]+bestaudio/best[height<=720]");
+    expect(request.args[request.args.indexOf("--format") + 1]).toBe("bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best");
+    expect(request.args[request.args.indexOf("--format-sort") + 1]).toBe("res:720");
     await chaturbate.resolveLiveStream!(context, { id: "alice", username: "alice", pageUrl: "https://chaturbate.com/alice/" });
     expect(vi.mocked(context.runCommand).mock.calls.flat().join(" ")).not.toContain("height<=720");
   });

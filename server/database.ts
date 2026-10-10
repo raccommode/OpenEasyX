@@ -23,6 +23,8 @@ export type Source = {
   profileUrl: string; domain: string; enabled: boolean; autoDownload: boolean;
   scraperPluginId?: string; scrapeEnabled: boolean;
   syncIntervalSeconds: number; lastSyncedAt?: string; nextSyncAt?: string; lastError?: string;
+  /** Maximum live recording height for this performer and plugin; 0 = automatic (highest available). */
+  recordingMaxHeight: number;
 };
 
 export type PerformerInput = { name: string; aliases?: string[]; imageUrl?: string | null };
@@ -147,6 +149,7 @@ export class Database {
       this.sqlite.exec("ALTER TABLE sources ADD COLUMN sync_interval_seconds INTEGER NOT NULL DEFAULT 21600");
       this.sqlite.exec("UPDATE sources SET sync_interval_seconds=sync_interval_minutes*60");
     }
+    if (!sourceColumns.has("recording_max_height")) this.sqlite.exec("ALTER TABLE sources ADD COLUMN recording_max_height INTEGER NOT NULL DEFAULT 0");
     const itemColumns = new Set((this.sqlite.prepare("PRAGMA table_info(items)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!itemColumns.has("original_external_id")) this.sqlite.exec("ALTER TABLE items ADD COLUMN original_external_id TEXT");
     if (!itemColumns.has("visual_hash")) this.sqlite.exec("ALTER TABLE items ADD COLUMN visual_hash TEXT");
@@ -486,7 +489,7 @@ export class Database {
     return row ? this.mapSource(row) : undefined;
   }
 
-  updateSource(sourceId: string, values: Partial<Pick<Source, "pluginId" | "label" | "profileUrl" | "domain" | "enabled" | "autoDownload" | "scrapeEnabled" | "syncIntervalSeconds">> & { scraperPluginId?: string | null }) {
+  updateSource(sourceId: string, values: Partial<Pick<Source, "pluginId" | "label" | "profileUrl" | "domain" | "enabled" | "autoDownload" | "scrapeEnabled" | "syncIntervalSeconds" | "recordingMaxHeight">> & { scraperPluginId?: string | null }) {
     const source = this.getSource(sourceId); if (!source) return undefined;
     // Refreshing an already stored account must not turn a legacy conflict into
     // a runtime failure. New associations still require an explicit merge.
@@ -500,6 +503,7 @@ export class Database {
         (values.scrapeEnabled ?? source.scrapeEnabled) ? 1 : 0, values.syncIntervalSeconds ?? source.syncIntervalSeconds,
         Math.max(1, Math.round((values.syncIntervalSeconds ?? source.syncIntervalSeconds) / 60)), now(), sourceId);
     if (values.profileUrl !== undefined) this.sqlite.prepare("UPDATE sources SET profile_key=? WHERE id=?").run(profileIdentity(values.profileUrl) ?? null, sourceId);
+    if (values.recordingMaxHeight !== undefined) this.sqlite.prepare("UPDATE sources SET recording_max_height=? WHERE id=?").run(Math.max(0, Math.trunc(values.recordingMaxHeight)), sourceId);
     return this.getSource(sourceId);
   }
 
@@ -525,7 +529,8 @@ export class Database {
     return { id: row.id, performerId: row.performer_id, pluginId: row.plugin_id, externalId: row.external_id,
       label: row.label, profileUrl: row.profile_url, domain: row.domain, enabled: !!row.enabled, autoDownload: !!row.auto_download,
       scraperPluginId: row.scraper_plugin_id ?? undefined, scrapeEnabled: !!row.scrape_enabled,
-      syncIntervalSeconds: row.sync_interval_seconds ?? row.sync_interval_minutes * 60, lastSyncedAt: row.last_synced_at ?? undefined, nextSyncAt: row.next_sync_at ?? undefined, lastError: row.last_error ?? undefined };
+      syncIntervalSeconds: row.sync_interval_seconds ?? row.sync_interval_minutes * 60, lastSyncedAt: row.last_synced_at ?? undefined, nextSyncAt: row.next_sync_at ?? undefined, lastError: row.last_error ?? undefined,
+      recordingMaxHeight: Number(row.recording_max_height ?? 0) || 0 };
   }
 
   /** Explicitly reconsider rediscovered missing media; ordinary scans keep deletion history. */

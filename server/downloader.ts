@@ -13,6 +13,15 @@ import { filenameFromUrl, safeSegment } from "./utils.js";
 import { downloadOutputPath, recordingEncodingArgs } from "./output-settings.js";
 import { outputSettings } from "../packages/output-settings.js";
 import { canMatchVideoExcerpt, fingerprintVideo, verifyVideoContainment, videoFileStamp, type VideoFingerprint } from "./video-matching.js";
+import type { Source } from "./database.js";
+
+/**
+ * Plugin config for one download, with the source's recording quality applied. A
+ * source set to automatic (0) keeps the plugin's own setting (normally highest).
+ */
+export function recordingConfig(config: Record<string, unknown>, source: Pick<Source, "recordingMaxHeight">): Record<string, unknown> {
+  return source.recordingMaxHeight > 0 ? { ...config, recordingMaxHeight: source.recordingMaxHeight } : config;
+}
 
 type ActiveDownload = {
   /** Live recording of a performer with this priority; preempted when a higher one has to wait for a slot. */
@@ -166,7 +175,7 @@ export class DownloadQueue {
       if (!performer || !source) throw new Error("The performer or source no longer exists");
       const settings = outputSettings(this.db.getSettings());
       const resolutionController = new AbortController(); control.abort = resolutionController;
-      const request = await plugin.resolveDownload(this.plugins.context(item.pluginId, resolutionController.signal), {
+      const request = await plugin.resolveDownload(this.plugins.context(item.pluginId, resolutionController.signal, recordingConfig(this.db.getPluginState(item.pluginId).config, source)), {
         externalId: item.externalId, identityKey: item.identityKey, title: item.title, pageUrl: item.pageUrl,
         mediaType: item.mediaType as any, filename: item.filename, qualityScore: item.qualityScore,
         expectedBytes: item.expectedBytes, publishedAt: item.publishedAt, metadata: item.metadata,

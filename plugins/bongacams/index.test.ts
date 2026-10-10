@@ -23,6 +23,11 @@ describe("BongaCams room recording", () => {
     expect(await resolveBongacamsDownload(ctx, item)).toMatchObject({ command: process.execPath, args: expect.arrayContaining(["https://video.test/hls/stream_Alice/high.m3u8", "{output}"]) });
     expect(variantUrls(master, "https://video.test/master.m3u8")[0].bandwidth).toBe(9000);
   });
+  it("records the performer's chosen maximum quality", async () => {
+    const ctx = { ...context(), config: { recordingMaxHeight: 720 } }; const [item] = await listBongacamsMedia(ctx, source);
+    expect(await resolveBongacamsDownload(ctx, item)).toMatchObject({ args: expect.arrayContaining(["https://video.test/hls/stream_Alice/low.m3u8"]) });
+    expect(variantUrls(master, "https://video.test/master.m3u8", 720).map((variant) => variant.height)).toEqual([240, 1080]);
+  });
   it("supports a media playlist but rejects a finished recording", async () => {
     expect(await bongacamsLiveVariant(context("public", live), "https://video.test/playlist.m3u8")).toBe("https://video.test/playlist.m3u8");
     expect(await bongacamsLiveVariant(context("public", live + "#EXT-X-ENDLIST\n"), "https://video.test/playlist.m3u8")).toBeUndefined();

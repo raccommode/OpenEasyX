@@ -1,4 +1,5 @@
 import { LIVE_RECORDER_SCRIPT, retryDelay } from "../live-recorder.js";
+import { orderVariantsForRecording, parseHlsVariants, recordingMaxHeight } from "../hls-quality.js";
 import { createLiveCamPlugin } from "../live-cam-plugin-factory.js";
 import type { CommandDownloadRequest, MediaCandidate, MediaSource, PluginContext } from "../../packages/plugin-sdk/index.js";
 
@@ -121,31 +122,25 @@ async function fetchText(context: PluginContext, url: string): Promise<string | 
   } catch (error) { context.signal?.throwIfAborted(); throw error; }
 }
 
-type Variant = { url: string; bandwidth: number };
-export function variantUrls(manifest: string, baseUrl: string): Variant[] {
+type Variant = { url: string; bandwidth: number; height: number };
+/** Variants in recording preference order: highest bandwidth, or the best at or below maxHeight. */
+export function variantUrls(manifest: string, baseUrl: string, maxHeight = 0): Variant[] {
   if (!manifest.trimStart().startsWith("#EXTM3U")) return [];
-  const variants: Variant[] = []; let info = "";
-  for (const raw of manifest.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (line.startsWith("#EXT-X-STREAM-INF")) { info = line; continue; }
-    if (!line || line.startsWith("#") || !/\.m3u8(?:$|\?)/i.test(line)) continue;
-    variants.push({ url: new URL(line, baseUrl).toString(), bandwidth: Number(/BANDWIDTH=(\d+)/i.exec(info)?.[1] ?? 0) });
-    info = "";
-  }
+  const variants = parseHlsVariants(manifest, baseUrl);
   // A media playlist (no variants) with segments is itself playable.
-  if (!variants.length && /#EXTINF/i.test(manifest)) variants.push({ url: baseUrl, bandwidth: 0 });
-  return variants.sort((left, right) => right.bandwidth - left.bandwidth);
+  if (!variants.length && /#EXTINF/i.test(manifest)) return [{ url: baseUrl, bandwidth: 0, height: 0 }];
+  return orderVariantsForRecording(variants, maxHeight);
 }
 
 function isLivePlaylist(manifest: string) {
   return manifest.trimStart().startsWith("#EXTM3U") && /#EXTINF/i.test(manifest) && !/#EXT-X-ENDLIST/i.test(manifest);
 }
 
-/** Best (highest bandwidth) variant that is actually serving segments. */
+/** Preferred variant (highest, or the best at or below the source's maximum height) that is actually serving segments. */
 export async function bongacamsLiveVariant(context: PluginContext, masterUrl: string): Promise<string | undefined> {
   const master = await fetchText(context, masterUrl);
   if (!master) return undefined;
-  for (const variant of variantUrls(master, masterUrl)) {
+  for (const variant of variantUrls(master, masterUrl, recordingMaxHeight(context.config))) {
     if (variant.url === masterUrl) return isLivePlaylist(master) ? masterUrl : undefined;
     const playlist = await fetchText(context, variant.url);
     if (playlist && isLivePlaylist(playlist)) return variant.url;

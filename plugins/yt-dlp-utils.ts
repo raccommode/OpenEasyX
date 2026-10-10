@@ -1,4 +1,5 @@
 import { oldestMediaDate as mediaDate } from "../packages/media-date.js";
+import { ytDlpHeightSort } from "./hls-quality.js";
 import type { CommandDownloadRequest, LiveCam, LiveStream, MediaCandidate, PluginContext } from "../packages/plugin-sdk/index.js";
 
 type YtDlpEntry = Record<string, unknown> & { entries?: YtDlpEntry[] };
@@ -121,8 +122,12 @@ export function ytDlpDownload(item: MediaCandidate, config: Record<string, unkno
   const extractorUrl = text(item.metadata?.extractorUrl) ?? item.pageUrl;
   if (!extractorUrl) throw new Error("The extractor did not provide a downloadable page URL");
   const height = options.live && options.maxHeight && Number.isInteger(options.maxHeight) && options.maxHeight > 0 ? `[height<=${options.maxHeight}]` : "";
+  // With a maximum height, the best format at or below it wins; when the room offers
+  // nothing that small, the fallback (sorted by --format-sort res:N) takes the closest
+  // larger quality, so a missing quality never fails the recording.
+  const heightSort = height ? ytDlpHeightSort(options.maxHeight!) : undefined;
   const format = options.live
-    ? `bestvideo${height}+bestaudio/best${height}`
+    ? `bestvideo${height}+bestaudio/best${height}${height ? "/bestvideo+bestaudio/best" : ""}`
     : "bestvideo*[vcodec!=none]+bestaudio[acodec!=none]/best[acodec!=none]/best";
   const args = [
     "--progress", "--newline", "--progress-delta", "0.5", "--progress-template", "download:easyx-progress:%(progress._percent_str)s", "--no-playlist", "--retries", "5", "--fragment-retries", "5",
@@ -131,6 +136,7 @@ export function ytDlpDownload(item: MediaCandidate, config: Record<string, unkno
   if (options.forceIpv4) args.push("--force-ipv4");
   if (options.impersonate) args.push("--impersonate", options.impersonate);
   if (options.referer) args.push("--referer", options.referer);
+  if (heightSort) args.push("--format-sort", heightSort);
   args.push("--format", format, "--merge-output-format", "mp4", "--remux-video", "mp4", "--output", "{output}");
   // Capture separate live video/audio together, preserving their shared timeline.
   if (options.live) args.push("--downloader", "ffmpeg", "--no-hls-use-mpegts");

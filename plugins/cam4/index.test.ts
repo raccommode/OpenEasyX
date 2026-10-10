@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginContext } from "../../packages/plugin-sdk/index.js";
-import { cam4FollowedSnapshot, setCam4Favorite } from "./index.js";
+import { cam4FollowedSnapshot, cam4VariantUrls, setCam4Favorite } from "./index.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -73,5 +73,14 @@ describe("CAM4 account favorites", () => {
       id: "alice", username: "Alice", pageUrl: "https://www.cam4.com/Alice",
     }, true)).resolves.toEqual({ synchronized: true });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("CAM4 recording quality", () => {
+  const master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=854x480\n480.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080\n1080.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720\n720.m3u8\n";
+  it("prefers the highest variant on automatic and the chosen maximum otherwise", () => {
+    expect(cam4VariantUrls(master, "https://cdn.test/master.m3u8")).toEqual(["https://cdn.test/1080.m3u8", "https://cdn.test/720.m3u8", "https://cdn.test/480.m3u8"]);
+    expect(cam4VariantUrls(master, "https://cdn.test/master.m3u8", 720)[0]).toBe("https://cdn.test/720.m3u8");
+    expect(cam4VariantUrls(master, "https://cdn.test/master.m3u8", 360)[0]).toBe("https://cdn.test/480.m3u8");
   });
 });

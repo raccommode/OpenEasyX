@@ -29,7 +29,7 @@ async function filledLibrary() {
   lib.db.mergePerformerDetails(alice.id, { externalRefs: { "test.live": "alice" } });
   lib.db.setPerformerPriority(alice.id, 1);
   const source = lib.db.addSource(alice.id, "test.live", { externalId: "https://live.test/alice", label: "live.test", profileUrl: "https://live.test/alice", domain: "live.test" });
-  lib.db.updateSource(source.id, { autoDownload: true, scraperPluginId: "test.live", scrapeEnabled: true, syncIntervalSeconds: 30 });
+  lib.db.updateSource(source.id, { autoDownload: true, scraperPluginId: "test.live", scrapeEnabled: true, syncIntervalSeconds: 30, recordingMaxHeight: 720 });
   lib.db.createPerformer({ name: "Bob" });
   return lib;
 }
@@ -43,7 +43,7 @@ describe("backup export and import", () => {
       expect(backup.performers).toHaveLength(2);
       expect(backup.performers[0]).toMatchObject({
         name: "Alice", aliases: ["Ally"], imageUrl: "https://img.test/alice.jpg", externalRefs: { "test.live": "alice" }, priority: 1,
-        sources: [{ pluginId: "test.live", profileUrl: "https://live.test/alice", autoDownload: true, scraperPluginId: "test.live", scrapeEnabled: true, syncIntervalSeconds: 30 }],
+        sources: [{ pluginId: "test.live", profileUrl: "https://live.test/alice", autoDownload: true, scraperPluginId: "test.live", scrapeEnabled: true, syncIntervalSeconds: 30, recordingMaxHeight: 720 }],
       });
       expect(JSON.stringify(backup)).not.toContain("secret-value");
     } finally { db.close(); }
@@ -62,7 +62,7 @@ describe("backup export and import", () => {
       const alice = db.getPerformerByName("Alice")!;
       expect(alice).toMatchObject({ aliases: ["Ally"], imageUrl: "https://img.test/alice.jpg", externalRefs: { "test.live": "alice" }, priority: 1 });
       expect(db.findPerformerByIdentity("test.live", "alice")?.id).toBe(alice.id);
-      expect(db.listSources(alice.id)).toMatchObject([{ profileUrl: "https://live.test/alice", autoDownload: true, scrapeEnabled: true, scraperPluginId: "test.live", syncIntervalSeconds: 30 }]);
+      expect(db.listSources(alice.id)).toMatchObject([{ profileUrl: "https://live.test/alice", autoDownload: true, scrapeEnabled: true, scraperPluginId: "test.live", syncIntervalSeconds: 30, recordingMaxHeight: 720 }]);
     } finally { db.close(); }
   });
 

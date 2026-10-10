@@ -24,6 +24,7 @@ const sourceSchema = z.object({
   enabled: z.boolean().optional(), autoDownload: z.boolean().optional(),
   scraperPluginId: z.string().nullable().optional(), scrapeEnabled: z.boolean().optional(),
   syncIntervalSeconds: z.number().int().min(5).max(31_536_000).optional(),
+  recordingMaxHeight: z.number().int().min(0).max(4320).optional(),
 });
 
 const performerSchema = z.object({
@@ -63,7 +64,7 @@ export function exportBackup(db: Database, plugins: PluginManager, appVersion?: 
       sources: sources.filter((source) => source.performerId === performer.id).map((source) => ({
         pluginId: source.pluginId, externalId: source.externalId, label: source.label, profileUrl: source.profileUrl, domain: source.domain,
         enabled: source.enabled, autoDownload: source.autoDownload, scraperPluginId: source.scraperPluginId ?? null,
-        scrapeEnabled: source.scrapeEnabled, syncIntervalSeconds: source.syncIntervalSeconds,
+        scrapeEnabled: source.scrapeEnabled, syncIntervalSeconds: source.syncIntervalSeconds, recordingMaxHeight: source.recordingMaxHeight,
       })),
     })),
   };
@@ -149,6 +150,7 @@ export function importBackup(db: Database, plugins: PluginManager, backup: Backu
             ...(source.enabled !== undefined ? { enabled: source.enabled } : {}), ...(source.autoDownload !== undefined ? { autoDownload: source.autoDownload } : {}),
             ...(source.scraperPluginId !== undefined ? { scraperPluginId: source.scraperPluginId } : {}), ...(scrapeEnabled !== undefined ? { scrapeEnabled } : {}),
             ...(interval !== undefined ? { syncIntervalSeconds: interval } : {}),
+            ...(source.recordingMaxHeight !== undefined ? { recordingMaxHeight: source.recordingMaxHeight } : {}),
           });
           if (same) result.sources.updated += 1; else { result.sources.added += 1; existing.push(saved); }
         } catch (error) {

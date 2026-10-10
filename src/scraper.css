@@ -49,3 +49,5 @@
   .profile-url-row > .badge, .profile-url-row > span.badge { display: none; }
   .profile-url-row > .icon-button[aria-label^="Scrape"] { display: none; }
 }
+
+.source-scraper-controls .source-quality { grid-column: 1 / -1; }

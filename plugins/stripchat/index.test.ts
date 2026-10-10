@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginContext } from "../../packages/plugin-sdk/index.js";
-import { listStripchatMedia, resolveStripchatDirect, resolveStripchatDownload, setStripchatFavorite, stripchatFollowedSnapshot, stripchatPublicPlaybackKey } from "./index.js";
+import { listStripchatMedia, resolveStripchatDirect, resolveStripchatDownload, setStripchatFavorite, stripchatFollowedSnapshot, stripchatPublicPlaybackKey, stripchatVariantUrls } from "./index.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -188,5 +188,33 @@ describe("Stripchat account favorites", () => {
     }, true)).resolves.toEqual({ synchronized: true });
     expect(runCommand).not.toHaveBeenCalled();
     expect(fetch).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("Stripchat recording quality", () => {
+  const master = [
+    "#EXTM3U",
+    '#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,NAME="1080p"', "https://media-hls.doppiocdn.media/live/42.m3u8",
+    '#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,NAME="720p"', "https://media-hls.doppiocdn.media/live/42_720p.m3u8",
+    '#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=854x480,NAME="480p"', "https://media-hls.doppiocdn.media/live/42_480p.m3u8",
+  ].join("\n");
+
+  it("keeps the manifest order (highest first) when set to automatic", () => {
+    expect(stripchatVariantUrls(master, "https://edge-hls.doppiocdn.media/hls/42/master/42_auto.m3u8")).toEqual([
+      "https://media-hls.doppiocdn.media/live/42.m3u8", "https://media-hls.doppiocdn.media/live/42_720p.m3u8", "https://media-hls.doppiocdn.media/live/42_480p.m3u8",
+    ]);
+  });
+
+  it("records the performer's chosen maximum quality", async () => {
+    const live = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:123\n#EXTINF:2\nsegment.mp4\n";
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/v2.12.0/main.js")) return new Response('function airplay(url){url.searchParams.set("pkey","PublicKey123456")}');
+      return new Response(url.includes("/master/") ? master : live);
+    });
+    const mock = { config: { recordingMaxHeight: 480 }, fetch, log: vi.fn(), runCommand: vi.fn(async () => ({ exitCode: 0, stdout: pageState(), stderr: "" })) };
+    const request = await resolveStripchatDownload(mock, { externalId: "stripchat:alice:session", pageUrl: "https://stripchat.com/Alice", mediaType: "video" });
+    if (request.kind !== "command") throw new Error("Expected the live recorder");
+    expect(request.args[2]).toBe("https://media-hls.doppiocdn.media/live/42_480p.m3u8?pkey=PublicKey123456");
   });
 });

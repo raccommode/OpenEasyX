@@ -1,4 +1,5 @@
 import { LIVE_RECORDER_SCRIPT, retryDelay } from "../live-recorder.js";
+import { orderVariantsForRecording, parseHlsVariants, recordingMaxHeight } from "../hls-quality.js";
 import { createLiveCamPlugin } from "../live-cam-plugin-factory.js";
 import { accountSignal, cookieHeader, readAccountCookies } from "../account-cookies.js";
 import { browserHtml } from "../browser-html-utils.js";
@@ -333,17 +334,9 @@ function cam4RoomName(pageUrl: string): string | undefined {
   catch { return undefined; }
 }
 
-function variantUrls(manifest: string, baseUrl: string): string[] {
-  if (!manifest.trimStart().startsWith("#EXTM3U")) return [];
-  const variants: Array<{ url: string; bandwidth: number }> = []; let info = "";
-  for (const raw of manifest.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (line.startsWith("#EXT-X-STREAM-INF")) { info = line; continue; }
-    if (!line || line.startsWith("#") || !/\.m3u8(?:$|\?)/i.test(line)) continue;
-    variants.push({ url: new URL(line, baseUrl).toString(), bandwidth: Number(/(?:^|[:,])BANDWIDTH=(\d+)/i.exec(info)?.[1] ?? 0) });
-    info = "";
-  }
-  return variants.sort((left, right) => right.bandwidth - left.bandwidth).map((variant) => variant.url);
+/** Variant URLs in recording preference order: highest bandwidth, or the best at or below maxHeight. */
+export function cam4VariantUrls(manifest: string, baseUrl: string, maxHeight = 0): string[] {
+  return orderVariantsForRecording(parseHlsVariants(manifest, baseUrl), maxHeight).map((variant) => variant.url);
 }
 
 const isLivePlaylist = (text: string) => text.trimStart().startsWith("#EXTM3U") && /#EXTINF:/i.test(text) && !/#EXT-X-ENDLIST/i.test(text);
@@ -367,7 +360,7 @@ export async function cam4LiveStream(context: PluginContext, username: string): 
   const master = await playlistText(context, masterUrl);
   if (!master) return undefined;
   if (isLivePlaylist(master)) return { masterUrl, mediaUrl: masterUrl };
-  for (const variant of variantUrls(master, masterUrl)) {
+  for (const variant of cam4VariantUrls(master, masterUrl, recordingMaxHeight(context.config))) {
     const playlist = await playlistText(context, variant);
     if (playlist && isLivePlaylist(playlist)) return { masterUrl, mediaUrl: variant };
   }
