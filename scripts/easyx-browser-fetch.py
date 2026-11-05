@@ -16,6 +16,14 @@ from curl_cffi import requests
 from websockets.asyncio.client import connect
 
 
+# Chromium's crash reporter needs a writable home: without one it exits at once
+# ("chrome_crashpad_handler: --database is required"), for example when the container
+# drops root privileges but keeps HOME=/root.
+if not os.access(os.environ.get("HOME") or "/nonexistent", os.W_OK):
+    os.environ["HOME"] = os.path.join(tempfile.gettempdir(), f"easyx-home-{os.getuid()}")
+    os.makedirs(os.environ["HOME"], mode=0o700, exist_ok=True)
+
+
 MEDIA_URL_RE = re.compile(
     r"https?://[^\s'\"<>\\]+?(?:\.m3u8|\.mpd)(?:\?[^\s'\"<>\\]*)?",
     re.IGNORECASE,
