@@ -5,12 +5,13 @@ import http from "node:http";
 import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
+import { ffmpegHlsRetryArgs } from "./yt-dlp-utils.js";
 import { LIVE_RECORDER_SCRIPT } from "./live-recorder.js";
 
 const cleanup: Array<() => unknown> = [];
 afterEach(() => { for (const dispose of cleanup.splice(0).reverse()) dispose(); });
 
-async function recording(mode: "stall" | "timestamps") {
+async function recording(mode: "stall" | "timestamps" | "yt-stall") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-real-hls-"));
   cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
   execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=duration=4:size=96x64:rate=10", "-f", "lavfi", "-i", "sine=duration=4",
@@ -30,7 +31,10 @@ async function recording(mode: "stall" | "timestamps") {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   cleanup.push(() => { server.closeAllConnections(); server.close(); });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const child = spawn(process.execPath, ["-e", LIVE_RECORDER_SCRIPT, `${base}/first.m3u8`, `${base}/master.m3u8`, "{}", output, "500", "20", "Test"], {
+  const command = mode === "yt-stall" ? "ffmpeg" : process.execPath;
+  const args = mode === "yt-stall" ? ["-v", "error", "-rw_timeout", "15000000", ...ffmpegHlsRetryArgs(), "-i", `${base}/first.m3u8`, "-c", "copy", "-y", output]
+    : ["-e", LIVE_RECORDER_SCRIPT, `${base}/first.m3u8`, `${base}/master.m3u8`, "{}", output, "500", "20", "Test"];
+  const child = spawn(command, args, {
     // FFmpeg 5 can probe the stream for five seconds before creating output.
     env: { ...process.env, EASYX_LIVE_STALL_SECONDS: "10" }, detached: true, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -44,6 +48,13 @@ async function recording(mode: "stall" | "timestamps") {
 }
 
 describe("recording real HLS over HTTP", () => {
+  it("bounds Chaturbate's FFmpeg wait when an HTTP 200 playlist stops advancing", async () => {
+    const result = await recording("yt-stall");
+    expect(result.frames).toBe(20);
+    expect(result.duration).toBeGreaterThanOrEqual(1.9);
+    expect(result.duration).toBeLessThan(3);
+  }, 25_000);
+
   it("captures both sides of a stalled playlist instead of leaving the recorder idle", async () => {
     const result = await recording("stall");
     expect(result.logs).toContain("continuing the recording");

@@ -1,3 +1,4 @@
+import { setImmediate as yieldToIO } from "node:timers/promises";
 import { randomBytes } from "node:crypto";
 import type { FastifyReply } from "fastify";
 import type { LiveCam, LiveCamFavoriteSnapshot, LiveCamQuery, LiveStream } from "../packages/plugin-sdk/index.js";
@@ -134,8 +135,8 @@ export class LiveCamService {
           if (plugin.listFollowedLiveCams) {
             const snapshot = await this.followedSnapshot(entry.manifest.id);
             if (!snapshot.authoritative) warning = snapshot.skippedReason ?? "Account favorites could not be synchronized. Local favorites are still saved.";
-            if (snapshot.authoritative && epoch === this.favoriteEpoch.get(entry.manifest.id)) this.reconcileFavorites(entry.manifest.id, snapshot.cams);
-            if (!snapshot.authoritative && epoch === this.favoriteEpoch.get(entry.manifest.id)) this.preservePartialFavorites(entry.manifest.id, snapshot.cams);
+            if (snapshot.authoritative && epoch === this.favoriteEpoch.get(entry.manifest.id)) await this.reconcileFavorites(entry.manifest.id, snapshot.cams);
+            if (!snapshot.authoritative && epoch === this.favoriteEpoch.get(entry.manifest.id)) await this.preservePartialFavorites(entry.manifest.id, snapshot.cams);
             const transientFailure = !snapshot.authoritative && /429|limit|fetch|timeout|timed out|network|HTTP 5/i.test(snapshot.skippedReason ?? "");
             const remote = new Map(snapshot.cams.map((cam) => [cam.username.toLowerCase(), cam]));
             const savedFavorites = this.db.listLiveCamFavorites(entry.manifest.id).sort((a, b) =>
@@ -389,7 +390,7 @@ export class LiveCamService {
     if (!plugin.listFollowedLiveCams) return { providerId, synced: 0, added: 0, removed: 0, authoritative: false, skippedReason: `${entry.manifest.name} does not support account favorite synchronization` };
     const epoch = this.favoriteEpoch.get(providerId);
     const snapshot = await this.followedSnapshot(providerId);
-    if (!snapshot.authoritative && epoch === this.favoriteEpoch.get(providerId)) this.preservePartialFavorites(providerId, snapshot.cams);
+    if (!snapshot.authoritative && epoch === this.favoriteEpoch.get(providerId)) await this.preservePartialFavorites(providerId, snapshot.cams);
     if (!snapshot.authoritative) return {
       providerId, synced: 0, added: 0, removed: 0, authoritative: false,
       skippedReason: snapshot.skippedReason ?? "The provider did not return a complete followed list",
@@ -397,20 +398,30 @@ export class LiveCamService {
 
     if (epoch !== this.favoriteEpoch.get(providerId)) return { providerId, synced: 0, added: 0, removed: 0, authoritative: false, skippedReason: "Favorites changed during synchronization; retrying on the next refresh." };
     this.providerResults.clear();
-    return { providerId, ...this.reconcileFavorites(providerId, snapshot.cams), authoritative: true };
+    return { providerId, ...await this.reconcileFavorites(providerId, snapshot.cams), authoritative: true };
   }
 
-  private preservePartialFavorites(providerId: string, cams: LiveCam[]) {
+  private async preservePartialFavorites(providerId: string, cams: LiveCam[]) {
+    const epoch = this.favoriteEpoch.get(providerId);
+    let count = 0;
     const entry = this.livePlugins(providerId)[0]; if (!entry) return;
     const removed = new Set(this.db.listLiveCamFavoriteChanges(providerId).filter((change) => !change.favorite).map((change) => change.cam.username.toLowerCase()));
     for (const cam of cams) {
+      if (++count % 10 === 0) await yieldToIO();
+      if (epoch !== this.favoriteEpoch.get(providerId)) return;
       if (removed.has(cam.username.toLowerCase()) || !cam.username.trim() || !cam.id.trim() || !pluginMatchesSource(entry.manifest, cam.pageUrl)) continue;
       this.db.setLiveCamFavorite(providerId, { ...cam, camId: cam.id }, true);
       this.createPerformer(providerId, cam);
     }
   }
 
-  private reconcileFavorites(providerId: string, cams: LiveCam[]): Pick<LiveCamFavoriteSyncResult, "synced" | "added" | "removed"> {
+  private async reconcileFavorites(providerId: string, cams: LiveCam[]): Promise<Pick<LiveCamFavoriteSyncResult, "synced" | "added" | "removed">> {
+    const epoch = this.favoriteEpoch.get(providerId);
+    let count = 0;
+    const checkpoint = async () => {
+      await yieldToIO();
+      if (epoch !== this.favoriteEpoch.get(providerId)) throw new Error("Favorites changed during synchronization; retrying on the next refresh.");
+    };
     const entry = this.livePlugins(providerId)[0];
     if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
     const unique = new Map<string, LiveCam>();
@@ -430,8 +441,10 @@ export class LiveCamService {
       else unique.delete(key);
     }
     const previous = this.db.listLiveCamFavorites(providerId);
-    const previousKeys = new Set(previous.map((favorite) => favorite.username.toLowerCase()));
+    const originalKeys = new Set(previous.map((favorite) => favorite.username.toLowerCase()));
+    const previousKeys = new Set(originalKeys);
     for (const [key, cam] of unique) {
+      if (++count % 10 === 0) await checkpoint();
       this.db.setLiveCamFavorite(providerId, {
         camId: cam.id, username: cam.username, title: cam.title, pageUrl: cam.pageUrl, thumbnailUrl: cam.thumbnailUrl,
       }, true);
@@ -439,6 +452,7 @@ export class LiveCamService {
       previousKeys.delete(key);
     }
     for (const favorite of previous) {
+      if (++count % 10 === 0) await checkpoint();
       if (previousKeys.has(favorite.username.toLowerCase())) this.db.setLiveCamFavorite(providerId, favorite, false);
     }
     for (const cached of this.recentCams.values()) {
@@ -446,7 +460,7 @@ export class LiveCamService {
     }
     return {
       synced: unique.size,
-      added: [...unique.keys()].filter((key) => !previous.some((favorite) => favorite.username.toLowerCase() === key)).length,
+      added: [...unique.keys()].filter((key) => !originalKeys.has(key)).length,
       removed: previousKeys.size,
     };
   }
@@ -457,13 +471,15 @@ export class LiveCamService {
     if (!pluginMatchesSource(entry.manifest, cam.pageUrl)) throw Object.assign(new Error(`${entry.manifest.name} does not support this live URL`), { statusCode: 400 });
     const username = cam.username.trim();
     const identities = new Set([username, cam.id, `live:${username}`].map((value) => value.trim().toLowerCase()));
-    const existing = this.findPerformer(providerId, cam);
-    const performer = this.db.upsertPerformer({ externalId: username, name: username, imageUrl: existing?.imageUrl ?? cam.thumbnailUrl }, providerId, existing?.id);
+    const existing = this.db.findPerformerByIdentity(providerId, username) ?? this.findPerformer(providerId, cam);
+    const performer = existing?.externalRefs[providerId] === username && (existing.imageUrl || !cam.thumbnailUrl)
+      ? existing
+      : this.db.upsertPerformer({ externalId: username, name: username, imageUrl: existing?.imageUrl ?? cam.thumbnailUrl }, providerId, existing?.id);
     const profileUrl = new URL(cam.pageUrl).href;
     const existingSource = this.db.listSources(performer.id).find((source) => source.pluginId === providerId && (
       identities.has(source.externalId.trim().toLowerCase()) || source.profileUrl.replace(/\/+$/, "").toLowerCase() === profileUrl.replace(/\/+$/, "").toLowerCase()
     ));
-    const source = existingSource
+    const source = existingSource?.profileUrl === profileUrl ? existingSource : existingSource
       ? this.db.updateSource(existingSource.id, { label: `${username} profile`, profileUrl, domain: new URL(profileUrl).hostname.replace(/^www\./i, "") })!
       : this.db.addSource(performer.id, providerId, {
         externalId: username, label: `${username} profile`, profileUrl, domain: new URL(profileUrl).hostname.replace(/^www\./i, ""),

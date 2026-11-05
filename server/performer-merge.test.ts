@@ -28,6 +28,8 @@ function fixture() {
 describe("performer account conflicts and explicit merge", () => {
   it("normalizes account links while preserving different post IDs and query identities", () => {
     expect(profileIdentity("http://www.instagram.com/EXAMPLE/?igsh=123#bio")).toBe(profileIdentity("https://instagram.com/example"));
+    expect(profileIdentity("https://mfc.im/Alice/chat")).toBe(profileIdentity("https://www.myfreecams.com/#Alice"));
+    expect(profileIdentity("https://www.myfreecams.com/#Alice")).not.toBe(profileIdentity("https://www.myfreecams.com/#Bob"));
     expect(profileIdentity("https://twitter.com/Example")).toBe(profileIdentity("https://x.com/example"));
     expect(profileIdentity("https://site.test/profile.php?id=1")).not.toBe(profileIdentity("https://site.test/profile.php?id=2"));
     expect(profileIdentity("https://instagram.com/p/AbC")).not.toBe(profileIdentity("https://instagram.com/p/abc"));

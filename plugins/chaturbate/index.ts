@@ -329,10 +329,16 @@ export default definePlugin({
   },
   async getLiveCam(context, cam) {
     if (!/^[a-z0-9_]+$/i.test(cam.username)) throw new Error("Invalid Chaturbate room name");
+    const cookies = accountCookies(context.config);
     const response = await chaturbateRequest(context, `https://chaturbate.com/api/chatvideocontext/${encodeURIComponent(cam.username)}/`, {
-      headers: { accept: "application/json", referer: cam.pageUrl, "user-agent": "Mozilla/5.0" }, signal: requestSignal(context),
+      headers: cookies ? accountHeaders(cookies, cam.pageUrl) : { accept: "application/json", referer: cam.pageUrl, "user-agent": "Mozilla/5.0" },
+      redirect: "manual", signal: requestSignal(context),
     });
+    if (response.status >= 300 && response.status < 400) throw new Error("Chaturbate live status redirected to login. Connect or reconnect the account.");
     if (!response.ok) throw new Error(`Chaturbate live status returned HTTP ${response.status}`);
+    if (!/application\/(?:[\w.+-]+\+)?json/i.test(response.headers.get("content-type") ?? "")) {
+      throw new Error("Chaturbate live status returned a non-JSON response. Connect or reconnect the account and retry.");
+    }
     const room = await response.json() as Record<string, unknown>;
     const status = text(room.room_status);
     if (!status || !["public", "offline", "private", "group", "away", "hidden", "password", "notconnected"].includes(status)) throw new Error("Chaturbate did not return a valid room status");

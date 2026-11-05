@@ -6,6 +6,10 @@ export function profileIdentity(value: string): string | undefined {
     let host = url.hostname.toLowerCase().replace(/^www\./, "");
     if (["m.instagram.com", "mobile.instagram.com"].includes(host)) host = "instagram.com";
     if (["twitter.com", "mobile.twitter.com", "www.x.com"].includes(host)) host = "x.com";
+    if (["myfreecams.com", "mfc.im"].includes(host)) {
+      const username = decodeURIComponent(url.hash.slice(1) || url.pathname.split("/").filter(Boolean)[0] || "");
+      if (/^[a-z0-9_]+$/i.test(username)) return `myfreecams.com/${username.toLowerCase()}`;
+    }
     let pathname = url.pathname.replace(/\/+$/, "") || "/";
     const usernameHosts = ["instagram.com", "x.com", "onlyfans.com", "twitch.tv", "chaturbate.com", "stripchat.com", "cam4.com"];
     if (usernameHosts.includes(host) && /^\/[a-z0-9_.@-]+$/i.test(pathname)) {

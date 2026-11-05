@@ -135,6 +135,24 @@ describe("media catalog", () => {
     db.close();
   });
 
+  it.skipIf(!ffmpegAvailable)("creates a reusable H.264 playback copy without changing the original recording", async () => {
+    const { data, media, db } = fixture();
+    const file = path.join(media, "video.mp4");
+    const generated = spawnSync("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10:duration=2", "-c:v", "mpeg4", file], { encoding: "utf8" });
+    expect(generated.status, generated.stderr).toBe(0);
+    const original = fs.readFileSync(file);
+    const catalog = new Catalog(db, media, data, false); await catalog.scan();
+    const item = db.listMedia().items[0];
+    const [first, second] = await Promise.all([catalog.playbackFile(item, true), catalog.playbackFile(item, true)]);
+    expect(second).toEqual(first);
+    const probe = spawnSync("ffprobe", ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=codec_name,nb_read_frames,duration", "-of", "json", first.file], { encoding: "utf8" });
+    expect(JSON.parse(probe.stdout).streams[0]).toMatchObject({ codec_name: "h264", nb_read_frames: "20" });
+    expect(fs.readFileSync(file)).toEqual(original);
+    expect(await catalog.playbackFile(item)).toMatchObject({ file });
+    expect(await catalog.playbackFile(item, true)).toEqual(first);
+    db.close();
+  });
+
   it("reads a sidecar title without exposing unsupported files", async () => {
     const { data, media, db } = fixture();
     const file = path.join(media, "Example Performer", "example.com", "opaque-id.mp4");

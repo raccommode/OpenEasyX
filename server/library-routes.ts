@@ -147,7 +147,7 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
   });
 
   const sendMedia = async (request: FastifyRequest, reply: FastifyReply, id: string) => {
-    const media = requiredMedia(id); const playback = await catalog.playbackFile(media); const file = playback.file; let stat: fs.Stats;
+    const media = requiredMedia(id); const playback = await catalog.playbackFile(media, (request.query as { compatible?: string }).compatible === "1"); const file = playback.file; let stat: fs.Stats;
     try { stat = fs.statSync(file); } catch { throw Object.assign(new Error("Media file is not available"), { statusCode: 404 }); }
     if (!stat.isFile() || stat.size <= 0) { libraryDb.markMediaUnplayable(media.id); throw Object.assign(new Error("Media file is not playable"), { statusCode: 404 }); }
     const range = request.headers.range;

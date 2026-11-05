@@ -145,7 +145,7 @@ export function ytDlpDownload(item: MediaCandidate, config: Record<string, unkno
     // Retry a failed segment or playlist instead of skipping it (a skip leaves a freeze and an audio gap).
     // HLS demuxer options make non-HLS inputs fail, so only pass them for
     // providers known to return HLS rather than for every live extractor.
-    const retry = options.hls ? ffmpegHlsRetryArgs() : [];
+    const retry = options.hls ? ["-rw_timeout", "15000000", ...ffmpegHlsRetryArgs()] : [];
     if (retry.length) args.push("--downloader-args", `ffmpeg_i:${retry.join(" ")}`);
   }
   args.push(extractorUrl);
@@ -162,6 +162,6 @@ export function ffmpegHlsRetryArgs(): string[] {
   if (hlsRetryArgs) return hlsRetryArgs;
   let help = "";
   try { help = String(spawnSync("ffmpeg", ["-hide_banner", "-h", "demuxer=hls"], { encoding: "utf8", timeout: 10_000 }).stdout ?? ""); } catch { /* No FFmpeg. */ }
-  hlsRetryArgs = [...(help.includes("seg_max_retry") ? ["-seg_max_retry", "3"] : []), ...(help.includes("max_reload") ? ["-max_reload", "10"] : [])];
+  hlsRetryArgs = [...(help.includes("seg_max_retry") ? ["-seg_max_retry", "3"] : []), ...(help.includes("max_reload") ? ["-max_reload", "10"] : []), ...(help.includes("m3u8_hold_counters") ? ["-m3u8_hold_counters", "10"] : [])];
   return hlsRetryArgs;
 }

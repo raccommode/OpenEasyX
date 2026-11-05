@@ -64,7 +64,19 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     if (resumePlaying) safePlay(element);
   });
 
-  const failPlayback = (message: string) => { setPlaybackError(message); setWaiting(false); setPlaying(false); video.current?.pause(); };
+  const compatibilityPlayback = useRef(false);
+  const useCompatiblePlayback = () => {
+    const element = video.current;
+    if (!element || compatibilityPlayback.current) return false;
+    compatibilityPlayback.current = true;
+    recoveryPosition.current = Number.isFinite(element.currentTime) ? element.currentTime : 0;
+    setPlaybackError(""); setWaiting(true); setPlaying(false);
+    setNotice("Preparing a browser-compatible video. This can take a while for long recordings.");
+    const url = new URL(media.streamUrl, window.location.href); url.searchParams.set("compatible", "1");
+    element.src = url.href; element.load();
+    return true;
+  };
+  const failPlayback = (message: string, tryCompatibility = false) => { if (tryCompatibility && useCompatiblePlayback()) return; setPlaybackError(message); setWaiting(false); setPlaying(false); video.current?.pause(); };
   const resumeAudioBoost = () => {
     const value = selectedBoost.current; const output = audioBoost.current;
     void output?.setBoost(value).then((enabled) => {
@@ -79,9 +91,12 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   };
   const safePlay = (element: HTMLVideoElement) => {
     resumeAudioBoost();
+    const requestedSource = element.src;
     void element.play().catch((reason: unknown) => {
+      // A decode error may already have switched to the compatibility copy.
+      if (element.src !== requestedSource) return;
       if (reason instanceof DOMException && (reason.name === "AbortError" || reason.name === "NotAllowedError")) { setWaiting(false); return; }
-      failPlayback("This video could not be played. Try again or check the file format.");
+      failPlayback("This video could not be played. Try again or check the file format.", reason instanceof DOMException && reason.name === "NotSupportedError");
     });
   };
   const reloadPlayback = () => {
@@ -188,7 +203,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   }, [media.kind]);
   useEffect(() => {
     lastSaved.current = 0; autoHide.current?.cancel();
-    recoveryPosition.current = undefined; setPlaybackError("");
+    recoveryPosition.current = undefined; compatibilityPlayback.current = false; setPlaybackError("");
     if (media.kind === "video" && video.current) {
       video.current.src = media.streamUrl; video.current.load();
     }
@@ -220,7 +235,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     if (media.kind !== "video" || !element) return;
     return monitorVideoStalls(element, {
       reload: reloadPlayback,
-      failed: () => failPlayback("The video image is still frozen. Try reloading the video."),
+      failed: () => failPlayback("The video image is still frozen. Try reloading the video.", true),
     });
   }, [media.id, media.kind, retry]);
   useEffect(() => {
@@ -267,7 +282,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
         onPointerMove={(event) => recognizer.current?.move(gesturePoint(event))} onPointerUp={(event) => recognizer.current?.up(gesturePoint(event))} onPointerCancel={(event) => recognizer.current?.cancel(gesturePoint(event))}
         onContextMenu={(event) => { if (speedHold) event.preventDefault(); }}><video ref={video} style={zoom.scale > 1 ? { transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: "0 0" } : undefined} src={media.streamUrl} poster={media.thumbnailUrl} playsInline preload="metadata" autoPlay={autoStart}
         onLoadedMetadata={(event) => { const element = event.currentTarget; const resumeAt = recoveryPosition.current; recoveryPosition.current = undefined; setDuration(element.duration || media.duration || 0); element.volume = initialAudio.current.volume; element.muted = initialAudio.current.muted; element.currentTime = resumeAt !== undefined ? Math.min(resumeAt, Number.isFinite(element.duration) ? Math.max(0, element.duration - 0.1) : resumeAt) : !media.completed && media.progressSeconds > 0 && media.progressSeconds < element.duration - 5 ? media.progressSeconds : 0; if ((resumeAt !== undefined || autoStart) && element.paused) safePlay(element); }}
-        onError={(event) => { const code = event.currentTarget.error?.code; failPlayback(code === 3 || code === 4 ? "This video could not be decoded. Its format may not be supported by this browser." : "The video could not be loaded. Check the connection and try again."); }}
+        onError={(event) => { const code = event.currentTarget.error?.code; failPlayback(code === 3 || code === 4 ? "This video could not be decoded. Its format may not be supported by this browser." : "The video could not be loaded. Check the connection and try again.", code === 3 || code === 4); }}
         onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); void save(); }} onProgress={(event) => { const element = event.currentTarget; if (element.buffered.length) setBuffered(element.buffered.end(element.buffered.length - 1)); }}
         onPlay={() => { resumeAudioBoost(); setPlaying(true); reveal(); }} onPlaying={() => { setPlaying(true); setWaiting(false); setPlaybackError(""); }} onPause={() => { setPlaying(false); setWaiting(false); void save(false, true); }} onWaiting={() => setWaiting(true)} onCanPlay={() => setWaiting(false)}
         onVolumeChange={(event) => { setVolume(event.currentTarget.volume); setMuted(event.currentTarget.muted); initialAudio.current = { volume: event.currentTarget.volume, muted: event.currentTarget.muted }; savePlayerAudio(initialAudio.current); }} onEnded={() => void next()}>

@@ -231,6 +231,7 @@ export class Catalog {
       path.join(this.dataDir, "thumbnails", kind === "video" ? `${mediaId}-middle-v1.jpg` : `${mediaId}-image-v1.jpg`),
       path.join(this.dataDir, "video-previews", `${mediaId}.gif`),
       path.join(this.dataDir, "playback-cache", `${mediaId}.mp4`),
+      path.join(this.dataDir, "playback-cache", `${mediaId}-h264-v1.mp4`),
     ];
     for (const file of cached) fs.rmSync(file, { force: true });
     fs.rmSync(path.join(this.dataDir, "subtitles", mediaId), { recursive: true, force: true });
@@ -282,27 +283,30 @@ export class Catalog {
     return operation;
   }
 
-  playbackFile(media: Media): Promise<{ file: string; mimeType: string }> {
+  playbackFile(media: Media, compatible = false): Promise<{ file: string; mimeType: string }> {
     const source = this.absolutePath(media);
-    if (media.kind !== "video" || media.extension !== ".mp4") return Promise.resolve({ file: source, mimeType: media.mimeType });
+    if (media.kind !== "video" || (!compatible && media.extension !== ".mp4")) return Promise.resolve({ file: source, mimeType: media.mimeType });
     let header: Buffer;
     try { const descriptor = fs.openSync(source, "r"); try { header = Buffer.alloc(12); fs.readSync(descriptor, header, 0, header.length, 0); } finally { fs.closeSync(descriptor); } }
     catch { return Promise.reject(new Error("Media file is not available")); }
-    if (header.subarray(4, 8).toString("ascii") === "ftyp") return Promise.resolve({ file: source, mimeType: media.mimeType });
-    const destination = path.join(this.dataDir, "playback-cache", `${media.id}.mp4`);
+    if (!compatible && header.subarray(4, 8).toString("ascii") === "ftyp") return Promise.resolve({ file: source, mimeType: media.mimeType });
+    const cacheKey = compatible ? `${media.id}-h264-v1` : media.id;
+    const destination = path.join(this.dataDir, "playback-cache", `${cacheKey}.mp4`);
     try {
       if (fs.statSync(destination).mtimeMs >= fs.statSync(source).mtimeMs) return Promise.resolve({ file: destination, mimeType: "video/mp4" });
     } catch { /* A missing or stale compatibility remux is regenerated below. */ }
-    const active = this.playbackFiles.get(media.id);
+    const active = this.playbackFiles.get(cacheKey);
     const operation = active ?? this.enqueueFfmpeg(async () => {
       const temporary = `${destination}.tmp.mp4`;
       try {
-        await runFfmpeg(["-i", source, "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", "-y", temporary], 120_000);
+        await runFfmpeg(["-i", source, "-map", "0:v:0?", "-map", "0:a:0?",
+          ...(compatible ? ["-c:v", "libx264", "-preset", "fast", "-crf", "20", "-threads", "2", "-pix_fmt", "yuv420p", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:a", "aac", "-b:a", "192k"] : ["-c", "copy"]),
+          "-movflags", "+faststart", "-y", temporary], compatible ? 2 * 60 * 60_000 : 120_000);
         if (!fs.existsSync(temporary) || fs.statSync(temporary).size <= 0) throw new Error("FFmpeg produced an empty playback file");
         fs.renameSync(temporary, destination); return destination;
       } finally { try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch {} }
-    }).finally(() => this.playbackFiles.delete(media.id));
-    if (!active) this.playbackFiles.set(media.id, operation);
+    }).finally(() => this.playbackFiles.delete(cacheKey));
+    if (!active) this.playbackFiles.set(cacheKey, operation);
     return operation.then((file) => ({ file, mimeType: "video/mp4" }));
   }
 

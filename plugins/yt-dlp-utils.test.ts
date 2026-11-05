@@ -29,7 +29,7 @@ describe("live recording output", () => {
   it("asks FFmpeg to retry failed live segments when it supports that", () => {
     const request = ytDlpDownload({ externalId: "live:alice", mediaType: "video", pageUrl: "https://live.test/alice" }, {}, { live: true, hls: true });
     const retry = ffmpegHlsRetryArgs();
-    if (retry.length) expect(request.args[request.args.indexOf("--downloader-args") + 1]).toBe(`ffmpeg_i:${retry.join(" ")}`);
+    if (retry.length) expect(request.args[request.args.indexOf("--downloader-args") + 1]).toBe(`ffmpeg_i:-rw_timeout 15000000 ${retry.join(" ")}`);
     else expect(request.args).not.toContain("--downloader-args");
   });
 

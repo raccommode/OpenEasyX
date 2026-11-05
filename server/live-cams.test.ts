@@ -24,6 +24,29 @@ async function fixture() {
 }
 
 describe("Open EasyX live cams", () => {
+  it("keeps I/O responsive during a large favorite import and preserves a concurrent unfollow", async () => {
+    const { database, plugins, service } = await fixture(); plugins.install("test.live");
+    const cams = Array.from({ length: 300 }, (_, i) => ({ id: `bulk${i}`, username: `bulk${i}`, pageUrl: `https://live.test/bulk${i}`, online: true }));
+    plugins.get("test.live").listFollowedLiveCams = async () => ({ authoritative: true, cams });
+    let ticks = 0;
+    const heartbeat = setInterval(() => { ticks++; }, 1);
+    try {
+      await service.syncFavorites("test.live");
+      expect(database.listLiveCamFavorites()).toHaveLength(300);
+      expect(ticks).toBeGreaterThan(0);
+      service.resetProviderSession("test.live");
+      const original = database.setLiveCamFavorite.bind(database);
+      let changed = false;
+      vi.spyOn(database, "setLiveCamFavorite").mockImplementation((provider, cam, favorite) => {
+        const result = original(provider, cam, favorite);
+        if (!changed) { changed = true; setImmediate(() => { void service.setFavorite("test.live", cams[299], false); }); }
+        return result;
+      });
+      await expect(service.syncFavorites("test.live")).rejects.toThrow("Favorites changed");
+      expect(database.isLiveCamFavorite("test.live", "bulk299")).toBe(false);
+    } finally { clearInterval(heartbeat); database.close(); }
+  });
+
   it("uses the reconnected account immediately instead of its cached login failure", async () => {
     const { plugins, service } = await fixture(); plugins.install("test.live");
     const followed = vi.fn().mockResolvedValueOnce({ authoritative: false, cams: [], skippedReason: "Session expired" })
