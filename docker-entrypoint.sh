@@ -18,6 +18,13 @@ if [ "$(id -u)" = "0" ]; then
   chown -R "$puid:$pgid" "$data_dir"
   chown "$puid:$pgid" "$media_dir"
 
+  # setpriv keeps root's HOME (/root), which the runtime user cannot write: Chromium's crash
+  # reporter then aborts at startup ("chrome_crashpad_handler: --database is required") and
+  # tools lose their caches. Give the runtime user a home of its own.
+  runtime_home="/tmp/easyx-home"
+  install -d -m 0700 -o "$puid" -g "$pgid" "$runtime_home"
+  export HOME="$runtime_home"
+
   umask 002
   exec setpriv --reuid="$puid" --regid="$pgid" --clear-groups /usr/bin/tini -- "$@"
 fi
