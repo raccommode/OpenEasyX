@@ -34,7 +34,7 @@ export class SubtitleService {
   private settingsFor(plugin: EasyXPlugin | undefined) {
     const saved = this.db.subtitleSettings(Boolean(plugin));
     const supported = plugin?.manifest.subtitleLanguages;
-    return { enabled: Boolean(plugin) && saved.enabled, languages: supported ? saved.languages.filter((code) => supported.some((item) => item.code === code)) : saved.languages };
+    return { ...saved, enabled: Boolean(plugin) && saved.enabled, languages: supported ? saved.languages.filter((code) => supported.some((item) => item.code === code)) : saved.languages };
   }
 
   librarySettings() {

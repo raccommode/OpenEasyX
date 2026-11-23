@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { LibraryDatabase, type Media, type MediaKind } from "./library-database.js";
 import { firstMediaDate } from "../packages/media-date.js";
+import type { DubbingReferenceVideo } from "../packages/plugin-sdk/index.js";
 
 const VIDEO_EXTENSIONS = new Set([".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".wmv", ".ts", ".mts", ".m2ts"]);
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp"]);
@@ -165,7 +166,7 @@ export class Catalog {
       size: stat.size, modifiedAt: stat.mtime.toISOString(),
       addedAt: firstMediaDate(stat.birthtime.toISOString(), metadata.downloadedAt) ?? fallbackDate, mediaDate,
       duration: 0, width: 0, height: 0, metadata, scanId: this.activeScan?.id ?? crypto.randomUUID(),
-    });
+    }, this.resolvePerformerName);
     this.activeScan?.seen.add(id);
     if (changed && this.eagerThumbnails) {
       const media = this.db.getMedia(id);
@@ -219,11 +220,43 @@ export class Catalog {
     return this.scanPromise;
   }
 
-  absolutePath(media: Media) {
+  absolutePath(media: Pick<Media, "relativePath">) {
     const root = path.resolve(this.mediaRoot);
     const candidate = path.resolve(root, media.relativePath);
     if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) throw new Error("Media path escapes the configured library root");
     return candidate;
+  }
+
+  async dubbingReferenceVideos(media: Media, signal: AbortSignal): Promise<DubbingReferenceVideo[]> {
+    const candidates = this.db.dubbingReferenceCandidates(media.id);
+    if (!candidates.length) return [];
+    const currentPath = await fs.promises.realpath(this.absolutePath(media));
+    const [root, current] = await Promise.all([fs.promises.realpath(this.mediaRoot), fs.promises.stat(currentPath)]);
+    const files = new Set<string>([currentPath]);
+    if (current.ino) files.add(`${current.dev}:${current.ino}`);
+    const references: DubbingReferenceVideo[] = [];
+    for (let i = 0; i < candidates.length && references.length < 32; i += 8) {
+      signal.throwIfAborted();
+      const batch = await Promise.all(candidates.slice(i, i + 8).map(async (item) => {
+        try {
+          const source = await fs.promises.realpath(this.absolutePath(item));
+          const relative = path.relative(root, source);
+          if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) return;
+          const stat = await fs.promises.stat(source);
+          if (!stat.isFile() || stat.size !== item.size || stat.mtime.toISOString() !== item.modifiedAt) return;
+          await fs.promises.access(source, fs.constants.R_OK);
+          const fileKey = stat.ino ? `${stat.dev}:${stat.ino}` : source;
+          return { fileKey, video: { mediaId: item.id, fingerprint: `${item.size}:${item.modifiedAt}`, source } };
+        } catch { /* A reference can disappear or become unreadable between scans. */ }
+      }));
+      for (const item of batch) {
+        if (!item || files.has(item.fileKey)) continue;
+        files.add(item.fileKey);
+        references.push(item.video);
+        if (references.length === 32) break;
+      }
+    }
+    return references;
   }
 
   private removeGeneratedArtifacts(mediaId: string, kind: MediaKind) {

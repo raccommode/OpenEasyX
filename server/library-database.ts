@@ -42,7 +42,7 @@ export type LibraryQuery = {
   pageSize?: number;
 };
 
-export type SubtitleSettings = { enabled: boolean; languages: string[] };
+export type SubtitleSettings = { enabled: boolean; languages: string[]; oldestFirst?: boolean };
 export type DownloaderSettings = { host: string; port: number };
 export const DEFAULT_DOWNLOADER_SETTINGS: DownloaderSettings = { host: "localhost", port: 3210 };
 export type PerformerSummary = { name: string; count: number; videos: number; images: number; coverId: string };
@@ -60,6 +60,26 @@ type IndexedMedia = Omit<Media, "favorite" | "progressSeconds" | "completed" | "
   metadata: Record<string, unknown>;
   scanId: string;
 };
+
+type ReferenceRow = Pick<Media, "id" | "relativePath" | "modifiedAt" | "size">;
+
+function performerKey(name: string) {
+  return name.trim().normalize("NFC").toLowerCase();
+}
+
+function performerCredits(performer: string, metadata: Record<string, unknown>, resolve: (name: string) => string) {
+  const names: string[] = [];
+  for (const field of [metadata.cast, metadata.performers, metadata.performer]) {
+    if (!Array.isArray(field)) continue;
+    for (const member of field) {
+      const name = typeof member === "string" ? member : member?.name;
+      if (typeof name === "string" && name.trim()) names.push(name.trim());
+    }
+  }
+  // An explicit cast takes precedence over an inferred folder name.
+  if (!names.length || typeof metadata.performer === "string" && metadata.performer.trim()) names.push(performer);
+  return [...new Set(names.map((name) => performerKey(resolve(name))))].filter((name) => name && name !== "unsorted" && name !== "unknown").sort();
+}
 
 export class LibraryDatabase {
   readonly sqlite: DatabaseSync;
@@ -208,6 +228,27 @@ export class LibraryDatabase {
     if (!playbackColumns.has("last_counted_at")) this.sqlite.exec("ALTER TABLE playback ADD COLUMN last_counted_at TEXT");
     if (needsCompletionBackfill) this.sqlite.exec("UPDATE playback SET completed=1 WHERE progress_seconds=0 AND view_count>0");
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS playback_history_idx ON playback(last_viewed_at DESC)");
+    if (!this.sqlite.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='video_cast'").get()) {
+      this.sqlite.exec("SAVEPOINT index_existing_cast");
+      try {
+        this.sqlite.exec(`CREATE TABLE video_cast (
+          media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE, performer_key TEXT NOT NULL,
+          PRIMARY KEY(media_id,performer_key)
+        ) WITHOUT ROWID;
+        CREATE INDEX video_cast_performer_idx ON video_cast(performer_key,media_id)`);
+        const rows = this.sqlite.prepare(`SELECT id,performer,CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END AS metadata
+          FROM media WHERE kind='video'`).iterate();
+        const insert = this.sqlite.prepare("INSERT INTO video_cast(media_id,performer_key) VALUES(?,?)");
+        for (const row of rows) {
+          const names = performerCredits(String(row.performer), JSON.parse(String(row.metadata)) ?? {}, (name) => name);
+          for (const name of names) insert.run(row.id, name);
+        }
+        this.sqlite.exec("RELEASE index_existing_cast");
+      } catch (error) {
+        this.sqlite.exec("ROLLBACK TO index_existing_cast; RELEASE index_existing_cast");
+        throw error;
+      }
+    }
   }
 
   close() {
@@ -216,10 +257,46 @@ export class LibraryDatabase {
   }
 
   mergePerformerNames(previousName: string, nextName: string) {
-    this.sqlite.prepare("UPDATE media SET performer=? WHERE performer=? COLLATE NOCASE").run(nextName, previousName);
+    this.sqlite.exec("SAVEPOINT merge_library_cast");
+    try {
+      this.sqlite.prepare("UPDATE media SET performer=? WHERE performer=? COLLATE NOCASE").run(nextName, previousName);
+      const oldKey = performerKey(previousName);
+      const newKey = performerKey(nextName);
+      if (oldKey !== newKey) {
+        this.sqlite.prepare("INSERT OR IGNORE INTO video_cast SELECT media_id,? FROM video_cast WHERE performer_key=?").run(newKey, oldKey);
+        this.sqlite.prepare("DELETE FROM video_cast WHERE performer_key=?").run(oldKey);
+      }
+      this.sqlite.exec("RELEASE merge_library_cast");
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK TO merge_library_cast; RELEASE merge_library_cast");
+      throw error;
+    }
   }
 
-  upsertMedia(item: IndexedMedia) {
+  upsertMedia(item: IndexedMedia, resolve: (name: string) => string = (name) => name) {
+    this.sqlite.exec("SAVEPOINT index_library_media");
+    try {
+      const changed = this.writeMedia(item);
+      // An old sidecar can still name a merged performer after the media itself stopped changing.
+      const hasCast = [item.metadata.cast, item.metadata.performers, item.metadata.performer].some(Array.isArray);
+      if (changed || hasCast) {
+        const names = item.kind === "video" ? performerCredits(item.performer, item.metadata, resolve) : [];
+        const existing = this.sqlite.prepare("SELECT performer_key FROM video_cast WHERE media_id=? ORDER BY performer_key").all(item.id);
+        if (existing.length !== names.length || existing.some((row, i) => row.performer_key !== names[i])) {
+          this.sqlite.prepare("DELETE FROM video_cast WHERE media_id=?").run(item.id);
+          const insert = this.sqlite.prepare("INSERT INTO video_cast(media_id,performer_key) VALUES(?,?)");
+          for (const name of names) insert.run(item.id, name);
+        }
+      }
+      this.sqlite.exec("RELEASE index_library_media");
+      return changed;
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK TO index_library_media; RELEASE index_library_media");
+      throw error;
+    }
+  }
+
+  private writeMedia(item: IndexedMedia) {
     const result = this.sqlite.prepare(`
       INSERT INTO media(
         id,relative_path,kind,title,performer,source,extension,mime_type,size,modified_at,
@@ -295,6 +372,25 @@ export class LibraryDatabase {
       COALESCE(p.completed,0) completed,COALESCE(p.view_count,0) view_count,p.last_viewed_at
       FROM media m LEFT JOIN playback p ON p.media_id=m.id WHERE m.id=? AND m.missing=0 AND m.playable=1`).get(id) as Record<string, unknown> | undefined;
     return row ? this.mapMedia(row) : undefined;
+  }
+
+  dubbingReferenceCandidates(id: string): ReferenceRow[] {
+    const credits = this.sqlite.prepare("SELECT performer_key FROM video_cast WHERE media_id=? ORDER BY performer_key LIMIT 32").all(id);
+    const videos = this.sqlite.prepare(`SELECT m.id,m.relative_path AS relativePath,m.size,m.modified_at AS modifiedAt
+      FROM video_cast c JOIN media m ON m.id=c.media_id WHERE c.performer_key=? AND c.media_id<>?
+      AND m.kind='video' AND m.missing=0 AND m.playable=1 AND m.size>0 ORDER BY c.media_id LIMIT 128`);
+    const byPerformer = credits.map((row) => videos.all(row.performer_key, id) as ReferenceRow[]);
+    // Interleave credits so a prolific co-star cannot use every reference slot.
+    const candidates = new Map<string, ReferenceRow>();
+    const length = Math.max(0, ...byPerformer.map((group) => group.length));
+    for (let i = 0; i < length && candidates.size < 128; i++) {
+      for (const group of byPerformer) {
+        const item = group[i];
+        if (item) candidates.set(item.id, item);
+        if (candidates.size === 128) break;
+      }
+    }
+    return [...candidates.values()];
   }
 
   listMedia(query: LibraryQuery = {}) {
@@ -447,14 +543,15 @@ export class LibraryDatabase {
 
   subtitleSettings(defaultEnabled = false): SubtitleSettings {
     const row = this.sqlite.prepare("SELECT value_json FROM settings WHERE key='subtitles'").get() as { value_json: string } | undefined;
-    if (!row) return { enabled: defaultEnabled, languages: [] };
+    if (!row) return { enabled: defaultEnabled, languages: [], oldestFirst: true };
     try {
       const value = JSON.parse(row.value_json) as Partial<SubtitleSettings>;
       return {
         enabled: value.enabled === true,
+        oldestFirst: value.oldestFirst !== false,
         languages: Array.isArray(value.languages) ? [...new Set(value.languages.filter(isSubtitleLanguageCode))] : [],
       };
-    } catch { return { enabled: false, languages: [] }; }
+    } catch { return { enabled: false, languages: [], oldestFirst: true }; }
   }
 
   storedDownloaderSettings(): DownloaderSettings | undefined {
@@ -482,6 +579,7 @@ export class LibraryDatabase {
 
   setSubtitleSettings(value: SubtitleSettings) {
     const normalized: SubtitleSettings = {
+      oldestFirst: value.oldestFirst ?? this.subtitleSettings().oldestFirst,
       enabled: value.enabled === true,
       languages: [...new Set(value.languages.filter(isSubtitleLanguageCode))],
     };

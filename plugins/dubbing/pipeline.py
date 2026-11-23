@@ -45,12 +45,15 @@ def run(job):
         return "silent"
     if all(c["language"] == target for c in cues):
         return "original"
+    from speaker_library import prepare_references
+    references, reference_key = prepare_references(job, data, work, cues)
+    release_models()
     progress("Translating dialogue", 30)
     texts = translate(cues, target, work/f"translation-{target}.json")
     release_models()
-    wav_dir = work / f"voice-{target}"
+    wav_dir = work / (f"voice-{target}-{reference_key}" if reference_key else f"voice-{target}")
     wav_dir.mkdir(exist_ok=True)
-    speak(cues, texts, target, work, wav_dir)
+    speak(cues, texts, target, work, wav_dir, references)
     release_models()
     mixed = wav_dir / "soundtrack.wav"
     progress("Mixing voices with original music and effects", 69)
@@ -66,4 +69,6 @@ def run(job):
 
 if __name__ == "__main__":
     parent_watch()
-    publish(outcome=run(json.loads(sys.argv[1])))
+    arg = sys.argv[1]
+    job = json.loads(arg if arg.startswith("{") else Path(arg).read_text())
+    publish(outcome=run(job))

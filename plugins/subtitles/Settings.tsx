@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Check, Cpu, Languages, LoaderCircle, Save, Trash2, X } from "lucide-react";
+import { ProcessingOrderField } from "../../src/ProcessingOrderField";
 import { api } from "../../src/api";
 
-type Settings = { enabled: boolean; languages: string[] };
+type Settings = { enabled: boolean; languages: string[]; oldestFirst: boolean };
 type CurrentJob = {
   title: string;
   progress: number;
@@ -101,6 +102,9 @@ export default function SubtitlePluginSettings({ name, close, uninstall }: { nam
               const selected = settings.languages.includes(code);
               return <button key={code} className={selected ? "selected" : ""} aria-pressed={selected} disabled={busy} onClick={() => setDraft({ ...settings, languages: selected ? settings.languages.filter((item) => item !== code) : [...settings.languages, code] })}><span>{label}{code === settings.languages[0] && <small>Player default</small>}</span>{selected && <Check aria-hidden="true"/>}</button>;
             })}</div>
+          </section>
+          <section className="settings-card">
+            <ProcessingOrderField oldestFirst={settings.oldestFirst} onChange={(oldestFirst) => setDraft({ ...settings, oldestFirst })} disabled={busy}/>
           </section>
           <section className="settings-card">
             <div className="settings-section-head"><div><Cpu/><span><h3>Local processing</h3><p role="status" className={job ? "subtitle-current-title" : ""}>{job ? job.title : workerStatus(overview)}</p></span></div></div>

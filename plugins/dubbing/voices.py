@@ -67,26 +67,27 @@ def delivery_durations(cues, media_duration):
     return durations
 
 
-def speak(cues, texts, language, work, wav_dir):
+def speak(cues, texts, language, work, wav_dir, references=None):
     pending = [i for i, cue in enumerate(cues) if cue["language"] != language and not (wav_dir/f"{i}.wav").is_file()]
     if not pending:
         return
     accelerator = device()
     if accelerator != "mps":
-        synthesize(cues, texts, language, work, wav_dir, pending, accelerator)
+        synthesize(cues, texts, language, work, wav_dir, pending, accelerator, references)
         return
     # Metal retains compiled decoder graphs for varying utterance lengths. A
     # fresh process releases those allocations on Macs with shared GPU memory.
     for start in range(0, len(pending), 6):
         batch = pending[start:start+6]
         result = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(work), str(wav_dir),
-                                 language, *map(str, batch)], stdin=subprocess.DEVNULL)
+                                 language, *map(str, batch)], stdin=subprocess.DEVNULL,
+                                env={**os.environ, "EASYX_DUBBING_VOICE_REFS": str(references or work)})
         if result.returncode:
             # The child already wrote the model's diagnostic to the shared stderr.
             raise SystemExit(f"Voice synthesis stopped with status {result.returncode}")
 
 
-def synthesize(cues, texts, language, work, wav_dir, indices, accelerator):
+def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, references=None):
     from omnivoice import OmniVoice
     progress("Loading local voice model", 38 + 30*indices[0]/len(cues))
     dtype = torch.float32
@@ -99,8 +100,9 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator):
         cue, text = cues[idx], texts[idx]
         speaker = cue["speaker"]
         if speaker not in prompts:
-            ref_audio, sr = sf.read(work/f"speaker-{speaker}.wav", dtype="float32")
-            ref_text = (work/f"speaker-{speaker}.txt").read_text().strip()
+            folder = references if references and (references/f"speaker-{speaker}.wav").is_file() else work
+            ref_audio, sr = sf.read(folder/f"speaker-{speaker}.wav", dtype="float32")
+            ref_text = (folder/f"speaker-{speaker}.txt").read_text().strip()
             prompts[speaker] = model.create_voice_clone_prompt(
                 (torch.from_numpy(ref_audio)[None, :], sr), ref_text, preprocess_prompt=False)
         prompt = prompts[speaker]
@@ -433,4 +435,5 @@ if __name__ == "__main__":
     language = sys.argv[3]
     synthesize(json.loads((work/"speakers.json").read_text()),
                json.loads((work/f"translation-{language}.json").read_text()),
-               language, work, wav_dir, list(map(int, sys.argv[4:])), device())
+               language, work, wav_dir, list(map(int, sys.argv[4:])), device(),
+               Path(os.environ.get("EASYX_DUBBING_VOICE_REFS", work)))

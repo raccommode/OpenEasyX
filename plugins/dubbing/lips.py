@@ -18,6 +18,7 @@ from scipy.signal import get_window, lfilter, resample_poly
 from scipy.spatial import Delaunay, QhullError
 
 from picture import output_picture
+from mouth_geometry import fit_speaker_mouth
 from mouth_texture import MouthTextures
 from runtime import ffmpeg, model_path, progress
 
@@ -568,6 +569,8 @@ class LipModel:
                 to_image = inverse @ np.vstack((reg, [0., 0., 1.]))
                 dest = cv2.transform(ref[3][None, 48:], to_image)[0]
                 paste = to_image @ np.vstack((ref[5], [0., 0., 1.]))
+                original = cv2.transform(source[None, 48:], inverse)[0]
+                dest, paste = fit_speaker_mouth(original, dest, paste, resting=True)
                 return key, dest, ref[4], paste
         return None
 
@@ -619,6 +622,7 @@ class LipModel:
         paste = native @ np.vstack((registration, [0., 0., 1.]))
         original = cv2.transform(source[None, 48:], native)[0]
         destination = cv2.transform(target[None, 48:], paste)[0]
+        destination, paste = fit_speaker_mouth(original, destination, paste)
         if amount < 1:
             ref = self.registered_reference(source, native, identity, t)
             rest = ref[1] if ref is not None else sealed_contour(original)
@@ -829,5 +833,6 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
         ffmpeg("-itsoffset", max(0, video_origin-audio_origin), "-i", silent,
                "-itsoffset", max(0, audio_origin-video_origin), "-i", mixed_audio,
                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+               "-disposition:a:0", "default+dub", "-metadata:s:a:0", "handler_name=Open EasyX Dubbed Audio",
                *metadata, "-movie_timescale", "90000", "-movflags", "+faststart", output)
     return changed

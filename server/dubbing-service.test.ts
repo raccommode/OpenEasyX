@@ -45,8 +45,12 @@ it("publishes only finished versions, supports resuming a failed language and se
     dub.sync();
     expect(dub.status(media)).toEqual({ installed: false, variants: [] });
     installed = true;
+    const scan = catalog.scan();
     dub.sync();
-    expect(dub.overview().current).toMatchObject({ progress: 55, language: "fr" });
+    expect(dub.overview().current).toBeNull();
+    await scan;
+    dub.sync();
+    await vi.waitFor(() => expect(dub.overview().current).toMatchObject({ progress: 55, language: "fr" }));
     expect((await app.inject(url+"/stream?dub=fr")).statusCode).toBe(404);
     gates.get("fr")!();
     await vi.waitFor(() => expect(dub.overview().current).toMatchObject({ language: "es" }));

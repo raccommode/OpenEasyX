@@ -366,8 +366,8 @@ describe("media catalog", () => {
     const items = db.listMedia({ sort: "title" }).items;
     const video = items.find((item) => item.kind === "video")!;
 
-    expect(db.subtitleSettings()).toEqual({ enabled: false, languages: [] });
-    expect(db.setSubtitleSettings({ enabled: true, languages: ["fr", "en", "fr"] })).toEqual({ enabled: true, languages: ["fr", "en"] });
+    expect(db.subtitleSettings()).toEqual({ enabled: false, languages: [], oldestFirst: true });
+    expect(db.setSubtitleSettings({ enabled: true, languages: ["fr", "en", "fr"] })).toEqual({ enabled: true, languages: ["fr", "en"], oldestFirst: true });
     expect(db.subtitleSettings().languages).toEqual(["fr", "en"]);
     expect(db.storedDownloaderSettings()).toBeUndefined();
     expect(db.downloaderSettings()).toEqual({ host: "localhost", port: 3210 });

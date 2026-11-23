@@ -205,10 +205,13 @@ export class Database {
       JOIN performers p ON p.id=i.performer_id JOIN sources s ON s.id=i.source_id
       WHERE replace(i.storage_path,'\\','/')=? AND i.status='completed' LIMIT 1`).get(normalized) as any;
     if (!row) return {};
-    const live = asJson<Record<string, unknown>>(row.metadata_json, {}).live === true;
+    const metadata = asJson<Record<string, unknown>>(row.metadata_json, {});
+    const live = metadata.live === true;
     const recordedAt = live ? firstMediaDate(row.download_started_at, row.created_at) : undefined;
     const publishedAt = live ? recordedAt : validMediaDate(row.published_at);
     return { performer: row.performer, source: row.source, ...(row.title ? { title: row.title } : {}),
+      ...(Array.isArray(metadata.cast) && metadata.cast.length ? { cast: metadata.cast } : {}),
+      ...(Array.isArray(metadata.performers) && metadata.performers.length ? { performers: metadata.performers } : {}),
       live, ...(recordedAt ? { recordedAt } : {}), ...(publishedAt ? { publishedAt } : {}),
       downloadedAt: firstMediaDate(row.download_started_at, row.created_at) };
   }

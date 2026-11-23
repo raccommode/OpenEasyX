@@ -15,6 +15,26 @@ def whisper_chunk(language, confidence, text, *, forced=False):
     return iter(segments), info
 
 
+class QueueOrderTests(unittest.TestCase):
+    def test_next_job_reads_saved_order_and_ignores_work_in_progress(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(worker, "DB_PATH", Path(tmp)/"library.sqlite"):
+            with worker.connect() as con:
+                con.executescript("""
+                    CREATE TABLE settings(key PRIMARY KEY,value_json);
+                    CREATE TABLE media(id,kind,missing,added_at,modified_at);
+                    CREATE TABLE subtitle_jobs(media_id,fingerprint,requested_languages_json,source_language,attempts,status);
+                    INSERT INTO media VALUES ('old','video',0,'2024','2026'),('new','video',0,'2025','2023'),('busy','video',0,'2026','2022');
+                    INSERT INTO subtitle_jobs VALUES ('old','','[]','',0,'queued'),('new','','[]','',0,'queued'),('busy','','[]','',0,'running');
+                """)
+            self.assertEqual(worker.next_job()["id"], "old")
+            with worker.connect() as con:
+                con.execute("""INSERT INTO settings VALUES ('subtitles','{"oldestFirst":false}')""")
+            self.assertEqual(worker.next_job()["id"], "new")
+            with worker.connect() as con:
+                con.execute("""UPDATE settings SET value_json='{"oldestFirst":true}'""")
+            self.assertEqual(worker.next_job()["id"], "old")
+
+
 class DetectionTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

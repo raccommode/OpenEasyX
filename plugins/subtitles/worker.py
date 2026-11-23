@@ -150,11 +150,17 @@ def discover(targets: list[str]) -> None:
 
 def next_job() -> sqlite3.Row | None:
     with connect() as con:
+        row = con.execute("SELECT value_json FROM settings WHERE key='subtitles'").fetchone()
+        try:
+            settings = json.loads(row[0]) if row else {}
+        except (ValueError, TypeError):
+            settings = {}
+        direction = "DESC" if isinstance(settings, dict) and settings.get("oldestFirst") is False else "ASC"
         return con.execute(
-            """SELECT m.*,j.fingerprint,j.requested_languages_json,j.source_language,j.attempts
+            f"""SELECT m.*,j.fingerprint,j.requested_languages_json,j.source_language,j.attempts
             FROM subtitle_jobs j JOIN media m ON m.id=j.media_id
             WHERE m.kind='video' AND m.missing=0 AND (j.status='queued' OR (j.status='error' AND j.attempts<3))
-            ORDER BY m.modified_at ASC LIMIT 1"""
+            ORDER BY m.added_at {direction},m.id LIMIT 1"""
         ).fetchone()
 
 

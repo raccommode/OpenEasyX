@@ -51,7 +51,7 @@ export class DubbingService {
     const errors = this.db.sqlite.prepare(`SELECT m.title,m.id,d.language,d.error FROM video_dubs d JOIN media m ON m.id=d.media_id
       WHERE d.status='error' AND m.missing=0 AND d.provider=? AND d.fingerprint=(m.size||':'||m.modified_at)
       ORDER BY m.modified_at DESC LIMIT 20`).all(plugin?.manifest.id ?? "");
-    return { languages: plugin?.manifest.dubbingLanguages ?? [], selected: this.targets(plugin).map(({ code }) => code), current: current ?? null, errors };
+    return { oldestFirst: !!plugin && this.plugins.context(plugin.manifest.id).config.oldestFirst === true, languages: plugin?.manifest.dubbingLanguages ?? [], selected: this.targets(plugin).map(({ code }) => code), current: current ?? null, errors };
   }
 
   file(media: Media, language: string) {
@@ -82,12 +82,14 @@ export class DubbingService {
       if (this.active.plugin !== plugin || !targets.includes(job.language) || !media || fingerprint(media) !== job.fingerprint) controller.abort();
       return;
     }
-    if (!plugin?.renderDub || !targets.length) return;
+    // A scan may still be indexing other videos credited to this performer.
+    if (!plugin?.renderDub || !targets.length || this.catalog.status.running) return;
+    const direction = this.plugins.context(plugin.manifest.id).config.oldestFirst === true ? "ASC" : "DESC";
     const values = targets.map(() => "(?)").join(",");
     const row = this.db.sqlite.prepare(`WITH targets(code) AS (VALUES ${values}) SELECT m.id,t.code FROM media m CROSS JOIN targets t
       LEFT JOIN video_dubs d ON d.media_id=m.id AND d.language=t.code AND d.fingerprint=(m.size||':'||m.modified_at) AND d.provider=?
       WHERE m.missing=0 AND m.playable=1 AND m.kind='video' AND (d.status IS NULL OR d.status IN ('running','queued'))
-      ORDER BY m.added_at DESC,m.id LIMIT 1`).get(...targets, plugin.manifest.id) as { id: string; code: string } | undefined;
+      ORDER BY m.added_at ${direction},m.id LIMIT 1`).get(...targets, plugin.manifest.id) as { id: string; code: string } | undefined;
     if (!row) return;
     const media = this.db.getMedia(row.id)!;
     const job: Job = { media_id: media.id, fingerprint: fingerprint(media), provider: plugin.manifest.id, language: row.code,
@@ -110,9 +112,11 @@ export class DubbingService {
     const update = this.db.sqlite.prepare("UPDATE video_dubs SET status=?,phase=?,progress=?,error=? WHERE media_id=? AND language=? AND fingerprint=?");
     try {
       fs.mkdirSync(workDir, { recursive: true });
+      const referenceVideos = await this.catalog.dubbingReferenceVideos(media, signal);
+      signal.throwIfAborted();
       const outcome = await plugin.renderDub!(this.plugins.context(job.provider, signal), {
         mediaId: media.id, fingerprint: job.fingerprint, language: job.language, source: this.catalog.absolutePath(media),
-        dataDir: this.dataDir, workDir, output,
+        dataDir: this.dataDir, workDir, output, referenceVideos,
       }, (phase, progress) => {
         if (!signal.aborted) update.run("running", phase, Math.max(0, Math.min(progress, 99)), "", media.id, job.language, job.fingerprint);
       });

@@ -58,6 +58,13 @@ it("controls worker lifetime, imports and retries through installation while ret
     expect((await app.inject(tracksUrl)).json().targetLanguages).toEqual(["sv-SE", "fr"]);
     expect(run.mock.calls[0][0].signal!.aborted).toBe(true);
     expect(run.mock.calls[1][1].languages).toEqual(["sv-SE", "fr"]);
+    const order = await app.inject({ url: "/api/settings/subtitles", method: "PUT", payload: { enabled: true, languages: ["sv-SE", "fr"], oldestFirst: false } });
+    expect(order.json()).toMatchObject({ oldestFirst: false });
+    expect((await app.inject("/api/subtitles/status")).json().settings.oldestFirst).toBe(false);
+    expect(run.mock.calls[1][0].signal!.aborted).toBe(false);
+    expect((await app.inject({ url: "/api/settings/subtitles", method: "PUT", payload: { enabled: true, languages: [], oldestFirst: "false" } })).statusCode).toBe(400);
+    await app.inject({ url: "/api/settings/subtitles", method: "PUT", payload: { enabled: true, languages: ["sv-SE", "fr"] } });
+    expect(library.subtitleSettings().oldestFirst).toBe(false);
     expect((await app.inject({ url: `${tracksUrl}/fr`, method: "PUT", payload })).json()).toMatchObject({ tracks: [{ id: "manual-fr", label: "Français" }] });
     expect((await app.inject({ url: `${tracksUrl}/fr`, method: "PUT", payload: { content: "WEBVTT\n\nbroken" } })).statusCode).toBe(400);
 

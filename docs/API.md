@@ -44,7 +44,7 @@ The official provider has the plugin ID `org.easyx.subtitles`. Use the standard 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/subtitles/status` | Get settings, worker status, library counts (including silent videos in `skipped`) and the active `currentJob` with its title, phase, percentage, source and target language |
-| `PUT` | `/api/settings/subtitles` | Save `enabled` and ordered translation language codes in `languages`. An empty array selects original subtitles only |
+| `PUT` | `/api/settings/subtitles` | Save `enabled`, ordered translation language codes in `languages` and the optional boolean `oldestFirst` (defaults to true). Omitting the order preserves the saved preference. An empty language array selects original subtitles only |
 | `GET` | `/api/media/:id/subtitles` | Read job status, the detected source language, ordered `targetLanguages` and saved track URLs, including after uninstall |
 | `PUT` | `/api/media/:id/subtitles/:language` | Import SRT or WebVTT in the JSON field `content` with an optional `label` |
 | `POST` | `/api/media/:id/subtitles/retry` | Requeue a failed job when automatic generation is enabled |
@@ -54,7 +54,7 @@ Settings updates and imports require an installed subtitle provider. Manual impo
 
 ### Local Dubbing
 
-Install `org.easyx.dubbing` using the standard plugin endpoint. Save a boolean for each target language with `PUT /api/plugins/org.easyx.dubbing/config`, for example `{"fr":true,"es":true}`. The plugin processes indexed videos while at least one language is selected.
+Install `org.easyx.dubbing` using the standard plugin endpoint. Save a boolean for each target language with `PUT /api/plugins/org.easyx.dubbing/config`, for example `{"fr":true,"es":true,"oldestFirst":false}`. The plugin processes indexed videos while at least one language is selected. Both queues use the date added to the library. The dubbing queue defaults to newest first. Each plugin applies its own order when choosing the next video.
 
 | Method | Path | Purpose |
 | --- | --- | --- |

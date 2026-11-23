@@ -194,6 +194,8 @@ export type LiveStream = {
   contentType?: string;
 };
 
+export type DubbingReferenceVideo = { mediaId: string; fingerprint: string; source: string };
+
 export type DubbingJob = {
   mediaId: string;
   fingerprint: string;
@@ -202,6 +204,8 @@ export type DubbingJob = {
   workDir: string;
   output: string;
   language: string;
+  /** Other local videos credited to the same performers. Confirm speaker identity from the audio. */
+  referenceVideos?: DubbingReferenceVideo[];
 };
 
 export interface EasyXPlugin {

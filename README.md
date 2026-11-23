@@ -103,7 +103,7 @@ npm run check
 
 Open **Plugins → Not installed → Features & addons**, then install **Local Subtitles**. Whisper detects the spoken language of each indexed video and generates the original subtitles locally. In **Plugins → Installed → Local Subtitles → Config**, choose one or more translation languages for existing and future videos. Leave the selection empty for original subtitles only. When a video is already in a selected language, its original track serves that language.
 
-The settings show the current video, processing stage, percentage and library totals. The first video that needs transcription or translation also downloads the corresponding dependencies and model. On long videos, the original track becomes available after transcription, followed by each translation as it finishes.
+The settings show the current video, processing stage, percentage and library totals. **Processing order** uses the date a video was added to the library and defaults to oldest first. Changes apply when the worker picks its next video. The first video that needs transcription or translation also downloads the corresponding dependencies and model. On long videos, the original track becomes available after transcription, followed by each translation as it finishes.
 
 The player’s **Automatic** option follows your selected language order and falls back to the original while translations are being prepared. The **Subtitles** menu also lets you choose a specific track, turn subtitles **Off** or retry a failed job. The player remembers your choice. Uninstalling the plugin stops processing. Saved tracks remain playable, and reinstalling restores your language choices.
 
@@ -113,7 +113,9 @@ When upgrading from a version with built-in subtitles, install **Local Subtitles
 
 Install **Local Dubbing** under **Plugins → Features & addons**. Open its settings and select the languages you want. Processing starts when you save a language and covers existing and newly indexed videos, one version at a time. The settings show the active step and any failures. Open a finished video and use the dubbing selector to switch between the original and the rendered versions.
 
-The plugin isolates dialogue, identifies speakers, translates their lines and synthesizes each voice from a reference in the same video. It mixes the new voices with the original background and synchronizes the mouths of identified on-screen speakers. Separation and speaker matching are estimates. Music under speech, overlapping voices, quick cuts and obscured mouths can affect the result. The original video stays available.
+**Processing order** defaults to newest first by date added to the library. It can be changed independently of the subtitle queue.
+
+The plugin isolates dialogue and translates each speaker separately. It can draw on several original recordings credited to the same performer in the library. Each extra recording must match the voice heard in the current video. When the match is uncertain, the plugin uses the current recording for that speaker. It mixes the translated voices with the original background and synchronizes the mouths of identified on-screen speakers. Music under speech, overlapping voices, quick cuts and obscured mouths can affect the result. The original video stays available.
 
 Initial setup downloads Python packages and model weights. Inference runs on the server, including during voice cloning. Model files and the isolated Python environment live under `/data/dubbing-models` and `/data/dubbing-runtime`. Allow disk space for a new MP4 per selected language and temporary uncompressed audio for the current video. Completed versions remain playable after uninstall.
 

@@ -87,13 +87,15 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
   });
   app.get<{ Params: { id: string } }>("/api/media/:id", async (request) => payload(requiredMedia(request.params.id)));
 
-  app.put<{ Body: { enabled?: unknown; languages?: unknown } }>("/api/settings/subtitles", async (request) => {
+  app.put<{ Body: { enabled?: unknown; languages?: unknown; oldestFirst?: unknown } }>("/api/settings/subtitles", async (request) => {
     if (typeof request.body?.enabled !== "boolean" || !Array.isArray(request.body.languages)) throw Object.assign(new Error("enabled must be a boolean and languages must be an array"), { statusCode: 400 });
     const languages: unknown[] = request.body.languages;
     if (!languages.every((item): item is string => typeof item === "string")) throw Object.assign(new Error("Languages must be an array of language codes"), { statusCode: 400 });
-    return subtitles.configure({ enabled: request.body.enabled, languages });
+    const oldestFirst = request.body.oldestFirst;
+    if (oldestFirst !== undefined && typeof oldestFirst !== "boolean") throw Object.assign(new Error("oldestFirst must be a boolean"), { statusCode: 400 });
+    return subtitles.configure({ enabled: request.body.enabled, languages, oldestFirst });
   });
-  app.get("/api/dubbing/status", async () => dubbing?.overview() ?? { languages: [], selected: [], current: null, errors: [] });
+  app.get("/api/dubbing/status", async () => dubbing?.overview() ?? { languages: [], selected: [], oldestFirst: false, current: null, errors: [] });
   app.get<{ Params: { id: string } }>("/api/media/:id/dubbing", async ({ params }) => dubbing?.status(requiredMedia(params.id)) ?? { installed: false, variants: [] });
   app.post<{ Params: { id: string; language: string } }>("/api/media/:id/dubbing/:language/retry", async ({ params }) => {
     if (!dubbing) throw Object.assign(new Error("Dubbing is unavailable"), { statusCode: 409 });

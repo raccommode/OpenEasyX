@@ -190,6 +190,7 @@ class LipSyncTests(unittest.TestCase):
         with av.open(output) as reader:
             self.assertEqual([s.codec_context.name for s in reader.streams], ["h264", "aac"])
             self.assertEqual(reader.streams.audio[0].metadata["language"], "fra")
+            self.assertEqual(reader.streams.audio[0].metadata["handler_name"], "Open EasyX Dubbed Audio")
 
     def test_only_aperture_is_synthesized_and_native_skin_is_warped(self):
         x, y = np.meshgrid(np.arange(160), np.arange(120))
@@ -212,6 +213,25 @@ class LipSyncTests(unittest.TestCase):
         self.assertGreater(actual[47:51, 76:84].mean(), 100)
         self.assertGreater(actual[47:51, 76:84].std(), 15)
         self.assertFalse(np.array_equal(actual[47:51, 76:84], original[47:51, 76:84]))
+
+    def test_fitted_mouth_preserves_the_vowel_and_limits_inflation_in_the_face_plane(self):
+        outer = np.linspace(-np.pi, np.pi, 12, endpoint=False)
+        inner = np.linspace(-np.pi, np.pi, 8, endpoint=False)
+        native = np.float32([(30*np.cos(t), 8*np.sin(t)) for t in outer] +
+                            [(24*np.cos(t), 4*np.sin(t)) for t in inner])
+        target = native * [1.35, 2.] + [9., 7.]
+        fitted, transform = lips.fit_speaker_mouth(native, target, np.eye(2, 3))
+        self.assertLessEqual(fitted[6, 0]-fitted[0, 0], 60*1.031)
+        self.assertAlmostEqual(fitted[18, 1]-fitted[14, 1], target[18, 1]-target[14, 1], places=4)
+        self.assertLessEqual(fitted[14, 1]-fitted[3, 1], 4*1.041)
+        np.testing.assert_allclose(target[12:] @ transform[:, :2].T + transform[:, 2], fitted[12:], atol=1e-5)
+        rot = np.array([[.8, -.6], [.6, .8]])
+        move = [120., 80.]
+        rotated, _ = lips.fit_speaker_mouth(native @ rot.T+move, target @ rot.T+move, np.eye(2, 3))
+        np.testing.assert_allclose(rotated, fitted @ rot.T+move, atol=1e-5)
+        rounded = native * [.7, 1.]
+        same, _ = lips.fit_speaker_mouth(native, rounded, np.eye(2, 3))
+        np.testing.assert_allclose(same, rounded, atol=1e-5)
 
     def test_open_native_reference_can_be_sealed_once_without_using_the_teeth(self):
         import cv2
@@ -266,6 +286,30 @@ class LipSyncTests(unittest.TestCase):
             self.assertLessEqual(small.stored_bytes, small.byte_budget)
         self.assertIsNone(small.choose(7, pose, blurred, mouth))
         self.assertIsNotNone(small.choose(9, pose, blurred, mouth))
+
+    def test_dental_edge_restores_an_observed_enamel_boundary(self):
+        import cv2
+        outer = np.linspace(-np.pi, np.pi, 12, endpoint=False)
+        inner = np.linspace(-np.pi, np.pi, 8, endpoint=False)
+        mouth = np.float32([(70+36*np.cos(t), 50+17*np.sin(t)) for t in outer] +
+                           [(70+29*np.cos(t), 50+11*np.sin(t)) for t in inner])
+        native = np.full((100, 140, 3), [32, 42, 64], "uint8")
+        native[44:54, 42:95] = [160, 162, 174]
+        native[44:54, 65:67] = [88, 90, 100]
+        blurred = cv2.GaussianBlur(native, (0, 0), 2.6)
+        bank = lips.MouthTextures()
+        pose = np.zeros(2, "float32")
+        bank.collect(1, native, mouth, pose)
+        result = bank.restore_enamel(1, pose, blurred, mouth, 70., blurred)
+        def edge_slope(image):
+            luma = cv2.cvtColor(image.astype("float32"), cv2.COLOR_BGR2GRAY)
+            return abs(np.diff(luma[39:51, 50:60].mean(axis=1))).max()
+        self.assertGreater(edge_slope(result), 1.5*edge_slope(blurred))
+        self.assertLess(edge_slope(result), edge_slope(native))
+        np.testing.assert_array_equal(result[:30], blurred[:30])
+        np.testing.assert_array_equal(bank.restore_enamel(2, pose, blurred, mouth, 70., blurred), blurred)
+        hidden = np.full_like(blurred, [22, 25, 80])
+        np.testing.assert_array_equal(bank.restore_enamel(1, pose, hidden, mouth, 70., hidden), hidden)
 
     def test_source_tail_uses_aligned_pcm_and_stops_at_next_speaker(self):
         # A VAD-positive tail cannot continue into the next person's turn.

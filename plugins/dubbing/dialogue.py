@@ -362,7 +362,7 @@ def transcribe(dialogue, work, model_cache):
             turns_audio = speaker_audio(samples, original, turns, extractor, voices, separators)
             last_percent = -1
             for offset, speaker, audio, direction, overlapping in turns_audio:
-                percent = int(15 + 15 * (start + offset * 44100 / 16000) / len(src))
+                percent = int(15 + 12 * (start + offset * 44100 / 16000) / len(src))
                 if percent > last_percent:
                     progress("Identifying and transcribing speakers", percent)
                     last_percent = percent
@@ -383,7 +383,7 @@ def transcribe(dialogue, work, model_cache):
                     cues.append(dict(start=at+t0, end=at+t1, speaker=speaker, language=info.language,
                                      languageProbability=info.language_probability, text=text, clip=clip,
                                      direction=direction, overlapping=overlapping))
-            progress("Identifying and transcribing speakers", 15 + 15 * min(1, (start + len(samples)*44100/16000)/len(src)))
+            progress("Identifying and transcribing speakers", 15 + 12 * min(1, (start + len(samples)*44100/16000)/len(src)))
     cues.sort(key=lambda c: c["start"])
     resolve_short_languages(cues, work, whisper)
     speaker_references(cues, work)
