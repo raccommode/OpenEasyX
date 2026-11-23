@@ -29,7 +29,11 @@ def run(job):
     os.environ.setdefault("TORCH_HOME", str(data / "dubbing-models" / "torch"))
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
-    provision(data)
+    try:
+        provision(data)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        publish(errorCode="DUBBING_RUNTIME_SETUP", message=str(error))
+        raise
     import torch
     torch.set_num_threads(min(4, os.cpu_count() or 1))
     from dialogue import separate_dialogue, transcribe

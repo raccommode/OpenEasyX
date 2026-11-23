@@ -1,4 +1,5 @@
 """Lazy environment and model files shared by dubbing jobs on this server."""
+from collections import deque
 import hashlib
 import json
 import os
@@ -6,6 +7,7 @@ import platform
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -22,6 +24,48 @@ def has_nvidia():
     from shutil import which
     return Path("/dev/nvidiactl").exists() or (which("nvidia-smi") and
            subprocess.run(["nvidia-smi", "-L"], capture_output=True).returncode == 0)
+
+
+def run_installer(stage, command):
+    """Keep the nested resolver failure when pip finishes with a generic build-error footer."""
+    diagnoses, recent = [], deque(maxlen=4)
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, errors="replace") as process:
+        for line in process.stdout:
+            sys.stderr.write(line)
+            message = line.strip()
+            if not message:
+                continue
+            recent.append(message)
+            if len(diagnoses) < 3 and any(part in message.lower() for part in (
+                    "error:", "fatal error", "no matching distribution", "no space left",
+                    "certificate_verify_failed", "timed out", "connection refused")):
+                if message not in diagnoses and "subprocess-exited-with-error" not in message.lower():
+                    diagnoses.append(message)
+        if process.wait():
+            details = " / ".join(s[:240] for s in (diagnoses or recent)) or "pip exited without a diagnostic"
+            raise RuntimeError(f"{stage} failed: {details}")
+
+
+def install_dependencies(requirements, cuda):
+    pip = [sys.executable, "-m", "pip", "--disable-pip-version-check", "--no-cache-dir"]
+    install = [*pip, "install", "--progress-bar", "off"]
+    # Bookworm's pip 23 rejects some normalized project names in wheel metadata.
+    run_installer("Updating the dubbing installer", [*install, "pip>=24"])
+    packages = ["torch==2.9.1", "torchaudio==2.9.1"]
+    if sys.platform != "linux":
+        run_installer("Installing dubbing dependencies", [*install, *packages, "-r", str(requirements)])
+        return
+    # Choose only the two platform wheels at PyTorch. Its CUDA and CPU indexes
+    # are not complete package indexes for dependencies or isolated builds.
+    index = "https://download.pytorch.org/whl/" + ("cu128" if cuda else "cpu")
+    with tempfile.TemporaryDirectory(prefix="easyx-torch-") as folder:
+        run_installer("Downloading PyTorch wheels", [*pip, "download", "--progress-bar", "off",
+            "--index-url", index, "--only-binary=:all:", "--no-deps", "--dest", folder, *packages])
+        wheels = sorted(Path(folder).glob("*.whl"))
+        if len(wheels) != 2:
+            raise RuntimeError("The PyTorch index did not provide both requested wheels")
+        run_installer("Installing dubbing dependencies", [*install, *map(str, wheels), "-r", str(requirements)])
 
 
 def provision(data):
@@ -50,11 +94,8 @@ def provision(data):
             # first installation can leave a valid interpreter without pip.
             from importlib.util import find_spec
             if find_spec("pip") is None:
-                subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"], check=True)
-            pip = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir"]
-            index = ["--index-url", "https://download.pytorch.org/whl/" + ("cu128" if cuda else "cpu")] if sys.platform == "linux" else []
-            subprocess.run([*pip, *index, "torch==2.9.1", "torchaudio==2.9.1"], check=True)
-            subprocess.run([*pip, "-r", str(requirements)], check=True)
+                run_installer("Restoring pip", [sys.executable, "-m", "ensurepip", "--upgrade"])
+            install_dependencies(requirements, cuda)
             marker.write_text(version)
     if cuda and sys.platform == "linux":
         # CTranslate2 loads cuDNN and cuBLAS dynamically from the installed PyTorch wheels.

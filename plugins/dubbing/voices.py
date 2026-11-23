@@ -1,4 +1,5 @@
 """Translate dialogue and mix time-aligned speaker-conditioned audio into the original film."""
+import gc
 import json
 import math
 import os
@@ -18,6 +19,28 @@ LANGUAGES = {lang["code"]: lang for file in ("translation-languages.json", "othe
              for lang in json.loads((CATALOG / file).read_text())}
 
 
+def load_translation_model(model_class, directory, accelerator):
+    if accelerator != "cuda":
+        return model_class.from_pretrained(directory).eval().to(accelerator)
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported(including_emulation=False) else torch.float16
+    model = model_class.from_pretrained(directory, dtype=dtype).eval()
+    # NLLB ties its 500 MiB vocabulary matrix across four modules. Materialize
+    # and tie on CPU first, then preserve the shared Parameter during transfer.
+    previous = torch.__future__.get_swap_module_params_on_conversion()
+    try:
+        torch.__future__.set_swap_module_params_on_conversion(True)
+        return model.to("cuda")
+    finally:
+        torch.__future__.set_swap_module_params_on_conversion(previous)
+
+
+def translate_batch(model, tokenizer, lines, target_token, accelerator):
+    encoded = tokenizer(lines, return_tensors="pt", padding=True).to(accelerator)
+    with torch.inference_mode():
+        result = model.generate(**encoded, forced_bos_token_id=target_token, max_new_tokens=256)
+    return tokenizer.batch_decode(result, skip_special_tokens=True)
+
+
 def translate(cues, target, cache):
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
     if cache.is_file():
@@ -26,8 +49,10 @@ def translate(cues, target, cache):
             return texts
     model_dir = model_path("translation")
     accelerator = device()
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_dir).eval().to(accelerator)
+    model = None
+    batch_size = 8
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    target_token = tokenizer.convert_tokens_to_ids(LANGUAGES[target]["nllb"])
     texts = [cue["text"] for cue in cues]
     total = sum(cue["language"] != target for cue in cues)
     translated = 0
@@ -38,17 +63,35 @@ def translate(cues, target, cache):
             raise ValueError(f"Translation from detected language {source} is unavailable")
         tokenizer.src_lang = LANGUAGES[source]["nllb"]
         positions = [idx for idx, cue in enumerate(cues) if cue["language"] == source]
-        for offset in range(0, len(positions), 8):
-            selected = positions[offset:offset+8]
-            encoded = tokenizer([cues[idx]["text"] for idx in selected], return_tensors="pt", padding=True)
-            with torch.inference_mode():
-                result = model.generate(**encoded.to(accelerator), forced_bos_token_id=tokenizer.convert_tokens_to_ids(LANGUAGES[target]["nllb"]), max_new_tokens=256)
-            for idx, text in zip(selected, tokenizer.batch_decode(result, skip_special_tokens=True)):
-                if not text.strip():
-                    raise ValueError("Translation produced an empty phrase")
-                texts[idx] = text.strip()
-            translated += len(selected)
-            progress(f"Translating {source} to {target}", 30 + 7 * translated/total)
+        offset = 0
+        while offset < len(positions):
+            selected = positions[offset:offset+batch_size]
+            try:
+                if model is None:
+                    model = load_translation_model(AutoModelForSeq2SeqLM, model_dir, accelerator)
+                generated = translate_batch(model, tokenizer, [cues[idx]["text"] for idx in selected], target_token, accelerator)
+            except torch.cuda.OutOfMemoryError:
+                if accelerator != "cuda":
+                    raise
+            else:
+                for idx, text in zip(selected, generated, strict=True):
+                    if not text.strip():
+                        raise ValueError("Translation produced an empty phrase")
+                    texts[idx] = text.strip()
+                offset += len(selected)
+                translated += len(selected)
+                progress(f"Translating {source} to {target}", 30 + 7 * translated/total)
+                continue
+            # Exit the exception handler before releasing the failed model:
+            # the traceback can retain GPU tensors from loading or generation.
+            model = None
+            gc.collect()
+            torch.cuda.empty_cache()
+            accelerator, batch_size = "cpu", 1
+            progress("GPU memory is busy; translating on CPU", 30 + 7 * translated/total)
+            # The FP32 archive maps into memory without copying. Let Transformers
+            # tie its four vocabulary weights before allocating the smaller CPU tensors.
+            model = AutoModelForSeq2SeqLM.from_pretrained(model_dir).eval().to(dtype=torch.bfloat16)
     save_json(cache, texts)
     return texts
 
@@ -87,13 +130,39 @@ def speak(cues, texts, language, work, wav_dir, references=None):
             raise SystemExit(f"Voice synthesis stopped with status {result.returncode}")
 
 
+def load_voice_model(model_class, directory, accelerator, dtype, percent):
+    if accelerator != "cuda":
+        return model_class.from_pretrained(directory, device_map=accelerator, dtype=dtype)
+    # The BF16 backbone uses 1,168 MiB and the FP32 audio codec another 764 MiB.
+    # Leave space for the CUDA context and decoding on a busy or shared card.
+    if torch.cuda.mem_get_info()[0] >= 3*1024**3:
+        try:
+            return model_class.from_pretrained(directory, device_map="cuda", dtype=dtype)
+        except torch.cuda.OutOfMemoryError:
+            pass
+        # Another application can allocate VRAM between the check and the load.
+        # Release the failed model and traceback before retrying once.
+        gc.collect()
+        torch.cuda.empty_cache()
+    progress("Loading the voice model on CUDA with the audio codec on CPU", percent)
+    model = model_class.from_pretrained(directory, device_map="cpu", dtype=dtype)
+    codec = model.audio_tokenizer
+    model.audio_tokenizer = None
+    try:
+        model.to("cuda")
+    finally:
+        model.audio_tokenizer = codec
+    return model
+
+
 def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, references=None):
     from omnivoice import OmniVoice
-    progress("Loading local voice model", 38 + 30*indices[0]/len(cues))
+    percent = 38 + 30*indices[0]/len(cues)
+    progress("Loading local voice model", percent)
     dtype = torch.float32
     if (accelerator == "mps" and torch.backends.mps.is_macos_or_newer(14, 0)) or (accelerator == "cuda" and torch.cuda.is_bf16_supported()):
         dtype = torch.bfloat16
-    model = OmniVoice.from_pretrained(model_path("voice"), device_map=accelerator, dtype=dtype)
+    model = load_voice_model(OmniVoice, model_path("voice"), accelerator, dtype, percent)
     limits = delivery_durations(cues, sf.info(work/"mix.wav").duration)
     prompts = {}
     for idx in indices:

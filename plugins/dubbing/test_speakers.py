@@ -1,5 +1,6 @@
 """Speaker assignment and soundtrack regressions for the optional dubbing runtime."""
 import importlib.util
+import sys
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -16,6 +17,85 @@ if RUNTIME:
 
 @unittest.skipUnless(RUNTIME, "requires the optional dubbing Python environment")
 class SpeakerTests(unittest.TestCase):
+    def test_small_cuda_budget_or_a_real_allocation_failure_moves_only_the_voice_backbone(self):
+        for tight in (True, False):
+            model_class, backbone, codec = Mock(), Mock(), object()
+            backbone.audio_tokenizer = codec
+            backbone.to.side_effect = lambda device: self.assertIsNone(backbone.audio_tokenizer)
+            model_class.from_pretrained.side_effect = [backbone] if tight else [
+                voices.torch.cuda.OutOfMemoryError("busy GPU"), backbone]
+            with self.subTest(tight=tight), patch.object(voices, "progress"), \
+                 patch.object(voices.torch.cuda, "mem_get_info", return_value=((2 if tight else 8)*1024**3, 12*1024**3)), \
+                 patch.object(voices.torch.cuda, "empty_cache") as empty:
+                model = voices.load_voice_model(model_class, "voice", "cuda", voices.torch.bfloat16, 38)
+            self.assertIs(model, backbone)
+            self.assertIs(model.audio_tokenizer, codec)
+            backbone.to.assert_called_once_with("cuda")
+            calls = model_class.from_pretrained.call_args_list
+            self.assertEqual([c.kwargs["device_map"] for c in calls], ["cpu"] if tight else ["cuda", "cpu"])
+            self.assertEqual(calls[-1].kwargs["dtype"], voices.torch.bfloat16)
+            self.assertEqual(empty.call_count, 0 if tight else 1)
+
+    def test_other_devices_and_cuda_with_headroom_keep_the_normal_voice_model(self):
+        for device in ("cuda", "mps", "cpu"):
+            model_class = Mock()
+            with self.subTest(device=device), patch.object(voices.torch.cuda, "mem_get_info", return_value=(4*1024**3, 12*1024**3)) as mem:
+                model = voices.load_voice_model(model_class, "voice", device, voices.torch.bfloat16, 38)
+            self.assertIs(model, model_class.from_pretrained.return_value)
+            model_class.from_pretrained.assert_called_once_with("voice", device_map=device, dtype=voices.torch.bfloat16)
+            self.assertEqual(mem.call_count, int(device == "cuda"))
+
+    def test_translation_moves_tied_half_precision_weights_to_cuda(self):
+        scenarios = [("cuda", True, voices.torch.bfloat16), ("cuda", False, voices.torch.float16),
+                     ("cpu", False, None), ("mps", False, None)]
+        for accelerator, has_bf16, dtype in scenarios:
+            factory = Mock()
+            before = voices.torch.__future__.get_swap_module_params_on_conversion()
+            def move(destination):
+                self.assertEqual(destination, accelerator)
+                self.assertEqual(voices.torch.__future__.get_swap_module_params_on_conversion(), True if dtype else before)
+                return factory.from_pretrained.return_value
+            factory.from_pretrained.return_value.eval.return_value.to.side_effect = move
+            with self.subTest(accelerator=accelerator, dtype=dtype), \
+                 patch.object(voices.torch.cuda, "is_bf16_supported", return_value=has_bf16) as supported:
+                voices.load_translation_model(factory, "checkpoint", accelerator)
+            self.assertEqual(voices.torch.__future__.get_swap_module_params_on_conversion(), before)
+            if dtype:
+                supported.assert_called_once_with(including_emulation=False)
+                factory.from_pretrained.assert_called_once_with("checkpoint", dtype=dtype)
+            else:
+                supported.assert_not_called()
+                factory.from_pretrained.assert_called_once_with("checkpoint")
+
+    def test_cuda_oom_during_load_or_generation_retries_on_cpu_without_repeating_completed_batches(self):
+        for on_load in (True, False):
+            transformers, gpu, cpu = Mock(), Mock(), Mock()
+            load_cpu = transformers.AutoModelForSeq2SeqLM.from_pretrained
+            load_cpu.return_value.eval.return_value.to.return_value = cpu
+            oom = voices.torch.cuda.OutOfMemoryError("busy")
+            cues = [{"language": "en", "text": str(i)} for i in range(10)]
+            completed = []
+            def batch(model, tokenizer, lines, target, device):
+                if model is gpu and lines[0] == "8":
+                    raise oom
+                if device == "cpu":
+                    self.assertIs(model, cpu)
+                    self.assertEqual(len(lines), 1)
+                completed.extend(lines)
+                return ["fr "+text for text in lines]
+            with self.subTest(on_load=on_load), tempfile.TemporaryDirectory() as folder, \
+                 patch.dict(sys.modules, {"transformers": transformers}), patch.object(voices, "device", return_value="cuda"), \
+                 patch.object(voices, "model_path", return_value="checkpoint"), patch.object(voices, "progress"), \
+                 patch.object(voices, "load_translation_model", side_effect=[oom if on_load else gpu]), \
+                 patch.object(voices, "translate_batch", side_effect=batch), patch.object(voices.torch.cuda, "empty_cache") as empty:
+                cache = Path(folder)/"translations.json"
+                self.assertEqual(voices.translate(cues, "fr", cache), ["fr "+str(i) for i in range(10)])
+                self.assertTrue(cache.is_file())
+            self.assertEqual(completed, [str(i) for i in range(10)])
+            empty.assert_called_once()
+            load_cpu.assert_called_once_with("checkpoint")
+            load_cpu.return_value.eval.return_value.to.assert_called_once_with(dtype=voices.torch.bfloat16)
+
     def test_natural_delivery_only_uses_free_time_between_lines(self):
         cues = [dict(start=0., end=1.), dict(start=3., end=5.), dict(start=4., end=6.),
                 dict(start=6.2, end=7.)]

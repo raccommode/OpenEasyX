@@ -8,7 +8,8 @@ type Overview = {
   selected: string[];
   oldestFirst: boolean;
   current: { title: string; language: string; phase: string; progress: number } | null;
-  errors: { id: string; title: string; language: string; error: string }[];
+  runtimeRetryAt?: string | null;
+  errors: { id: string; title: string; language: string; error: string; runtimeSetup?: boolean }[];
 };
 
 export default function DubbingSettings({ name, close, uninstall }: { name: string; close: () => void; uninstall: () => Promise<void> }) {
@@ -56,6 +57,13 @@ export default function DubbingSettings({ name, close, uninstall }: { name: stri
     finally { setBusy(false); }
   };
   const job = overview?.current;
+  const retryAt = !job && overview?.selected.length ? overview.runtimeRetryAt : null;
+  const runtimeFailure = retryAt ? overview?.errors.find((failure) => failure.runtimeSetup) : undefined;
+  const failedJobs = overview?.errors.filter((failure) => failure !== runtimeFailure) ?? [];
+  const failureRow = (failure: Overview["errors"][number]) => <div key={`${failure.id}-${failure.language}`}>
+    <span><b>{failure.title} · {languageLabel(failure.language)}</b><p>{failure.error}</p></span>
+    <button className="quiet" disabled={busy || !overview?.selected.includes(failure.language)} aria-label={`Retry ${failure.title} in ${languageLabel(failure.language)}`} onClick={() => void retry(failure.id, failure.language)}><RefreshCw size={14}/>{failure === runtimeFailure ? "Retry now" : "Retry"}</button>
+  </div>;
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) close(); }}>
     <section className="modal" role="dialog" aria-modal="true" aria-labelledby="dubbing-settings-title" onKeyDown={(event) => { if (event.key === "Escape" && !busy) close(); }}>
       <div className="modal-head"><div><p>PLUGIN SETTINGS</p><h2 id="dubbing-settings-title">{name}</h2></div><button className="icon-button" disabled={busy} autoFocus aria-label="Close dubbing settings" onClick={close}><X/></button></div>
@@ -77,12 +85,11 @@ export default function DubbingSettings({ name, close, uninstall }: { name: stri
           </section>
           <section className="settings-card"><h3>Local processing</h3>
             {job ? <div className="subtitle-job-progress"><p className="subtitle-current-title">{job.title} · {languageLabel(job.language)}</p><div><span role="status">{job.phase}</span><strong aria-hidden="true">{Math.round(job.progress)}%</strong></div><progress aria-label={`Dubbing ${job.title} in ${languageLabel(job.language)}`} max={100} value={job.progress}/></div>
+              : retryAt ? <><p role="status">Dubbing is paused because the local runtime is unavailable. The next automatic retry is scheduled for <time dateTime={retryAt}>{new Date(retryAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</time>.</p>
+                {runtimeFailure && <div className="dubbing-errors">{failureRow(runtimeFailure)}</div>}</>
               : <p role="status">{overview.selected.length ? "Waiting for the next video" : "Select a language to start dubbing."}</p>}
           </section>
-          {overview.errors.length > 0 && <section className="settings-card dubbing-errors"><h3>Failed jobs</h3>{overview.errors.map((failure) => <div key={`${failure.id}-${failure.language}`}>
-            <span><b>{failure.title} · {languageLabel(failure.language)}</b><p>{failure.error}</p></span>
-            <button className="quiet" disabled={busy || !overview.selected.includes(failure.language)} aria-label={`Retry ${failure.title} in ${languageLabel(failure.language)}`} onClick={() => void retry(failure.id, failure.language)}><RefreshCw size={14}/>Retry</button>
-          </div>)}</section>}
+          {failedJobs.length > 0 && <section className="settings-card dubbing-errors"><h3>Failed jobs</h3>{failedJobs.map(failureRow)}</section>}
         </div>}
       </div>
       <div className="modal-actions"><button className="danger-soft" disabled={busy} onClick={async () => { setBusy(true); try { await uninstall(); } finally { setBusy(false); } }}><Trash2 size={16}/>Uninstall</button>

@@ -12,7 +12,7 @@ const languages = subtitleLanguages.filter(({ code }) => supported.has(code)).ma
 
 export default definePlugin({
   manifest: {
-    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.1.0", author: "Open EasyX",
+    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.1.1", author: "Open EasyX",
     capabilities: ["video-dubbing"], dubbingLanguages: languages,
     description: "Clone each speaker’s voice, translate the dialogue and synchronize visible lips locally.",
     settings: [
@@ -34,12 +34,16 @@ export default definePlugin({
         env: { ...process.env, EASYX_DUBBING_PARENT: "1", PYTHONUNBUFFERED: "1", HF_HUB_DISABLE_TELEMETRY: "1", TOKENIZERS_PARALLELISM: "false" },
       });
       let error = "";
+      let setupError: Error | undefined;
       let outcome: "rendered" | "original" | "silent" | undefined;
       const lines = createInterface({ input: child.stdout });
       lines.on("line", (line) => {
         if (!line.startsWith("EASYX ")) return;
         try {
           const event = JSON.parse(line.slice(6));
+          if (event.errorCode === "DUBBING_RUNTIME_SETUP" && typeof event.message === "string") {
+            setupError = Object.assign(new Error(event.message), { code: event.errorCode });
+          }
           if (typeof event.phase === "string" && Number.isFinite(event.progress)) report(event.phase, event.progress);
           if (["rendered", "original", "silent"].includes(event.outcome)) outcome = event.outcome;
         } catch { /* Ignore non-protocol model output. */ }
@@ -51,11 +55,15 @@ export default definePlugin({
         };
         signal?.addEventListener("abort", stop, { once: true });
         if (signal?.aborted) stop();
-        child.once("error", reject);
+        child.once("error", (cause) => {
+          signal?.removeEventListener("abort", stop);
+          reject(Object.assign(new Error(cause.message, { cause }), { code: "DUBBING_RUNTIME_SETUP" }));
+        });
         child.once("close", (code) => {
           signal?.removeEventListener("abort", stop);
           lines.close();
-          if (code === 0 && outcome) resolve(outcome);
+          if (setupError) reject(setupError);
+          else if (code === 0 && outcome) resolve(outcome);
           else reject(new Error(error.trim().slice(-1000) || `Dubbing worker stopped (exit ${code})`));
         });
       });
