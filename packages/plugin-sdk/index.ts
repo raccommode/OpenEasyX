@@ -4,6 +4,7 @@ export type PluginCapability =
   | "media-listing"
   | "download-resolver"
   | "live-cam"
+  | "subtitle-generation"
   | "library-hook";
 
 export type SettingField = {
@@ -26,6 +27,8 @@ export type PluginManifest = {
   author: string;
   homepage?: string;
   capabilities: PluginCapability[];
+  /** Supported import languages and translation targets for a subtitle-generation provider. */
+  subtitleLanguages?: Array<{ code: string; label: string }>;
   settings?: SettingField[];
   browserAuth?: {
     loginUrl: string;
@@ -134,6 +137,14 @@ export type LibraryDeletion = {
   relativePath: string;
 };
 
+export type SubtitleWorkerOptions = {
+  dataDir: string;
+  mediaDir: string;
+  databasePath: string;
+  /** Translation targets in addition to the original transcription. */
+  languages: string[];
+};
+
 export type LiveCamQuery = {
   page: number;
   pageSize: number;
@@ -196,6 +207,10 @@ export interface EasyXPlugin {
   resolveLiveStream?(context: PluginContext, cam: LiveCam): Promise<LiveStream>;
   afterDownload?(context: PluginContext, download: CompletedDownload): Promise<void>;
   acceptLibraryDeletion?(context: PluginContext, deletion: LibraryDeletion): Promise<LibraryDeletion>;
+  /** Run until the host aborts context.signal, then release all child processes. */
+  runSubtitleWorker?(context: PluginContext, options: SubtitleWorkerOptions): Promise<void>;
+  /** Convert an uploaded subtitle document into WebVTT for the library player. */
+  importSubtitle?(content: string): string;
 }
 
 export function definePlugin(plugin: EasyXPlugin): EasyXPlugin {

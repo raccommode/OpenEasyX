@@ -1,19 +1,28 @@
 from __future__ import annotations
 
+import hashlib
+import html
 import json
 import math
 import os
+import platform
+import shutil
+import signal
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DATA_ROOT = Path(os.environ.get("EASYX_DATA_DIR", "/data"))
+DATA_ROOT = Path(os.environ.get("EASYX_DATA_DIR", "/data")).resolve()
 MEDIA_ROOT = Path(os.environ.get("EASYX_MEDIA_DIR", "/media"))
-DB_PATH = DATA_ROOT / "easyx-viewer.sqlite"
+DB_PATH = Path(os.environ.get("EASYX_SUBTITLE_DATABASE", DATA_ROOT / "open-easyx-library.sqlite"))
+RUNTIME_ROOT = DATA_ROOT / "subtitle-runtime" / f"{sys.platform}-{platform.machine()}-py{sys.version_info.major}.{sys.version_info.minor}"
 SUBTITLE_ROOT = DATA_ROOT / "subtitles"
 MODEL_ROOT = DATA_ROOT / "subtitle-models"
 WHISPER_MODEL = os.environ.get("EASYX_WHISPER_MODEL", "small")
@@ -21,13 +30,8 @@ TRANSLATION_MODEL = os.environ.get("EASYX_TRANSLATION_MODEL", "facebook/nllb-200
 CHUNK_SECONDS = max(120, min(1800, int(os.environ.get("EASYX_SUBTITLE_CHUNK_SECONDS", "600"))))
 
 LANGUAGES = {
-    "en": ("English", "eng_Latn"), "fr": ("French", "fra_Latn"),
-    "es": ("Spanish", "spa_Latn"), "de": ("German", "deu_Latn"),
-    "it": ("Italian", "ita_Latn"), "pt": ("Portuguese", "por_Latn"),
-    "nl": ("Dutch", "nld_Latn"), "pl": ("Polish", "pol_Latn"),
-    "ru": ("Russian", "rus_Cyrl"), "uk": ("Ukrainian", "ukr_Cyrl"),
-    "ja": ("Japanese", "jpn_Jpan"), "ko": ("Korean", "kor_Hang"),
-    "zh": ("Chinese", "zho_Hans"),
+    item["code"]: (item["label"], item["nllb"])
+    for item in json.loads(Path(__file__).with_name("languages.json").read_text(encoding="utf-8"))
 }
 
 
@@ -35,12 +39,13 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def connect() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA busy_timeout=30000")
-    return con
+@contextmanager
+def connect() -> Iterator[sqlite3.Connection]:
+    with closing(sqlite3.connect(DB_PATH, timeout=30)) as con:
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA foreign_keys=ON")
+        with con:
+            yield con
 
 
 def set_state(key: str, value: Any) -> None:
@@ -52,19 +57,51 @@ def set_state(key: str, value: Any) -> None:
         )
 
 
-def settings() -> dict[str, Any]:
-    with connect() as con:
-        row = con.execute("SELECT value_json FROM settings WHERE key='subtitles'").fetchone()
-    if not row:
-        return {"enabled": False, "languages": []}
-    try:
-        value = json.loads(row["value_json"])
-    except json.JSONDecodeError:
-        return {"enabled": False, "languages": []}
-    return {
-        "enabled": value.get("enabled") is True,
-        "languages": sorted({code for code in value.get("languages", []) if code in LANGUAGES}),
-    }
+def enter_runtime() -> None:
+    """Use a persistent, isolated interpreter once there is actual work to do."""
+    if os.environ.get("EASYX_SUBTITLE_PYTHON") or Path(sys.prefix).resolve() == RUNTIME_ROOT:
+        return
+    executable = RUNTIME_ROOT / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not executable.is_file() or not (RUNTIME_ROOT / "pyvenv.cfg").is_file():
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(RUNTIME_ROOT)], check=True)
+    os.execv(str(executable), [str(executable), __file__])
+
+
+def ensure_dependency(feature: str) -> None:
+    # An explicitly configured interpreter is provisioned by its owner.
+    if os.environ.get("EASYX_SUBTITLE_PYTHON"):
+        return
+    if Path(sys.prefix).resolve() != RUNTIME_ROOT:
+        raise RuntimeError("subtitle dependencies require the plugin's isolated runtime")
+    requirements = Path(__file__).with_name(f"requirements-{feature}.txt")
+    torch_requirement = "torch==2.9.1" if feature == "translation" else ""
+    version = hashlib.sha256(requirements.read_bytes() + torch_requirement.encode()).hexdigest()
+    marker = RUNTIME_ROOT / f".{feature}.ready"
+    if marker.is_file() and marker.read_text(encoding="utf-8") == version:
+        return
+    print(f"Preparing local {feature} dependencies", flush=True)
+    def install(*args: str) -> None:
+        result = subprocess.run([sys.executable, "-m", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if result.returncode:
+            raise RuntimeError(f"Installing {feature} dependencies failed: {result.stdout[-1200:]}")
+    install("ensurepip")
+    pip = ["pip", "--disable-pip-version-check", "install", "--no-cache-dir", "--progress-bar", "off"]
+    if torch_requirement:
+        index = ["--index-url", "https://download.pytorch.org/whl/cpu"] if sys.platform == "linux" else []
+        install(*pip, *index, torch_requirement)
+    install(*pip, "-r", str(requirements))
+    temporary = marker.with_suffix(".tmp")
+    temporary.write_text(version, encoding="utf-8")
+    temporary.replace(marker)
+
+
+def stop_on_parent_exit() -> None:
+    # An abruptly terminated server closes stdin just as surely as a normal shutdown.
+    sys.stdin.buffer.read()
+    if hasattr(os, "killpg") and os.getpgrp() == os.getpid():
+        os.killpg(os.getpid(), signal.SIGTERM)
+    else:
+        os._exit(0)
 
 
 def fingerprint(row: sqlite3.Row) -> str:
@@ -75,25 +112,30 @@ def discover(targets: list[str]) -> None:
     requested = json.dumps(targets, separators=(",", ":"))
     stamp = now()
     with connect() as con:
-        videos = con.execute("SELECT id,size,modified_at FROM media WHERE kind='video' AND missing=0").fetchall()
+        videos = con.execute(
+            """SELECT m.id, m.size, m.modified_at, j.fingerprint AS previous_fingerprint
+            FROM media m LEFT JOIN subtitle_jobs j ON j.media_id=m.id
+            WHERE m.kind='video' AND m.missing=0 AND (
+                j.media_id IS NULL OR j.fingerprint != (m.size || ':' || m.modified_at)
+                OR j.requested_languages_json != ?)""", (requested,)
+        ).fetchall()
         for video in videos:
             current = fingerprint(video)
-            job = con.execute("SELECT fingerprint,requested_languages_json,status FROM subtitle_jobs WHERE media_id=?", (video["id"],)).fetchone()
-            if not job:
+            if video["previous_fingerprint"] is None:
                 con.execute(
                     "INSERT INTO subtitle_jobs(media_id,fingerprint,requested_languages_json,status,updated_at) VALUES(?,?,?,'queued',?)",
                     (video["id"], current, requested, stamp),
                 )
-            elif job["fingerprint"] != current:
+            elif video["previous_fingerprint"] != current:
                 con.execute(
                     """UPDATE subtitle_jobs SET fingerprint=?,requested_languages_json=?,status='queued',source_language='',
                     source_language_probability=0,progress=0,attempts=0,last_error='',completed_at=NULL,updated_at=? WHERE media_id=?""",
                     (current, requested, stamp, video["id"]),
                 )
                 con.execute("DELETE FROM subtitle_tracks WHERE media_id=? AND origin!='manual'", (video["id"],))
-            elif job["requested_languages_json"] != requested:
+            else:
                 con.execute(
-                    "UPDATE subtitle_jobs SET requested_languages_json=?,status='queued',progress=0,last_error='',updated_at=? WHERE media_id=?",
+                    "UPDATE subtitle_jobs SET requested_languages_json=?,status='queued',progress=0,attempts=0,last_error='',updated_at=? WHERE media_id=?",
                     (requested, stamp, video["id"]),
                 )
 
@@ -132,7 +174,9 @@ def has_audio(source: Path) -> bool:
         ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index", "-of", "csv=p=0", str(source)],
         capture_output=True, text=True, timeout=120, check=False,
     )
-    return result.returncode == 0 and bool(result.stdout.strip())
+    if result.returncode:
+        raise RuntimeError((result.stderr or "could not inspect the audio stream")[-1000:])
+    return bool(result.stdout.strip())
 
 
 def extract_audio(source: Path, target: Path, start: float, duration: float) -> None:
@@ -156,16 +200,15 @@ def vtt_time(value: float) -> str:
 def render_vtt(cues: list[dict[str, Any]]) -> str:
     lines = ["WEBVTT", ""]
     for index, cue in enumerate(cues, 1):
-        text = " ".join(str(cue.get("text", "")).split()).replace("-->", "→")
+        text = " ".join(str(cue.get("text", "")).split())
         if not text:
             continue
         start = max(0.0, float(cue["start"]))
-        words = max(1, len(text.split()))
-        display = max(4.0, min(8.0, words * 0.45 + 2.0))
-        end = min(max(start + 0.1, float(cue["end"])) + 1.5, start + display)
+        end = float(cue["end"])
         if index < len(cues):
-            end = min(end, max(start + 0.1, float(cues[index]["start"]) - 0.05))
-        lines.extend([str(index), f"{vtt_time(start)} --> {vtt_time(end)}", text, ""])
+            end = min(end, float(cues[index]["start"]))
+        end = max(start + 0.001, end)
+        lines.extend([str(index), f"{vtt_time(start)} --> {vtt_time(end)}", html.escape(text, quote=False), ""])
     return "\n".join(lines)
 
 
@@ -190,6 +233,7 @@ def translate(cues: list[dict[str, Any]], source: str, targets: list[str], media
         return
     if source not in LANGUAGES:
         raise RuntimeError(f"translation from detected language '{source}' is not supported yet")
+    ensure_dependency("translation")
     import torch
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
@@ -211,13 +255,37 @@ def translate(cues: list[dict[str, Any]], source: str, targets: list[str], media
                 con.execute("UPDATE subtitle_jobs SET progress=?,updated_at=? WHERE media_id=?", (80 + 19 * (target_index + 1) / len(targets), now(), media_id))
 
 
-def transcribe(row: sqlite3.Row, source: Path, duration: float) -> tuple[str, float, list[dict[str, Any]]]:
-    from faster_whisper import WhisperModel
+def save_transcript(file: Path, payload: dict[str, Any]) -> None:
+    temporary = file.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(file)
 
+
+def load_transcript(file: Path, expected: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(file.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None
+    if not isinstance(payload, dict) or any(payload.get(key) != value for key, value in expected.items()):
+        return None
+    if not isinstance(payload.get("language"), str) or not isinstance(payload.get("probability"), (int, float)):
+        return None
+    cues = payload.get("cues")
+    if not isinstance(cues, list) or any(
+        not isinstance(cue, dict) or not isinstance(cue.get("text"), str)
+        or not all(isinstance(cue.get(key), (int, float)) and math.isfinite(cue[key]) for key in ("start", "end"))
+        for cue in cues
+    ):
+        return None
+    return payload
+
+
+def transcribe(row: sqlite3.Row, source: Path, duration: float) -> tuple[str, float, list[dict[str, Any]]]:
     media_id = str(row["id"])
-    work = SUBTITLE_ROOT / "work" / media_id
+    work = SUBTITLE_ROOT / media_id / "work"
     work.mkdir(parents=True, exist_ok=True)
-    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=1, num_workers=1, download_root=str(MODEL_ROOT))
+    cache_key = {"fingerprint": fingerprint(row), "model": WHISPER_MODEL, "chunkSeconds": CHUNK_SECONDS}
+    model = None
     language = ""
     probability = 0.0
     cues: list[dict[str, Any]] = []
@@ -226,24 +294,29 @@ def transcribe(row: sqlite3.Row, source: Path, duration: float) -> tuple[str, fl
         start = index * CHUNK_SECONDS
         length = min(CHUNK_SECONDS, duration - start)
         checkpoint = work / f"chunk-{index:06d}.json"
-        if checkpoint.is_file():
-            payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+        payload = load_transcript(checkpoint, cache_key)
+        if payload is not None:
             language = language or payload.get("language", "")
             probability = max(probability, float(payload.get("probability", 0)))
             cues.extend(payload.get("cues", []))
             continue
+        if model is None:
+            ensure_dependency("transcription")
+            from faster_whisper import WhisperModel
+            model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=1, num_workers=1, download_root=str(MODEL_ROOT))
         audio = work / f"chunk-{index:06d}.flac"
         extract_audio(source, audio, start, length)
         try:
             segments, info = model.transcribe(str(audio), task="transcribe", language=language or None, vad_filter=True, beam_size=1, condition_on_previous_text=False)
-            language = language or str(info.language or "en")
-            probability = max(probability, float(info.language_probability or 0))
             chunk_cues = [
                 {"start": round(start + float(segment.start), 3), "end": round(start + float(segment.end), 3), "text": " ".join(str(segment.text or "").split())}
                 for segment in segments if str(segment.text or "").strip()
             ]
+            if chunk_cues:
+                language = language or str(info.language or "en")
+                probability = max(probability, float(info.language_probability or 0))
             cues.extend(chunk_cues)
-            checkpoint.write_text(json.dumps({"language": language, "probability": probability, "cues": chunk_cues}, ensure_ascii=False), encoding="utf-8")
+            save_transcript(checkpoint, {**cache_key, "language": language, "probability": probability, "cues": chunk_cues})
         finally:
             audio.unlink(missing_ok=True)
         with connect() as con:
@@ -256,8 +329,6 @@ def process(row: sqlite3.Row, targets: list[str]) -> None:
     source = media_path(str(row["relative_path"]))
     if not source.is_file():
         raise RuntimeError("media file is not available")
-    with connect() as con:
-        con.execute("UPDATE subtitle_jobs SET status='running',attempts=attempts+1,progress=0,last_error='',started_at=?,updated_at=? WHERE media_id=?", (now(), now(), media_id))
     if not has_audio(source):
         with connect() as con:
             con.execute("UPDATE subtitle_jobs SET status='no_audio',progress=100,completed_at=?,updated_at=? WHERE media_id=?", (now(), now(), media_id))
@@ -268,24 +339,27 @@ def process(row: sqlite3.Row, targets: list[str]) -> None:
     with connect() as con:
         con.execute("UPDATE media SET duration=CASE WHEN duration>0 THEN duration ELSE ? END WHERE id=?", (duration, media_id))
     original_json = SUBTITLE_ROOT / media_id / "original.json"
-    if original_json.is_file():
-        payload = json.loads(original_json.read_text(encoding="utf-8"))
-        if payload.get("fingerprint") == fingerprint(row):
-            language, probability, cues = payload["language"], float(payload.get("probability", 0)), payload["cues"]
-        else:
-            language, probability, cues = transcribe(row, source, duration)
-    else:
+    cache_key = {"fingerprint": fingerprint(row)}
+    payload = load_transcript(original_json, cache_key)
+    if payload is None:
         language, probability, cues = transcribe(row, source, duration)
+        save_transcript(original_json, {**cache_key, "language": language, "probability": probability, "cues": cues})
+    else:
+        language, probability, cues = payload["language"], payload["probability"], payload["cues"]
+    work = original_json.parent / "work"
+    if work.is_dir():
+        shutil.rmtree(work)
     if not cues:
         with connect() as con:
             con.execute("UPDATE subtitle_jobs SET status='no_speech',progress=100,completed_at=?,updated_at=? WHERE media_id=?", (now(), now(), media_id))
         return
-    original_json.parent.mkdir(parents=True, exist_ok=True)
-    original_json.write_text(json.dumps({"fingerprint": fingerprint(row), "language": language, "probability": probability, "cues": cues}, ensure_ascii=False), encoding="utf-8")
     original_label = f"Original · {LANGUAGES.get(language, (language.upper(), ''))[0]}"
     write_track(media_id, "original", language, original_label, "original", language, cues)
     required = [target for target in targets if target != language]
-    translate(cues, language, required, media_id)
+    with connect() as con:
+        completed = con.execute("SELECT id FROM subtitle_tracks WHERE media_id=? AND origin='generated' AND source_language=?", (media_id, language)).fetchall()
+    cached = {track["id"] for track in completed if (original_json.parent / f"{track['id']}.vtt").is_file()}
+    translate(cues, language, [target for target in required if target not in cached], media_id)
     with connect() as con:
         if required:
             placeholders = ",".join("?" for _ in required)
@@ -296,18 +370,14 @@ def process(row: sqlite3.Row, targets: list[str]) -> None:
 
 
 def main() -> None:
-    DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    SUBTITLE_ROOT.mkdir(parents=True, exist_ok=True)
-    MODEL_ROOT.mkdir(parents=True, exist_ok=True)
-    while not DB_PATH.is_file():
-        time.sleep(2)
+    if os.environ.get("EASYX_SUBTITLE_PARENT_PIPE") == "1":
+        threading.Thread(target=stop_on_parent_exit, daemon=True).start()
+    if not DB_PATH.is_file():
+        raise RuntimeError(f"library database not found at {DB_PATH}")
+    targets = sorted(set(json.loads(os.environ.get("EASYX_SUBTITLE_LANGUAGES", "[]"))) & LANGUAGES.keys())
+    with connect() as con:
+        con.execute("UPDATE subtitle_jobs SET status='queued', attempts=MAX(0,attempts-1), updated_at=? WHERE status='running'", (now(),))
     while True:
-        config = settings()
-        if not config["enabled"]:
-            set_state("subtitle_worker_runtime", {"state": "disabled", "heartbeat": now()})
-            time.sleep(5)
-            continue
-        targets = config["languages"]
         discover(targets)
         job = next_job()
         if not job:
@@ -325,6 +395,9 @@ def main() -> None:
         heartbeat_thread.start()
         failure: Exception | None = None
         try:
+            with connect() as con:
+                con.execute("UPDATE subtitle_jobs SET status='running',attempts=attempts+1,progress=0,last_error='',started_at=?,updated_at=? WHERE media_id=?", (now(), now(), job["id"]))
+            enter_runtime()
             process(job, targets)
         except Exception as error:
             failure = error

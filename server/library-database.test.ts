@@ -293,6 +293,39 @@ describe("media catalog", () => {
     db.close();
   });
 
+  it("recovers existing generated tracks indexed only in the legacy viewer when the video still matches", async () => {
+    const { data, media, db } = fixture();
+    for (const name of ["same.mp4", "replaced.mp4"]) fs.writeFileSync(path.join(media, name), "video");
+    await new Catalog(db, media, data, false).scan();
+    const items = db.listMedia({}).items;
+    const same = items.find((item) => item.title === "same")!;
+    const replaced = items.find((item) => item.title === "replaced")!;
+    db.upsertSubtitleTrack(same.id, "original", "en", "Current label", "original", "en");
+    const oldFile = path.join(data, "easyx-viewer.sqlite");
+    db.sqlite.prepare("VACUUM INTO ?").run(oldFile);
+    db.close();
+    const old = new DatabaseSync(oldFile);
+    const insert = old.prepare("INSERT OR REPLACE INTO subtitle_tracks(id,media_id,language,label,origin,source_language,updated_at) VALUES(?,?,?,'Old label','generated','en',?)");
+    for (const item of items) {
+      const directory = path.join(data, "subtitles", item.id);
+      fs.mkdirSync(directory, { recursive: true });
+      for (const id of ["original", "fr", "it"]) {
+        insert.run(id, item.id, id === "original" ? "en" : id, new Date().toISOString());
+        if (id !== "it") fs.writeFileSync(path.join(directory, `${id}.vtt`), "WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n");
+      }
+    }
+    old.prepare("UPDATE media SET size=size+1 WHERE id=?").run(replaced.id);
+    old.close();
+    const migrated = new LibraryDatabase(data);
+    expect(migrated.subtitleTracks(same.id)).toMatchObject([{ id: "original", label: "Current label" }, { id: "fr", label: "Old label" }]);
+    expect(migrated.subtitleTracks(replaced.id)).toHaveLength(0);
+    migrated.sqlite.prepare("DELETE FROM subtitle_tracks WHERE id='fr'").run();
+    migrated.close();
+    const restarted = new LibraryDatabase(data);
+    expect(restarted.subtitleTracks(same.id)).toMatchObject([{ id: "original" }]);
+    restarted.close();
+  });
+
   it("stores subtitle preferences, tracks, and filter-consistent autoplay queues", async () => {
     const { data, media, db } = fixture();
     const directory = path.join(media, "Example Performer", "example.com");
@@ -310,7 +343,7 @@ describe("media catalog", () => {
     expect(db.storedDownloaderSettings()).toEqual({ host: "downloader.local", port: 4321 });
     db.upsertSubtitleTrack(video.id, "original", "en", "Original · English", "original", "en");
     db.upsertSubtitleTrack(video.id, "fr", "fr", "French", "generated", "en");
-    expect(db.subtitleStatus(video.id)).toMatchObject({ status: "queued", tracks: [{ id: "original" }, { id: "fr" }] });
+    expect(db.subtitleStatus(video.id, true)).toMatchObject({ status: "queued", tracks: [{ id: "original" }, { id: "fr" }] });
     expect(db.playlist({ source: "example.com", sort: "title" })).toEqual(items.map((item) => item.id));
     expect(db.playlist({ source: "example.com", kind: "video", sort: "title" })).toEqual(items.filter((item) => item.kind === "video").map((item) => item.id));
     expect(db.playlist({ source: "example.com", kind: "image", sort: "title" })).toEqual(items.filter((item) => item.kind === "image").map((item) => item.id));

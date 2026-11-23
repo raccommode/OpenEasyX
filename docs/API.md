@@ -37,6 +37,21 @@ Password fields are returned as `••••••••`. Sending that sentine
 
 There is no Viewer bridge plugin. The media library, live service, queue, and plugin manager run in the same Open EasyX server.
 
+## Subtitles
+
+The official provider has the plugin ID `org.easyx.subtitles`. Use the standard plugin install and uninstall endpoints to manage it.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/subtitles/status` | Get plugin availability, generation settings, job counts and worker status |
+| `PUT` | `/api/settings/subtitles` | Save `enabled` and an array of translation language codes in `languages` |
+| `GET` | `/api/media/:id/subtitles` | Read job status and existing track URLs, including after uninstall |
+| `PUT` | `/api/media/:id/subtitles/:language` | Import SRT or WebVTT in the JSON field `content` with an optional `label` |
+| `POST` | `/api/media/:id/subtitles/retry` | Requeue a failed job when automatic generation is enabled |
+| `GET` | `/api/media/:id/subtitles/:track.vtt` | Play a registered subtitle track |
+
+Settings updates and imports require an installed subtitle provider. Manual imports also work when automatic generation is paused.
+
 ## Starting a live recording
 
 Send `POST /api/live-cams/record` with the room's `providerId` and `cam` from `GET /api/live-cams`. A successful request returns `{ "itemId": "...", "status": "queued" }`.

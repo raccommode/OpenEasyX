@@ -10,10 +10,7 @@ COPY packages ./packages
 RUN npm run build
 
 FROM node:24-bookworm-slim
-ENV NODE_ENV=production PORT=3210 EASYX_DATA_DIR=/data EASYX_MEDIA_DIR=/media EASYX_EXTERNAL_PLUGINS_DIR=/plugins \
-    EASYX_EMBEDDED_SUBTITLE_WORKER=true EASYX_SUBTITLE_PYTHON=/opt/subtitles/bin/python \
-    EASYX_WHISPER_MODEL=small EASYX_TRANSLATION_MODEL=facebook/nllb-200-distilled-600M EASYX_SUBTITLE_CHUNK_SECONDS=600 \
-    HF_HOME=/data/subtitle-models/huggingface PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false
+ENV NODE_ENV=production PORT=3210 EASYX_DATA_DIR=/data EASYX_MEDIA_DIR=/media EASYX_EXTERNAL_PLUGINS_DIR=/plugins
 ENV PATH=/opt/easyx/bin:/opt/ofscraper/bin:$PATH
 WORKDIR /app
 # ofscraper 3.14.7 pins idna==3.7 and lxml~=5.1, which have known CVEs
@@ -25,20 +22,14 @@ RUN apt-get update \
     && python3 -m venv /opt/ofscraper \
     && /opt/ofscraper/bin/pip install --no-cache-dir --upgrade pip "ofscraper==3.14.7" \
     && /opt/ofscraper/bin/pip install --no-cache-dir "idna==3.20" "lxml==6.1.3" \
-    && python3 -m venv /opt/subtitles \
-    && /opt/subtitles/bin/pip install --no-cache-dir --upgrade pip \
     && apt-get purge -y --auto-remove python3-dev gcc g++ \
     && rm -rf /var/lib/apt/lists/*
-COPY requirements-subtitles.txt ./
-RUN /opt/subtitles/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch==2.9.1 \
-    && /opt/subtitles/bin/pip install -r requirements-subtitles.txt
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/server ./server
 COPY --from=build /app/plugins ./plugins
 COPY --from=build /app/packages ./packages
 COPY --from=build /app/dist ./dist
-COPY worker ./worker
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY scripts/easyx-ofscraper-download.mjs /usr/local/bin/easyx-ofscraper-download
 COPY scripts/easyx-ofscraper-auth-test.py /usr/local/bin/easyx-ofscraper-auth-test

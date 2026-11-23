@@ -71,8 +71,7 @@ describe("saved live performer restoration", () => {
     db.setLiveCamFavorite("test.restore", { camId: "broken", username: "broken", pageUrl: "https://unsupported.test/broken" }, true);
     db.setLiveCamFavorite("test.restore", { ...cam("healthy"), camId: "healthy" }, true);
     const child = spawn(process.execPath, ["--import", "tsx", "server/index.ts"], { cwd: process.cwd(), env: { ...process.env,
-      PORT: "0", EASYX_DATA_DIR: data, EASYX_MEDIA_DIR: path.join(root, "media"), EASYX_EXTERNAL_PLUGINS_DIR: pluginRoot,
-      EASYX_EMBEDDED_SUBTITLE_WORKER: "false" }, stdio: ["ignore", "pipe", "pipe"] });
+      PORT: "0", EASYX_DATA_DIR: data, EASYX_MEDIA_DIR: path.join(root, "media"), EASYX_EXTERNAL_PLUGINS_DIR: pluginRoot }, stdio: ["ignore", "pipe", "pipe"] });
     cleanups.push(async () => { if (child.exitCode === null) { const closed = once(child, "close"); child.kill("SIGTERM"); await closed; } });
     let logs = "";
     const address = await new Promise<string>((resolve, reject) => {

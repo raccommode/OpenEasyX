@@ -1,0 +1,15 @@
+[
+  { "code": "en", "label": "English", "nllb": "eng_Latn" },
+  { "code": "fr", "label": "French", "nllb": "fra_Latn" },
+  { "code": "es", "label": "Spanish", "nllb": "spa_Latn" },
+  { "code": "de", "label": "German", "nllb": "deu_Latn" },
+  { "code": "it", "label": "Italian", "nllb": "ita_Latn" },
+  { "code": "pt", "label": "Portuguese", "nllb": "por_Latn" },
+  { "code": "nl", "label": "Dutch", "nllb": "nld_Latn" },
+  { "code": "pl", "label": "Polish", "nllb": "pol_Latn" },
+  { "code": "ru", "label": "Russian", "nllb": "rus_Cyrl" },
+  { "code": "uk", "label": "Ukrainian", "nllb": "ukr_Cyrl" },
+  { "code": "ja", "label": "Japanese", "nllb": "jpn_Jpan" },
+  { "code": "ko", "label": "Korean", "nllb": "kor_Hang" },
+  { "code": "zh", "label": "Chinese", "nllb": "zho_Hans" }
+]

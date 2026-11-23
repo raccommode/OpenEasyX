@@ -11,6 +11,7 @@ export type PageKey = keyof typeof pageRoutes;
 
 export function canonicalEntryPath(pathname: string): string {
   const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  if (normalized === "/media-settings") return "/plugins";
   if (normalized === "/discover") return "/performers";
   return normalized === "/" || normalized === "/overview" ? "/media" : pathname;
 }

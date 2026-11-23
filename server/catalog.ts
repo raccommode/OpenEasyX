@@ -235,6 +235,7 @@ export class Catalog {
     ];
     for (const file of cached) fs.rmSync(file, { force: true });
     fs.rmSync(path.join(this.dataDir, "subtitles", mediaId), { recursive: true, force: true });
+    fs.rmSync(path.join(this.dataDir, "subtitles", "work", mediaId), { recursive: true, force: true });
   }
 
   deleteStoredMedia(relativePath: string) {

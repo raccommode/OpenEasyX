@@ -65,6 +65,33 @@ describe("plugin lifecycle", () => {
     expect(manager.uninstall("test.lifecycle")).toMatchObject({ installed: false, enabled: false });
   });
 
+  it("requires subtitle hooks and permits only one installed subtitle provider", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-subtitle-providers-")); temporaryDirectories.push(root);
+    const pluginRoot = path.join(root, "plugins");
+    for (const name of ["First", "Second", "MissingHooks", "InvalidLanguages", "DuplicateLanguages"]) {
+      const base = path.join(pluginRoot, name);
+      fs.mkdirSync(base, { recursive: true });
+      const languages = [{ code: "fr-CA", label: "Canadian French" }];
+      if (name === "InvalidLanguages") languages.push({ code: "../file", label: "Invalid" });
+      if (name === "DuplicateLanguages") languages.push({ code: "fr-ca", label: "Repeated" });
+      const manifest = { id: "test." + name.toLowerCase(), name, version: "1", author: "Test", description: "Test", capabilities: ["subtitle-generation"], subtitleLanguages: languages };
+      const hooks = name === "MissingHooks" ? "" : ", async runSubtitleWorker() {}, importSubtitle(content) { return content }";
+      fs.writeFileSync(path.join(base, "index.mjs"), `export default { manifest: ${JSON.stringify(manifest)}${hooks} };`);
+    }
+    const database = new Database(path.join(root, "data"));
+    try {
+      const manager = new PluginManager(database, [pluginRoot], undefined, () => {});
+      await manager.load();
+      expect(manager.list().map(entry => entry.manifest.name).sort()).toEqual(["First", "Second"]);
+      manager.install("test.first");
+      expect(() => manager.install("test.second")).toThrow("Uninstall First");
+      expect(database.getPluginState("test.second").installed).toBe(false);
+      manager.uninstall("test.first");
+      manager.install("test.second");
+      expect(manager.subtitleProvider()?.manifest.id).toBe("test.second");
+    } finally { database.close(); }
+  });
+
   it("turns legacy installed-but-disabled plugins into uninstalled plugins", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-plugin-legacy-")); temporaryDirectories.push(root);
     const pluginRoot = path.join(root, "plugins"); fs.mkdirSync(path.join(pluginRoot, "sample"), { recursive: true });

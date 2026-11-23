@@ -48,6 +48,39 @@ for (const url of [missing, conflict]) {
   assert.equal(entries.filter(entry => entry.level === "warn" && entry.details?.url === url).length, 1);
 }
 JS
+# Exercise the packaged plugin and its writable runtime as the actual server UID.
+docker exec --user 99:100 "$container" ffmpeg -loglevel error -f lavfi -i color=size=32x32:duration=0.2 -an -c:v mpeg4 /media/subtitle-smoke.mp4
+docker exec -i "$container" node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import { setTimeout } from "node:timers/promises";
+const request = (route, options) => fetch("http://127.0.0.1:3210/api" + route, options);
+assert.equal((await (await request("/subtitles/status")).json()).pluginEnabled, false);
+assert.ok(!fs.existsSync("/data/subtitle-runtime") && !fs.existsSync("/opt/subtitles"));
+assert.equal((await request("/scan", { method: "POST" })).status, 200);
+const { items } = await (await request("/library?q=subtitle")).json();
+const media = items.find(item => item.relativePath === "subtitle-smoke.mp4");
+assert.ok(media);
+const plugin = "/plugins/org.easyx.subtitles";
+assert.equal((await request(plugin + "/install", { method: "POST" })).status, 200);
+const route = "/media/" + media.id + "/subtitles";
+let status;
+for (let attempt = 0; attempt < 30; attempt++) {
+  status = await (await request(route)).json();
+  if (status.status === "no_audio") break;
+  await setTimeout(500);
+}
+assert.equal(status.status, "no_audio", JSON.stringify(status));
+assert.ok(!fs.existsSync("/data/subtitle-models"));
+const upload = await request(route + "/fr", { method: "PUT", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ content: "1\n00:00:00,000 --> 00:00:00,200\nBonjour" }) });
+assert.equal(upload.status, 200);
+assert.equal((await request(plugin, { method: "DELETE" })).status, 200);
+status = await (await request(route)).json();
+assert.equal(status.pluginEnabled, false);
+assert.equal(status.tracks.length, 1);
+assert.match(await (await fetch("http://127.0.0.1:3210" + status.tracks[0].url)).text(), /^WEBVTT[\s\S]*Bonjour/);
+JS
 docker exec "$container" node -e "fetch('http://127.0.0.1:3210/api/plugin-repositories').then(r=>r.json()).then(v=>{if(!Array.isArray(v)||!v.find(x=>x.id==='official'&&!x.removable))throw Error(JSON.stringify(v))})"
 docker exec "$container" node -e "fetch('http://127.0.0.1:3210/api/plugins/org.easyx.manyvids/browser-login/start',{method:'POST'}).then(async r=>{const v=await r.json();if(!r.ok||!v.active||!v.viewerPath)throw Error(JSON.stringify(v))})"
 docker exec "$container" node -e "fetch('http://127.0.0.1:3210/browser/vnc.html').then(r=>{if(!r.ok)throw Error('noVNC '+r.status)})"

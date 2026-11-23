@@ -3,7 +3,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Catalog } from "./catalog.js";
 import type { Database } from "./database.js";
 import { LibraryDatabase, type LibraryQuery, type MediaKind } from "./library-database.js";
-import { SUBTITLE_LANGUAGES, subtitleFilePath, subtitleLanguageCodes, subtitleLanguageLabel, writeManualSubtitle } from "./subtitles.js";
+import type { SubtitleService } from "./subtitle-service.js";
+import { subtitleFilePath, writeManualSubtitle } from "./subtitles.js";
 
 function positive(value: unknown, fallback: number, maximum = Number.MAX_SAFE_INTEGER) {
   const number = Number(value);
@@ -47,7 +48,7 @@ export function parseMediaRange(value: string, size: number): { start: number; e
   return { start, end: Math.min(requestedEnd, size - 1) };
 }
 
-export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, libraryDb: LibraryDatabase, catalog: Catalog, downloadDb: Database, dataDir: string) {
+export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, libraryDb: LibraryDatabase, catalog: Catalog, downloadDb: Database, dataDir: string, subtitles: SubtitleService) {
   const requiredMedia = (id: string) => {
     const media = libraryDb.getMedia(id);
     if (!media) throw Object.assign(new Error("Media not found"), { statusCode: 404 });
@@ -87,23 +88,26 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
 
   app.put<{ Body: { enabled?: unknown; languages?: unknown } }>("/api/settings/subtitles", async (request) => {
     if (typeof request.body?.enabled !== "boolean" || !Array.isArray(request.body.languages)) throw Object.assign(new Error("enabled must be a boolean and languages must be an array"), { statusCode: 400 });
-    const languages = request.body.languages.filter((item): item is string => typeof item === "string");
-    if (languages.some((language) => !subtitleLanguageCodes.has(language))) throw Object.assign(new Error("One or more subtitle languages are not supported"), { statusCode: 400 });
-    return libraryDb.setSubtitleSettings({ enabled: request.body.enabled, languages });
+    const languages: unknown[] = request.body.languages;
+    if (!languages.every((item): item is string => typeof item === "string")) throw Object.assign(new Error("Languages must be an array of language codes"), { statusCode: 400 });
+    return subtitles.configure({ enabled: request.body.enabled, languages });
   });
-  app.get("/api/subtitles/status", async () => libraryDb.subtitleOverview());
-  app.get<{ Params: { id: string } }>("/api/media/:id/subtitles", async (request) => libraryDb.subtitleStatus(request.params.id) ?? requiredMedia(request.params.id));
-  app.put<{ Params: { id: string; language: string }; Body: { content?: unknown; label?: unknown } }>("/api/media/:id/subtitles/:language", async (request) => {
+  app.get("/api/subtitles/status", async () => subtitles.overview());
+  app.get<{ Params: { id: string } }>("/api/media/:id/subtitles", async (request) => subtitles.mediaStatus(request.params.id) ?? requiredMedia(request.params.id));
+  app.post<{ Params: { id: string } }>("/api/media/:id/subtitles/retry", async (request) => {
+    requiredMedia(request.params.id);
+    return subtitles.retry(request.params.id);
+  });
+  const subtitleByteLimit = 6 * 1024 * 1024;
+  app.put<{ Params: { id: string; language: string }; Body: { content?: unknown; label?: unknown } }>("/api/media/:id/subtitles/:language", { bodyLimit: 2 * subtitleByteLimit + 4096 }, async (request) => {
     const media = requiredMedia(request.params.id);
     if (media.kind !== "video") throw Object.assign(new Error("Subtitles can only be added to videos"), { statusCode: 400 });
-    if (!subtitleLanguageCodes.has(request.params.language)) throw Object.assign(new Error("Unsupported subtitle language"), { statusCode: 400 });
-    if (typeof request.body?.content !== "string" || request.body.content.length > 6 * 1024 * 1024) throw Object.assign(new Error("A subtitle file up to 6 MB is required"), { statusCode: 400 });
-    let result: { trackId: string };
-    try { result = writeManualSubtitle(dataDir, media.id, request.params.language, request.body.content); }
-    catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { statusCode: 400 }); }
-    const label = typeof request.body.label === "string" && request.body.label.trim() ? request.body.label.trim().slice(0, 80) : subtitleLanguageLabel(request.params.language);
-    libraryDb.upsertSubtitleTrack(media.id, result.trackId, request.params.language, label, "manual", request.params.language);
-    return libraryDb.subtitleStatus(media.id);
+    if (typeof request.body?.content !== "string" || Buffer.byteLength(request.body.content) > subtitleByteLimit) throw Object.assign(new Error("A subtitle file up to 6 MB is required"), { statusCode: 400 });
+    const { webvtt, language } = subtitles.importTrack(request.params.language, request.body.content);
+    const result = writeManualSubtitle(dataDir, media.id, language.code, webvtt);
+    const label = typeof request.body.label === "string" && request.body.label.trim() ? request.body.label.trim().slice(0, 80) : language.label;
+    libraryDb.upsertSubtitleTrack(media.id, result.trackId, language.code, label, "manual", language.code);
+    return subtitles.mediaStatus(media.id);
   });
   app.get<{ Params: { id: string; track: string } }>("/api/media/:id/subtitles/:track.vtt", async (request, reply) => {
     requiredMedia(request.params.id);
@@ -160,5 +164,5 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
   };
   app.get<{ Params: { id: string } }>("/api/media/:id/stream", async (request, reply) => sendMedia(request, reply, request.params.id));
 
-  return { settings: () => ({ subtitles: libraryDb.subtitleSettings(), subtitleLanguages: SUBTITLE_LANGUAGES }), scan: () => catalog.scan() };
+  return { settings: () => subtitles.librarySettings(), scan: () => catalog.scan() };
 }

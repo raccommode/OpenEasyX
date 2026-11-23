@@ -22,5 +22,6 @@ describe("application routes", () => {
     expect(canonicalEntryPath("/overview/")).toBe("/media");
     expect(canonicalEntryPath("/discover")).toBe("/performers");
     expect(canonicalEntryPath("/plugins")).toBe("/plugins");
+    expect(canonicalEntryPath("/media-settings/")).toBe("/plugins");
   });
 });

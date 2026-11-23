@@ -1,7 +1,6 @@
 import { maxConcurrentDownloadsLimit } from "./download-limits.js";
 import path from "node:path";
 import fs from "node:fs";
-import { spawn, type ChildProcess } from "node:child_process";
 import Fastify, { LogController, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyHttpProxy from "@fastify/http-proxy";
 import fastifyStatic from "@fastify/static";
@@ -23,6 +22,7 @@ import { LibraryDatabase } from "./library-database.js";
 import { Catalog } from "./catalog.js";
 import { catalogScanIntervalMs, scheduleCatalogScans } from "./catalog-scheduler.js";
 import { registerLibraryRoutes } from "./library-routes.js";
+import { SubtitleService } from "./subtitle-service.js";
 import { settingsSchema } from "./output-settings.js";
 import { exportBackup, importBackup, parseBackup } from "./backup.js";
 import { SourceSync } from "./source-sync.js";
@@ -44,6 +44,7 @@ const catalog = new Catalog(libraryDb, mediaDir, dataDir, undefined, (relativePa
 const pluginRepositories = new PluginRepositoryManager(dataDir, path.resolve("plugins"), externalPluginsDir);
 const plugins = new PluginManager(db, pluginRepositories.roots(), path.join(dataDir, "sessions"), writeLog);
 await plugins.load();
+const subtitles = new SubtitleService(libraryDb, plugins, dataDir, mediaDir, writeLog);
 const queue = new DownloadQueue(
   db, plugins, mediaDir, writeLog, (relativePath, replacedPath) => catalog.indexStoredMedia(relativePath, replacedPath),
   (item) => catalog.deleteStoredMedia(item.storagePath!),
@@ -100,7 +101,7 @@ app.setErrorHandler((error, request, reply) => {
 });
 
 await app.register(fastifyHttpProxy, { upstream: "http://127.0.0.1:6080", prefix: "/browser", websocket: true });
-const library = registerLibraryRoutes(app, libraryDb, catalog, db, dataDir);
+const library = registerLibraryRoutes(app, libraryDb, catalog, db, dataDir, subtitles);
 const sourceSync = new SourceSync(db, mediaDir, (id, url) => plugins.getScraper(id, url), (id) => plugins.context(id), (ids) => queue.applyStoredMediaDates(ids));
 registerPerformerMergeRoutes(app, db, libraryDb, dataDir, (id) => performerOperations.has(id) || performerRefreshStatus.running || discoveryStatus.running || db.listSources(id).some((source) => sourceSync.active.has(source.id)));
 
@@ -129,27 +130,37 @@ app.get("/api/logs/stream", async (request, reply) => {
 
 app.get("/api/plugins", async () => plugins.list());
 app.get("/api/plugin-repositories", async () => pluginRepositories.list());
+async function reloadPlugins() {
+  plugins.setRoots(pluginRepositories.roots());
+  await plugins.load();
+  await subtitles.sync();
+  return plugins.list();
+}
 app.post<{ Body: { url?: unknown; name?: unknown } }>("/api/plugin-repositories", async (request) => {
   if (typeof request.body?.url !== "string") throw Object.assign(new Error("A Git repository URL is required"), { statusCode: 400 });
   const repository = await pluginRepositories.add(request.body.url, typeof request.body.name === "string" ? request.body.name : undefined);
-  plugins.setRoots(pluginRepositories.roots()); await plugins.load(); return { repository, plugins: plugins.list() };
+  return { repository, plugins: await reloadPlugins() };
 });
 app.post<{ Params: { id: string } }>("/api/plugin-repositories/:id/refresh", async (request) => {
   if (request.params.id === "official") throw Object.assign(new Error("The official store is updated with OpenEasyX"), { statusCode: 409 });
-  const repository = await pluginRepositories.refresh(request.params.id); plugins.setRoots(pluginRepositories.roots()); await plugins.load(); return { repository, plugins: plugins.list() };
+  const repository = await pluginRepositories.refresh(request.params.id);
+  return { repository, plugins: await reloadPlugins() };
 });
 app.delete<{ Params: { id: string } }>("/api/plugin-repositories/:id", async (request) => {
   if (request.params.id === "official") throw Object.assign(new Error("The official store cannot be removed"), { statusCode: 409 });
-  const result = pluginRepositories.remove(request.params.id); plugins.setRoots(pluginRepositories.roots()); await plugins.load(); return { ...result, plugins: plugins.list() };
+  const result = pluginRepositories.remove(request.params.id);
+  return { ...result, plugins: await reloadPlugins() };
 });
 app.post<{ Params: { id: string }; Body: Record<string, unknown> | undefined }>("/api/plugins/:id/install", async (request) => {
   plugins.install(request.params.id, request.body ?? {});
+  await subtitles.sync();
   liveCams.resetProviderSession(request.params.id);
   refreshLiveCamFavorites(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
 app.delete<{ Params: { id: string } }>("/api/plugins/:id", async (request) => {
   plugins.uninstall(request.params.id);
+  await subtitles.sync();
   await browserLogin.removeProfile(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
@@ -157,10 +168,12 @@ app.post<{ Params: { id: string }; Body: { enabled?: boolean } }>("/api/plugins/
   // Backwards-compatible endpoint for older clients. Disabling now means
   // uninstalling; enabling performs the same validated install operation.
   if (request.body?.enabled === false) plugins.uninstall(request.params.id); else plugins.install(request.params.id);
+  await subtitles.sync();
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
 app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/plugins/:id/config", async (request) => {
   plugins.configure(request.params.id, request.body ?? {});
+  await subtitles.sync();
   liveCams.resetProviderSession(request.params.id);
   refreshLiveCamFavorites(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
@@ -201,6 +214,7 @@ app.post<{ Params: { id: string }; Body: Record<string, unknown> | undefined }>(
   }
   const installed = db.getPluginState(request.params.id).installed;
   if (installed) plugins.configure(request.params.id, incoming); else plugins.install(request.params.id, incoming);
+  await subtitles.sync();
   liveCams.resetProviderSession(request.params.id);
   await browserLogin.removeProfile(request.params.id);
   refreshLiveCamFavorites(request.params.id);
@@ -216,7 +230,7 @@ app.delete<{ Params: { id: string } }>("/api/plugins/:id/browser-login", async (
   if (browserLogin.status(request.params.id).active) await browserLogin.stop();
   return { stopped: true };
 });
-app.post("/api/plugins/reload", async () => { await plugins.load(); return plugins.list(); });
+app.post("/api/plugins/reload", reloadPlugins);
 app.post<{ Params: { id: string }; Body: unknown }>("/api/plugins/:id/library/deletions", async (request) => {
   const plugin = plugins.get(request.params.id);
   if (!plugin.manifest.capabilities.includes("library-hook") || !plugin.acceptLibraryDeletion) {
@@ -615,6 +629,7 @@ app.post<{ Body: unknown; Querystring: { settings?: string; plugins?: string } }
   const backup = parseBackup(request.body);
   const off = (value?: string) => value === "0" || value === "false";
   const result = importBackup(db, plugins, backup, { settings: !off(request.query.settings), plugins: !off(request.query.plugins) });
+  await subtitles.sync();
   app.log.info({ scope: "backup", performers: result.performers, sourcesAdded: result.sources.added, sourcesSkipped: result.sources.skipped.length }, "Backup imported");
   return result;
 });
@@ -643,31 +658,18 @@ if (fs.existsSync(webRoot)) {
   app.setNotFoundHandler((request, reply) => request.url.startsWith("/api/") ? reply.status(404).send({ error: "Not found" }) : reply.sendFile("index.html"));
 }
 
-let subtitleWorker: ChildProcess | undefined;
-let subtitleWorkerRestart: NodeJS.Timeout | undefined;
 let shuttingDown = false;
 let stopCatalogScans: (() => void) | undefined;
-function startEmbeddedSubtitleWorker() {
-  if (process.env.EASYX_EMBEDDED_SUBTITLE_WORKER !== "true" || shuttingDown) return;
-  subtitleWorker = spawn(process.env.EASYX_SUBTITLE_PYTHON || "/opt/subtitles/bin/python", ["-m", "worker.subtitles"], { cwd: path.resolve("."), env: process.env, stdio: ["ignore", "inherit", "inherit"] });
-  subtitleWorker.on("error", (error) => app.log.error(error, "Embedded subtitle worker could not start"));
-  subtitleWorker.on("close", (code, signal) => {
-    subtitleWorker = undefined;
-    if (shuttingDown) return;
-    app.log.error({ code, signal }, "Embedded subtitle worker stopped; restarting in five seconds");
-    subtitleWorkerRestart = setTimeout(startEmbeddedSubtitleWorker, 5000);
-  });
-}
 
 const shutdown = async () => {
   // A second signal while live recordings are being saved exits at once; they are recovered on the next start.
   if (shuttingDown) process.exit(0);
-  shuttingDown = true; stopCatalogScans?.(); await queue.shutdown(); if (subtitleWorkerRestart) clearTimeout(subtitleWorkerRestart); subtitleWorker?.kill("SIGTERM");
+  shuttingDown = true; stopCatalogScans?.(); await Promise.all([queue.shutdown(), subtitles.close()]);
   await browserLogin.stop(); await app.close(); libraryDb.close(); db.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);
 await app.listen({ port, host: "0.0.0.0" });
-startEmbeddedSubtitleWorker();
+await subtitles.sync();
 setTimeout(() => refreshLiveCamFavorites(), 500).unref();
 setInterval(() => refreshLiveCamFavorites(), 5 * 60_000).unref();
 stopCatalogScans = scheduleCatalogScans(catalog, scanIntervalMs, (error) => app.log.error(error, "Library scan failed"));

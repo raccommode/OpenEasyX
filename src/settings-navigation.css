@@ -47,9 +47,10 @@
 
 .settings-category-content { min-width: 0; }
 .settings-category-content > .panel { min-height: 310px; }
-.embedded-subtitle-settings { min-height: 0; background: transparent; }
-.embedded-subtitle-settings .settings-page { max-width: none; }
-.embedded-subtitle-settings .settings-panel { min-width: 0; }
+.subtitle-plugin-settings { min-height: 0; margin: 16px 0; background: transparent; }
+.subtitle-plugin-settings .settings-hero { margin-bottom: 0; }
+.subtitle-plugin-settings .language-grid button { min-height: 36px; }
+.subtitle-plugin-settings .worker-error { margin-bottom: 12px; }
 
 @media (max-width: 800px) {
   .categorized-settings-layout { grid-template-columns: 1fr; }

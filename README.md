@@ -9,7 +9,7 @@ Open EasyX is one private, self-hosted application for discovering, downloading,
 - isolated partial downloads in `media/.downloads`, with restart-from-zero recovery;
 - an indexed video and photo library with favorites, history, progress, previews, and statistics;
 - direct live-cam aggregation and playback from installed source plugins;
-- local subtitle transcription and translation;
+- optional local subtitle transcription, translation and SRT/WebVTT import through the plugin store;
 - an official, built-in plugin store;
 - additional plugin repositories from GitHub, Gitea, Forgejo, GitLab, or any compatible HTTP(S), SSH, or Git remote;
 - integrated browser login for plugins that need an authenticated session.
@@ -99,6 +99,16 @@ npm run check
 
 ## Plugins and stores
 
+### Local Subtitles
+
+Open **Plugins → Not installed → Features & addons**, then install **Local Subtitles**. The plugin transcribes indexed library videos with Whisper. Open **Plugins → Installed → Local Subtitles → Config** to choose translation languages, check progress or pause automatic generation. The first video that needs transcription downloads the speech dependencies and model. Translation downloads its own dependencies and model when first needed. Audio and transcripts are processed on the server.
+
+Use the **Subtitles** menu in the video player to select a track, import an SRT or WebVTT file, or retry a failed job. Uninstalling the plugin stops processing. Saved subtitle tracks remain playable, and reinstalling restores the saved language choices.
+
+When upgrading from a version with built-in subtitles, install **Local Subtitles** to resume generation using your previous settings. The plugin reuses `/data/subtitles` and `/data/subtitle-models` and installs its Python packages under `/data/subtitle-runtime`. Outside Docker, use FFmpeg, FFprobe and Python 3.11 with virtual environment support. To use an interpreter with the plugin dependencies already installed, set `EASYX_SUBTITLE_PYTHON` to its executable path.
+
+### Source plugins
+
 **ViralXXXPorn** supports public model video collections (`/models/<name>/`), search results (`/search/<query>/`), video lists, and individual `/video/<id>/...` and `/short/<id>/...` pages. Collection scans follow pagination up to **Maximum videos per scan** (100 by default). Downloads refresh the page's public MP4 link and select its highest available resolution. Photo albums and account-restricted videos are not supported.
 
 **DirtyShip** supports performer video collections (`/performer/<name>/`), individual video pages, and full-resolution photo galleries (`/gallery/<name>/`). Both plugins are available in the built-in store; install the plugin, assign it to a performer's source URL, then select **Scrape now**.
@@ -139,7 +149,7 @@ Completed downloads and recovered recordings appear in the library through targe
 
 Every push to `main` runs tests, TypeScript, the production web build, a Docker build, and runtime checks. A successful push automatically creates a `YEAR.WEEK.N` version (for example `2026.35.1`), publishes the multi-architecture image to `ghcr.io/raccommode/open-easyx` with both that version and `latest`, injects the version into the application, and creates the matching GitHub Release. Pull requests run the same checks without publishing a release.
 
-AMD64 and ARM64 images build concurrently on native GitHub runners, with a separate persistent cache for each architecture. Each image passes the Unraid-style runtime and browser checks before upload; version and `latest` tags are published only after both images and the application tests succeed. Release metadata is added after dependency installation so a new version does not reinstall Chromium, Python tools, or subtitle libraries. The first build, dependency changes, or an expired cache still take longer than a routine code update.
+AMD64 and ARM64 images build concurrently on native GitHub runners, with a separate persistent cache for each architecture. Each image passes the Unraid-style runtime and browser checks before upload; version and `latest` tags are published only after both images and the application tests succeed. Release metadata is added after dependency installation so a new version can reuse the Chromium and Python tool layers.
 
 For a manual validation or cache benchmark without publishing, run the workflow with **Publish image tags and create a release** disabled.
 

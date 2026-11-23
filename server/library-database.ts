@@ -1,7 +1,8 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
-import { SUBTITLE_LANGUAGES, subtitleLanguageCodes } from "./subtitles.js";
+import { pathToFileURL } from "node:url";
+import { isSubtitleLanguageCode, subtitleFilePath } from "./subtitles.js";
 
 export type MediaKind = "video" | "image";
 
@@ -62,16 +63,57 @@ type IndexedMedia = Omit<Media, "favorite" | "progressSeconds" | "completed" | "
 
 export class LibraryDatabase {
   readonly sqlite: DatabaseSync;
+  readonly databasePath: string;
   private closed = false;
 
   constructor(dataDir: string) {
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    const databaseFile = path.join(dataDir, "open-easyx-library.sqlite");
+    this.databasePath = path.resolve(dataDir, "open-easyx-library.sqlite");
     const legacyFile = path.join(dataDir, "easyx-viewer.sqlite");
-    if (!fs.existsSync(databaseFile) && fs.existsSync(legacyFile)) fs.copyFileSync(legacyFile, databaseFile);
-    this.sqlite = new DatabaseSync(databaseFile);
+    if (!fs.existsSync(this.databasePath) && fs.existsSync(legacyFile)) fs.copyFileSync(legacyFile, this.databasePath);
+    this.sqlite = new DatabaseSync(this.databasePath);
     this.sqlite.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
     this.migrate();
+    if (fs.existsSync(legacyFile) && fs.existsSync(path.join(dataDir, "subtitles"))) this.recoverLegacySubtitleTracks(legacyFile, dataDir);
+  }
+
+  private recoverLegacySubtitleTracks(legacyFile: string, dataDir: string) {
+    const marker = "recovered_legacy_subtitle_tracks_v1";
+    if (this.sqlite.prepare("SELECT 1 FROM settings WHERE key=?").get(marker)) return;
+    const legacyUrl = pathToFileURL(legacyFile);
+    legacyUrl.searchParams.set("mode", "ro");
+    // The former embedded worker continued to register tracks in the viewer database after the library was copied.
+    try {
+      this.sqlite.prepare("ATTACH DATABASE ? AS old_viewer").run(legacyUrl.href);
+      try {
+        this.sqlite.exec("SAVEPOINT recover_subtitles");
+        try {
+          const tables = this.sqlite.prepare("SELECT name FROM old_viewer.sqlite_schema WHERE type='table' AND name IN ('media','subtitle_tracks')").all();
+          if (tables.length === 2) {
+            const candidates = this.sqlite.prepare(`SELECT t.* FROM old_viewer.subtitle_tracks t
+              JOIN old_viewer.media old ON old.id=t.media_id
+              JOIN main.media m ON m.id=old.id AND m.relative_path=old.relative_path AND m.size=old.size AND m.modified_at=old.modified_at
+              WHERE m.kind='video' AND t.origin IN ('original','generated')
+              AND NOT EXISTS (SELECT 1 FROM main.subtitle_tracks s WHERE s.media_id=t.media_id AND s.id=t.id)
+              AND NOT EXISTS (SELECT 1 FROM main.subtitle_jobs j WHERE j.media_id=t.media_id AND j.status IN ('complete','no_audio','no_speech')
+                AND julianday(j.updated_at)>=julianday(t.updated_at))`).all();
+            const insert = this.sqlite.prepare("INSERT OR IGNORE INTO main.subtitle_tracks(id,media_id,language,label,origin,source_language,updated_at) VALUES(?,?,?,?,?,?,?)");
+            for (const track of candidates) {
+              let file: string;
+              try { file = subtitleFilePath(dataDir, String(track.media_id), String(track.id)); } catch { continue; }
+              if (fs.statSync(file, { throwIfNoEntry: false })?.isFile()) insert.run(track.id, track.media_id, track.language, track.label, track.origin, track.source_language, track.updated_at);
+            }
+          }
+          this.sqlite.prepare("INSERT INTO settings(key,value_json,updated_at) VALUES(?, 'true', ?)").run(marker, new Date().toISOString());
+          this.sqlite.exec("RELEASE recover_subtitles");
+        } catch (error) {
+          this.sqlite.exec("ROLLBACK TO recover_subtitles; RELEASE recover_subtitles");
+          throw error;
+        }
+      } finally { this.sqlite.exec("DETACH DATABASE old_viewer"); }
+    } catch (error) {
+      console.warn("Could not recover subtitle tracks from the legacy viewer database", error);
+    }
   }
 
   private migrate() {
@@ -387,14 +429,14 @@ export class LibraryDatabase {
     return { performers, sources };
   }
 
-  subtitleSettings(): SubtitleSettings {
+  subtitleSettings(defaultEnabled = false): SubtitleSettings {
     const row = this.sqlite.prepare("SELECT value_json FROM settings WHERE key='subtitles'").get() as { value_json: string } | undefined;
-    if (!row) return { enabled: false, languages: [] };
+    if (!row) return { enabled: defaultEnabled, languages: [] };
     try {
       const value = JSON.parse(row.value_json) as Partial<SubtitleSettings>;
       return {
         enabled: value.enabled === true,
-        languages: Array.isArray(value.languages) ? [...new Set(value.languages.filter((item): item is string => typeof item === "string" && subtitleLanguageCodes.has(item)))].sort() : [],
+        languages: Array.isArray(value.languages) ? [...new Set(value.languages.filter(isSubtitleLanguageCode))].sort() : [],
       };
     } catch { return { enabled: false, languages: [] }; }
   }
@@ -425,7 +467,7 @@ export class LibraryDatabase {
   setSubtitleSettings(value: SubtitleSettings) {
     const normalized: SubtitleSettings = {
       enabled: value.enabled === true,
-      languages: [...new Set(value.languages.filter((item) => subtitleLanguageCodes.has(item)))].sort(),
+      languages: [...new Set(value.languages.filter(isSubtitleLanguageCode))].sort(),
     };
     const stamp = new Date().toISOString();
     this.sqlite.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES('subtitles',?,?)
@@ -443,17 +485,17 @@ export class LibraryDatabase {
       }));
   }
 
-  subtitleStatus(mediaId: string) {
+  subtitleStatus(mediaId: string, generationEnabled: boolean) {
     const media = this.getMedia(mediaId);
     if (!media) return undefined;
     if (media.kind !== "video") return { status: "not_applicable", progress: 0, sourceLanguage: "", error: "", tracks: [] };
     const job = this.sqlite.prepare("SELECT * FROM subtitle_jobs WHERE media_id=?").get(mediaId) as Record<string, unknown> | undefined;
     const tracks = this.subtitleTracks(mediaId).map((track) => ({ ...track, url: `/api/media/${mediaId}/subtitles/${track.id}.vtt` }));
     return {
-      status: job ? String(job.status) : this.subtitleSettings().enabled ? "queued" : "disabled",
-      progress: job ? Number(job.progress) : 0,
+      status: generationEnabled ? String(job?.status ?? "queued") : "disabled",
+      progress: generationEnabled && job ? Number(job.progress) : 0,
       sourceLanguage: job ? String(job.source_language) : "",
-      error: job ? String(job.last_error) : "",
+      error: generationEnabled && job ? String(job.last_error) : "",
       tracks,
     };
   }
@@ -467,7 +509,19 @@ export class LibraryDatabase {
     return this.subtitleTracks(mediaId).find((track) => track.id === id);
   }
 
-  subtitleOverview() {
+  retrySubtitleJob(mediaId: string) {
+    return this.sqlite.prepare(`UPDATE subtitle_jobs SET status='queued', attempts=0, progress=0, last_error='', completed_at=NULL, updated_at=?
+      WHERE media_id=? AND status='error'`).run(new Date().toISOString(), mediaId).changes > 0;
+  }
+
+  setSubtitleWorkerState(state: "starting" | "error", error?: string) {
+    const heartbeat = new Date().toISOString();
+    this.sqlite.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES('subtitle_worker_runtime',?,?)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`)
+      .run(JSON.stringify({ state, error, heartbeat }), heartbeat);
+  }
+
+  subtitleOverview(settings: SubtitleSettings) {
     const counts = this.sqlite.prepare(`SELECT COUNT(*) total,
       SUM(CASE WHEN status='complete' THEN 1 ELSE 0 END) complete,
       SUM(CASE WHEN status IN ('queued','running') THEN 1 ELSE 0 END) pending,
@@ -476,9 +530,9 @@ export class LibraryDatabase {
     let worker: Record<string, unknown> = {};
     try { worker = runtime ? JSON.parse(runtime.value_json) as Record<string, unknown> : {}; } catch { /* Ignore a partial heartbeat write. */ }
     return {
-      settings: this.subtitleSettings(), languages: SUBTITLE_LANGUAGES,
+      settings,
       counts: { total: Number(counts.total ?? 0), complete: Number(counts.complete ?? 0), pending: Number(counts.pending ?? 0), errors: Number(counts.errors ?? 0) },
-      worker,
+      worker: settings.enabled ? worker : { state: "disabled" },
     };
   }
 }

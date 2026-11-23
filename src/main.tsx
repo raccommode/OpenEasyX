@@ -1,7 +1,7 @@
 import { SourceHardRefresh } from "./SourceHardRefresh.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, Box, Captions, Check, ChevronLeft, ChevronRight, CircleAlert, ClipboardPaste, CloudDownload, Database, Download, ArchiveRestore, ExternalLink, FolderOpen, Gauge, Globe2, HardDrive, LayoutDashboard, Link2, LoaderCircle, PackagePlus, Pause, Pencil, Play, Plug, Plus, RefreshCw, Search, Settings, ShieldCheck, Sparkles, Square, Terminal, Trash2, UserRound, Users, X } from "lucide-react";
+import { Activity, Box, Check, ChevronLeft, ChevronRight, CircleAlert, ClipboardPaste, CloudDownload, Database, Download, ArchiveRestore, ExternalLink, FolderOpen, Gauge, Globe2, HardDrive, LayoutDashboard, Link2, LoaderCircle, PackagePlus, Pause, Pencil, Play, Plug, Plus, RefreshCw, Search, Settings, ShieldCheck, Sparkles, Square, Terminal, Trash2, UserRound, Users, X } from "lucide-react";
 import { BackupSettings } from "./BackupSettings";
 import { api, ApiError } from "./api.js";
 import { PerformerMergeDialog, PerformerConflictNotice } from "./PerformerMergeDialog.js";
@@ -12,7 +12,6 @@ import { canonicalEntryPath, pageFromPath, pagePath, type PageKey } from "./rout
 import { LogsPage } from "./logs.js";
 import { isLibraryRoute, LibraryApp } from "./library-app.js";
 import { AppChrome } from "./AppChrome.js";
-import { SettingsPage as SubtitleSettingsPage } from "./SettingsPage.js";
 import { OutputSettings } from "./OutputSettings.js";
 import "./styles.css";
 import "./scraper.css";
@@ -24,6 +23,15 @@ import "./app-chrome.css";
 import "./settings-navigation.css";
 import "./performer-discovery.css";
 import "./responsive.css";
+
+const LOCAL_SUBTITLES_ID = "org.easyx.subtitles";
+type PluginPanelProps = { name: string; close: () => void; uninstall: () => Promise<void> };
+const settingsModules = import.meta.glob<{ default: React.ComponentType<PluginPanelProps> }>("../plugins/*/Settings.tsx");
+const bundledSettings = new Map(Object.entries(settingsModules).map(([file, load]) => {
+  const directory = file.split("/").at(-2);
+  const pluginId: string = `org.easyx.${directory}`;
+  return [pluginId, React.lazy(load)] as const;
+}));
 
 type Plugin = { manifest: { id: string; name: string; version: string; description: string; author: string; homepage?: string; capabilities: string[]; settings?: Array<{ key: string; label: string; type: string; required?: boolean; default?: unknown; placeholder?: string; help?: string; cookieDomains?: string[]; sessionFormat?: "cookies" | "raw-json" }>; browserAuth?: { loginUrl: string; sessionSetting: string; capture?: "cookies" | "onlyfans" | "manyvids" | "authorization-header"; requestDomains?: string[] }; sourceUrlPatterns?: string[]; fallback?: boolean; polling?: { mode: "periodic" | "live"; defaultIntervalSeconds: number; minimumIntervalSeconds: number } }; installed: boolean; enabled: boolean; config: Record<string, unknown>; origin: string };
 type PluginRepository = { id: string; name: string; url: string; official: boolean; removable: boolean; addedAt: string; updatedAt: string; pluginCount: number };
@@ -425,9 +433,12 @@ function ActivityPage({ performers, sources, run }: { performers: Performer[]; s
 }
 
 function PluginsPage({ plugins, repositories, run }: { plugins: Plugin[]; repositories: PluginRepository[]; run: (op: () => Promise<unknown>, msg: string) => Promise<void> }) {
-  const [configuring, setConfiguring] = useState<{ plugin: Plugin; installing: boolean } | null>(null);
-  const [query, setQuery] = useState("");
-  const [installationFilter, setInstallationFilter] = useState<"installed" | "available">("installed");
+  const linkedId = new URLSearchParams(window.location.search).get("plugin");
+  const linkedPlugin = plugins.find((plugin) => plugin.manifest.id === linkedId);
+  const [configuring, setConfiguring] = useState<{ plugin: Plugin; installing: boolean } | null>(() => linkedPlugin?.installed ? { plugin: linkedPlugin, installing: false } : null);
+  const SettingsPanel = configuring?.plugin.installed && configuring.plugin.origin === "official" ? bundledSettings.get(configuring.plugin.manifest.id) : undefined;
+  const [query, setQuery] = useState(linkedPlugin?.manifest.name ?? "");
+  const [installationFilter, setInstallationFilter] = useState<"installed" | "available">(linkedPlugin && !linkedPlugin.installed ? "available" : "installed");
   const [categoryFilter, setCategoryFilter] = useState<"all" | "sources" | "live" | "features">("all");
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [repositoryName, setRepositoryName] = useState("");
@@ -449,7 +460,16 @@ function PluginsPage({ plugins, repositories, run }: { plugins: Plugin[]; reposi
     .sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
   const row = (plugin: Plugin) => {
     const needsSetup = (plugin.manifest.settings ?? []).some((field) => field.required && plugin.config[field.key] === undefined && field.default === undefined);
-    const install = () => needsSetup ? setConfiguring({ plugin, installing: true }) : void run(() => api(`/api/plugins/${plugin.manifest.id}/install`, { method: "POST" }), `${plugin.manifest.name} installed and active`);
+    const install = () => {
+      if (needsSetup) { setConfiguring({ plugin, installing: true }); return; }
+      void run(async () => {
+        const installedPlugin = await api<Plugin>(`/api/plugins/${plugin.manifest.id}/install`, { method: "POST" });
+        if (installedPlugin.origin === "official" && bundledSettings.has(installedPlugin.manifest.id)) {
+          setInstallationFilter("installed");
+          setConfiguring({ plugin: installedPlugin, installing: false });
+        }
+      }, `${plugin.manifest.name} installed and active`);
+    };
     return <article className={`plugin-row ${plugin.installed ? "is-installed" : ""}`} key={plugin.manifest.id}>
       <PluginLogo plugin={plugin}/>
       <div className="plugin-row-copy"><div className="plugin-row-title"><h3>{plugin.manifest.name}</h3>{plugin.manifest.homepage && <a href={plugin.manifest.homepage} target="_blank" rel="noreferrer" title={`${plugin.manifest.name} homepage`}><ExternalLink size={13}/></a>}<span>v{plugin.manifest.version}</span></div><p>{plugin.manifest.description}</p></div>
@@ -476,7 +496,12 @@ function PluginsPage({ plugins, repositories, run }: { plugins: Plugin[]; reposi
       </nav>
       {visible.length ? <div className="plugin-list plugin-browser-list">{visible.map(row)}</div> : query ? <Empty icon={Plug} title="No plugins match" text="Try another search or category." action="Clear search" onAction={() => setQuery("")}/> : <Empty icon={Plug} title={installationFilter === "installed" ? "No installed plugins here" : "No uninstalled plugins here"} text="Choose another category to continue browsing." action={categoryFilter !== "all" ? "Show all categories" : undefined} onAction={categoryFilter !== "all" ? () => setCategoryFilter("all") : undefined}/>}
     </section>
-    {configuring && <PluginConfig plugin={configuring.plugin} installing={configuring.installing} close={() => setConfiguring(null)} run={run}/>} {/* Plugin configuration */}
+    {configuring && (SettingsPanel
+      ? <React.Suspense fallback={null}><SettingsPanel name={configuring.plugin.manifest.name} close={() => setConfiguring(null)} uninstall={() => run(async () => {
+        await api(`/api/plugins/${configuring.plugin.manifest.id}`, { method: "DELETE" });
+        setConfiguring(null);
+      }, `${configuring.plugin.manifest.name} uninstalled`)}/></React.Suspense>
+      : <PluginConfig plugin={configuring.plugin} installing={configuring.installing} close={() => setConfiguring(null)} run={run}/>)}
   </>;
 }
 
@@ -560,11 +585,10 @@ function PluginConfig({ plugin, installing, close, run }: { plugin: Plugin; inst
 function SettingsPage({ settings, run, setNotice, onSettingsChange }: { settings: Record<string, any>; run: (op: () => Promise<unknown>, msg: string) => Promise<void>; setNotice: (text: string) => void; onSettingsChange: (settings: Record<string, unknown>) => void }) {
   const [values, setValues] = useState(settings);
   useEffect(() => setValues(settings), [settings]);
-  const [category, setCategory] = useState<"automation" | "storage" | "subtitles" | "backup">("automation");
+  const [category, setCategory] = useState<"automation" | "storage" | "backup">("automation");
   const categories = [
     { key: "automation", label: "Automation", description: "Discovery and downloads", icon: Gauge },
     { key: "storage", label: "Storage", description: "Media location", icon: HardDrive },
-    { key: "subtitles", label: "Subtitles", description: "Local transcription", icon: Captions },
     { key: "backup", label: "Backup", description: "Export and import", icon: ArchiveRestore },
   ] as const;
   const saveAutomation = () => void run(() => api("/api/settings", { method: "PUT", body: JSON.stringify({ defaultScrapeIntervalMinutes: values.defaultScrapeIntervalMinutes, defaultLiveIntervalSeconds: values.defaultLiveIntervalSeconds, maxConcurrentDownloads: values.maxConcurrentDownloads, autoQueueDiscovered: values.autoQueueDiscovered, retentionDays: values.retentionDays }) }), "Settings saved");
@@ -576,7 +600,6 @@ function SettingsPage({ settings, run, setNotice, onSettingsChange }: { settings
         {category === "automation" && <section className="panel"><div className="panel-head"><div><p>AUTOMATION</p><h3>Scraping and downloads</h3></div></div><div className="form-stack"><label><span>Default periodic scrape interval (minutes)</span><input type="number" min="5" value={values.defaultScrapeIntervalMinutes ?? 360} onChange={(e) => setValues({ ...values, defaultScrapeIntervalMinutes: Number(e.target.value) })}/><small>Fallback for plugins that do not publish a recommended schedule. Each performer URL can override it.</small></label><label><span>Default live check interval (seconds)</span><input type="number" min="5" max="3600" value={values.defaultLiveIntervalSeconds ?? 10} onChange={(e) => setValues({ ...values, defaultLiveIntervalSeconds: Number(e.target.value) })}/><small>Reserved for live-aware plugins. A plugin can enforce a safer minimum interval.</small></label><label><span>Maximum concurrent downloads</span><input type="number" min="1" max={Number(values.maxConcurrentDownloadsLimit ?? 8)} value={values.maxConcurrentDownloads ?? 2} onChange={(e) => setValues({ ...values, maxConcurrentDownloads: Number(e.target.value) })}/><small>Keep this low on slower storage or connections.</small></label><label className="toggle-row"><span><b>Automatically queue discovered media</b><small>New items from every source are queued without review.</small></span><input type="checkbox" checked={!!values.autoQueueDiscovered} onChange={(e) => setValues({ ...values, autoQueueDiscovered: e.target.checked })}/></label><label><span>Retention period (days)</span><input type="number" min="0" value={values.retentionDays ?? 0} onChange={(e) => setValues({ ...values, retentionDays: Number(e.target.value) })}/><small>Reserved for retention policies. Use 0 to keep files indefinitely.</small></label></div><button className="primary" onClick={saveAutomation}><Check size={16}/>Save changes</button></section>}
         {category === "storage" && <OutputSettings settings={settings} setNotice={setNotice} onSaved={onSettingsChange}/>}
         {category === "backup" && <BackupSettings setNotice={setNotice} onImported={() => { void run(async () => {}, "Backup imported"); }}/>}
-        {category === "subtitles" && <div className="library-mode embedded-subtitle-settings"><SubtitleSettingsPage setNotice={setNotice} embedded/></div>}
       </div>
     </div>
   </section>;
@@ -589,6 +612,7 @@ const normalizedEntryPath = window.location.pathname.length > 1 ? window.locatio
 const entryPath = canonicalEntryPath(window.location.pathname);
 if (entryPath !== window.location.pathname) {
   const params = new URLSearchParams(window.location.search);
+  if (normalizedEntryPath === "/media-settings") params.set("plugin", LOCAL_SUBTITLES_ID);
   if (normalizedEntryPath === "/discover") params.set("discover", "1");
   const search = params.toString();
   window.history.replaceState(window.history.state, "", `${entryPath}${search ? `?${search}` : ""}${window.location.hash}`);

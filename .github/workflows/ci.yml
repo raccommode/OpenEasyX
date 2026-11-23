@@ -87,7 +87,7 @@ jobs:
       - run: npm run check
         env:
           NODE_OPTIONS: --no-experimental-webstorage
-      - run: python -m py_compile worker/subtitles.py
+      - run: python -m unittest discover -s plugins/subtitles -p 'test_*.py'
 
   image:
     name: Image (${{ matrix.arch }})
