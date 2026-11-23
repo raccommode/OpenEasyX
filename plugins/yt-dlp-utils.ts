@@ -146,7 +146,12 @@ export function ytDlpDownload(item: MediaCandidate, config: Record<string, unkno
     // HLS demuxer options make non-HLS inputs fail, so only pass them for
     // providers known to return HLS rather than for every live extractor.
     const retry = options.hls ? ["-rw_timeout", "15000000", ...ffmpegHlsRetryArgs()] : [];
-    if (retry.length) args.push("--downloader-args", `ffmpeg_i:${retry.join(" ")}`);
+    if (retry.length) {
+      const inputOptions = retry.join(" ");
+      // Alternate HLS renditions share a clock but can open on different segments.
+      // yt-dlp's per-input options replace the general options for that input.
+      args.push("--downloader-args", `ffmpeg_i:${inputOptions}`, "--downloader-args", `ffmpeg_i2:${inputOptions} -isync 0`);
+    }
   }
   args.push(extractorUrl);
   return { kind: "command", command: "yt-dlp", args, filename: item.filename ?? `${item.externalId}.mp4` };
