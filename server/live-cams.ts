@@ -15,6 +15,8 @@ export type LiveCamFavoriteSyncResult = {
   providerId: string; synced: number; added: number; removed: number; authoritative: boolean; skippedReason?: string;
 };
 
+type RecordingOptions = { recordingMaxHeight?: number; scraperPluginId?: string; scrapeEnabled?: boolean };
+
 type ProxyEntry = { url?: string; body?: string; headers: Record<string, string>; expiresAt: number };
 type ProviderResult = { items: PublicLiveCam[]; total: number; status: LiveCamProviderStatus };
 type LiveCamListQuery = LiveCamQuery & { providerId?: string; favoritesOnly?: boolean };
@@ -468,7 +470,13 @@ export class LiveCamService {
     };
   }
 
-  createPerformer(providerId: string, cam: LiveCam): { performer: Performer; source: Source; created: boolean; sourceCreated: boolean } {
+  createPerformer(providerId: string, cam: LiveCam) {
+    const result = this.upsertPerformer(providerId, cam);
+    this.saveImage?.(providerId, cam, result.performer);
+    return result;
+  }
+
+  private upsertPerformer(providerId: string, cam: LiveCam): { performer: Performer; source: Source; created: boolean; sourceCreated: boolean } {
     const entry = this.livePlugins(providerId)[0];
     if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
     if (!pluginMatchesSource(entry.manifest, cam.pageUrl)) throw Object.assign(new Error(`${entry.manifest.name} does not support this live URL`), { statusCode: 400 });
@@ -487,32 +495,55 @@ export class LiveCamService {
       : this.db.addSource(performer.id, providerId, {
         externalId: username, label: `${username} profile`, profileUrl, domain: new URL(profileUrl).hostname.replace(/^www\./i, ""),
       });
-    this.saveImage?.(providerId, cam, performer);
     return { performer, source, created: !existing, sourceCreated: !existingSource };
   }
 
-  record(providerId: string, cam: LiveCam): { itemId: string; status: string } {
-    const entry = this.livePlugins(providerId)[0];
-    if (!entry) throw Object.assign(new Error("The selected live-cam plugin is not installed"), { statusCode: 404 });
-    const plugin = this.plugins.get(providerId);
-    if (!entry.manifest.capabilities.includes("download-resolver") || !plugin.resolveDownload) {
-      throw Object.assign(new Error(`${entry.manifest.name} cannot record live streams`), { statusCode: 409 });
+  record(providerId: string, cam: LiveCam, options: RecordingOptions = {}): { itemId: string; status: string } {
+    this.db.sqlite.exec("BEGIN IMMEDIATE");
+    let recording;
+    try {
+      recording = this.queueRecording(providerId, cam, options);
+      this.db.sqlite.exec("COMMIT");
+    } catch (error) {
+      this.db.sqlite.exec("ROLLBACK");
+      throw error;
     }
-    if (!pluginMatchesSource(entry.manifest, cam.pageUrl)) throw Object.assign(new Error(`${entry.manifest.name} does not support this live URL`), { statusCode: 400 });
+    this.saveImage?.(providerId, cam, recording.performer);
+    return { itemId: recording.itemId, status: recording.status };
+  }
+
+  private queueRecording(providerId: string, cam: LiveCam, options: RecordingOptions) {
+    const { performer, source } = this.upsertPerformer(providerId, cam);
+    const scraperId = options.scraperPluginId ?? source.scraperPluginId ?? (options.scrapeEnabled ? providerId : undefined);
+    const recorder = scraperId ? this.plugins.getScraper(scraperId, cam.pageUrl) : this.plugins.get(providerId);
+    if (!recorder.manifest.capabilities.includes("download-resolver") || !recorder.resolveDownload) {
+      throw Object.assign(new Error(`${recorder.manifest.name} cannot record live streams`), { statusCode: 409 });
+    }
+    if ((options.scrapeEnabled ?? source.scrapeEnabled) && !recorder.listMedia) {
+      throw Object.assign(new Error(`${recorder.manifest.name} cannot list media for automatic scraping`), { statusCode: 409 });
+    }
+    const changedScraper = scraperId !== source.scraperPluginId;
+    if (changedScraper || options.scrapeEnabled !== undefined) {
+      this.db.updateSource(source.id, {
+        scraperPluginId: scraperId, scrapeEnabled: options.scrapeEnabled,
+        ...(changedScraper && scraperId ? { syncIntervalSeconds: this.plugins.scraperInterval(scraperId) } : {}),
+      });
+      if (changedScraper || (options.scrapeEnabled && !source.scrapeEnabled)) this.db.resetSourceSchedule(source.id);
+    }
     const username = cam.username.trim();
     const startedAt = new Date();
     const session = startedAt.toISOString().replace(/[:.]/g, "-");
-    const externalId = `manual-live:${username.toLowerCase()}:${session}`;
+    const externalId = `manual-live:${username.toLowerCase()}:${session}:${randomBytes(6).toString("hex")}`;
     const safeName = username.replace(/[^a-z0-9_.-]+/gi, "-").replace(/^-+|-+$/g, "") || "live";
-    const { performer, source } = this.createPerformer(providerId, cam);
-    this.db.ingestItems(source, [{
+    this.db.ingestItems({ ...source, scraperPluginId: scraperId }, [{
       externalId, title: cam.title ?? `${username} live`, pageUrl: cam.pageUrl, mediaType: "video",
-      publishedAt: startedAt.toISOString(), filename: `${safeName}-${session}.mp4`, metadata: { extractorUrl: cam.pageUrl, live: true },
+      publishedAt: startedAt.toISOString(), filename: `${safeName}-${session}.mp4`,
+      metadata: { extractorUrl: cam.pageUrl, live: true, recordingMaxHeight: options.recordingMaxHeight },
     }]);
     const item = this.db.getItemBySourceExternalId(source.id, externalId);
     if (!item) throw new Error("The live recording could not be added to the download queue");
     const queued = this.db.setItemStatus(item.id, "queued", { progress: 0 });
-    return { itemId: item.id, status: queued?.status ?? "queued" };
+    return { performer, itemId: item.id, status: queued?.status ?? "queued" };
   }
 
   async resolve(providerId: string, cam: LiveCam): Promise<{ streamUrl: string }> {

@@ -105,6 +105,21 @@ export class PluginManager {
     return plugin;
   }
 
+  getScraper(pluginId: string, profileUrl?: string) {
+    const entry = this.list().find((candidate) => candidate.manifest.id === pluginId);
+    if (!entry?.installed || !entry.enabled) throw Object.assign(new Error("Install and enable the selected scraper plugin first"), { statusCode: 409 });
+    if (!entry.manifest.capabilities.includes("media-listing")) throw Object.assign(new Error(`${entry.manifest.name} cannot scrape media URLs`), { statusCode: 409 });
+    if (profileUrl && !pluginMatchesSource(entry.manifest, profileUrl)) throw Object.assign(new Error(`${entry.manifest.name} does not support this URL`), { statusCode: 409 });
+    return this.get(pluginId);
+  }
+
+  scraperInterval(pluginId: string): number {
+    const manifest = this.get(pluginId).manifest;
+    if (manifest.polling?.mode === "live") return Math.max(manifest.polling.minimumIntervalSeconds, Number(this.db.getSettings().defaultLiveIntervalSeconds ?? manifest.polling.defaultIntervalSeconds));
+    if (manifest.polling) return manifest.polling.defaultIntervalSeconds;
+    return Math.max(300, Number(this.db.getSettings().defaultScrapeIntervalMinutes ?? 360) * 60);
+  }
+
   context(pluginId: string, signal?: AbortSignal, configOverride?: Record<string, unknown>): PluginContext {
     const state = this.db.getPluginState(pluginId);
     return {

@@ -496,6 +496,60 @@ describe("Open EasyX live cams", () => {
     expect(database.getItem(recording.itemId)).toMatchObject({ status: "queued", mediaType: "video", pageUrl: "https://live.test/alice", filename: expect.stringMatching(/^alice-.*\.mp4$/) });
   });
 
+  it("selects a recording plugin and schedules only the requested source", async () => {
+    const { database, plugins, service } = await fixture();
+    plugins.install("test.live"); plugins.install("org.easyx.viewer");
+    const alternate = plugins.get("org.easyx.viewer");
+    alternate.manifest.capabilities = ["media-listing", "download-resolver"];
+    alternate.manifest.sourceUrlPatterns = ["https://live.test/*"];
+    alternate.manifest.polling = { mode: "live", minimumIntervalSeconds: 15, defaultIntervalSeconds: 20 };
+    alternate.resolveDownload = plugins.get("test.live").resolveDownload;
+    alternate.listMedia = async () => [];
+    const cam = { id: "alice", username: "alice", pageUrl: "https://live.test/alice" };
+    const options = { scraperPluginId: alternate.manifest.id, recordingMaxHeight: 720, scrapeEnabled: true };
+    const first = database.getItem(service.record("test.live", cam, options).itemId)!;
+    expect(first).toMatchObject({ status: "queued", pluginId: alternate.manifest.id, metadata: { recordingMaxHeight: 720 } });
+    expect(database.dueSources()).toMatchObject([{ id: first.sourceId, pluginId: "test.live", scraperPluginId: alternate.manifest.id, scrapeEnabled: true, syncIntervalSeconds: 15 }]);
+
+    const second = database.getItem(service.record("test.live", cam).itemId)!;
+    expect(second.id).not.toBe(first.id);
+    expect(second.pluginId).toBe(alternate.manifest.id);
+    expect(second.metadata.recordingMaxHeight).toBeUndefined();
+    expect(database.getSource(first.sourceId)?.scrapeEnabled).toBe(true);
+
+    const third = service.record("test.live", cam, { scrapeEnabled: false, recordingMaxHeight: 0 });
+    expect(database.getItem(third.itemId)).toMatchObject({ status: "queued", metadata: { recordingMaxHeight: 0 } });
+    expect(database.getItem(first.id)?.metadata.recordingMaxHeight).toBe(720);
+    expect(database.dueSources()).toEqual([]);
+  });
+
+  it("rolls back the source and queue when a recording plugin cannot be used", async () => {
+    const { database, plugins, service } = await fixture();
+    plugins.install("test.live");
+    const cam = { id: "alice", username: "alice", pageUrl: "https://live.test/alice" };
+    expect(() => service.record("test.live", cam, { scraperPluginId: "test.missing" })).toThrow("Install and enable");
+    expect(() => service.record("test.live", cam, { scrapeEnabled: true })).toThrow("cannot scrape media URLs");
+    expect(database.listPerformers()).toEqual([]);
+    expect(database.listSources()).toEqual([]);
+    expect(database.listItems()).toEqual([]);
+
+    const provider = plugins.get("test.live");
+    provider.manifest.capabilities.push("media-listing");
+    provider.listMedia = async () => [];
+    const initial = service.record("test.live", cam, { scrapeEnabled: true });
+    const source = database.getSource(database.getItem(initial.itemId)!.sourceId)!;
+    expect(source).toMatchObject({ scraperPluginId: "test.live", scrapeEnabled: true });
+    plugins.install("org.easyx.viewer");
+    const alternate = plugins.get("org.easyx.viewer");
+    alternate.manifest.capabilities = ["media-listing"];
+    alternate.manifest.sourceUrlPatterns = ["https://other.test/*"];
+    expect(() => service.record("test.live", cam, { scraperPluginId: alternate.manifest.id })).toThrow("does not support this URL");
+    alternate.manifest.sourceUrlPatterns = ["https://live.test/*"];
+    expect(() => service.record("test.live", cam, { scraperPluginId: alternate.manifest.id })).toThrow("cannot record");
+    expect(database.getSource(source.id)).toEqual(source);
+    expect(database.listItems().map((item) => item.id)).toEqual([initial.itemId]);
+  });
+
   it("streams an initial snapshot and then updates as each provider completes", async () => {
     const { plugins, service } = await fixture(); plugins.install("org.easyx.viewer"); plugins.install("test.live");
     let release!: () => void;

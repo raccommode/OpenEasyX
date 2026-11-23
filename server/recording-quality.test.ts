@@ -50,7 +50,11 @@ describe("per-source recording quality", () => {
     expect(config.recordingMaxHeight).toBe(1080);
   });
 
-  it("passes the source's quality to the plugin that records it", async () => {
+  it.each([
+    { requestedHeight: undefined, expectedHeight: 480 },
+    { requestedHeight: 720, expectedHeight: 720 },
+    { requestedHeight: 0, expectedHeight: 0 },
+  ])("resolves the plugin at $expectedHeight when the request specifies $requestedHeight", async ({ requestedHeight, expectedHeight }) => {
     const dataDir = temp("easyx-quality-data"); const mediaDir = temp("easyx-quality-media"); const pluginDir = temp("easyx-quality-plugins");
     const packageDir = path.join(pluginDir, "test"); fs.mkdirSync(packageDir);
     const seen = path.join(pluginDir, "seen.json");
@@ -65,12 +69,12 @@ describe("per-source recording quality", () => {
         }
       };`);
     const db = new Database(dataDir); const manager = new PluginManager(db, [pluginDir]); await manager.load(); manager.install("test.quality", { cookiesFile: "/session.txt" });
-    const { itemId } = new LiveCamService(db, manager).record("test.quality", { id: "alice", username: "alice", pageUrl: "https://live.test/alice" });
+    const { itemId } = new LiveCamService(db, manager).record("test.quality", { id: "alice", username: "alice", pageUrl: "https://live.test/alice" }, { recordingMaxHeight: requestedHeight });
     db.updateSource(db.getItem(itemId)!.sourceId, { recordingMaxHeight: 480 });
     const queue = new DownloadQueue(db, manager, mediaDir); queue.start();
     try {
       await waitFor(() => fs.existsSync(seen));
-      expect(JSON.parse(fs.readFileSync(seen, "utf8"))).toEqual({ cookiesFile: "/session.txt", recordingMaxHeight: 480 });
+      expect(JSON.parse(fs.readFileSync(seen, "utf8"))).toEqual({ cookiesFile: "/session.txt", recordingMaxHeight: expectedHeight });
       expect(db.getPluginState("test.quality").config).toEqual({ cookiesFile: "/session.txt" });
       await waitFor(() => ["completed", "failed"].includes(db.getItem(itemId)?.status ?? ""));
     } finally { queue.stop(); db.close(); }

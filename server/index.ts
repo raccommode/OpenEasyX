@@ -8,7 +8,7 @@ import fastifyStatic from "@fastify/static";
 import pino from "pino";
 import { z } from "zod";
 import { Database, PERFORMER_PRIORITIES } from "./database.js";
-import { PluginManager, pluginMatchesSource } from "./plugin-manager.js";
+import { PluginManager } from "./plugin-manager.js";
 import { DownloadQueue } from "./downloader.js";
 import { discoverPeople } from "./discovery.js";
 import { deletePerformerFiles, ensurePerformerDirectory, renamePerformerDirectory } from "./performer-files.js";
@@ -88,7 +88,7 @@ app.setErrorHandler((error, request, reply) => {
 
 await app.register(fastifyHttpProxy, { upstream: "http://127.0.0.1:6080", prefix: "/browser", websocket: true });
 const library = registerLibraryRoutes(app, libraryDb, catalog, db, dataDir);
-const sourceSync = new SourceSync(db, mediaDir, ensureScraperPlugin, (id) => plugins.context(id), (ids) => queue.applyStoredMediaDates(ids));
+const sourceSync = new SourceSync(db, mediaDir, (id, url) => plugins.getScraper(id, url), (id) => plugins.context(id), (ids) => queue.applyStoredMediaDates(ids));
 registerPerformerMergeRoutes(app, db, libraryDb, dataDir, (id) => performerOperations.has(id) || performerRefreshStatus.running || discoveryStatus.running || db.listSources(id).some((source) => sourceSync.active.has(source.id)));
 
 app.get("/api/health", async () => ({ ok: true, product: "Open EasyX", version: appVersion, plugins: plugins.list().length, library: libraryDb.stats().total, scan: catalog.status }));
@@ -216,6 +216,7 @@ app.post<{ Params: { id: string }; Body: unknown }>("/api/plugins/:id/library/de
   return { deleted: true, itemId: item.id, status: item.status, relativePath: item.storagePath };
 });
 
+const recordingMaxHeightSchema = z.number().int().min(0).max(4320);
 const liveCamQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(48).default(24),
   providerId: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).optional()), search: z.string().trim().max(120).optional(),
@@ -280,8 +281,12 @@ app.post<{ Body: unknown }>("/api/live-cams/stream", async (request) => {
   return liveCams.resolve(body.providerId, body.cam);
 });
 app.post<{ Body: unknown }>("/api/live-cams/record", async (request) => {
-  const body = liveCamBodySchema.parse(request.body);
-  return liveCams.record(body.providerId, body.cam);
+  const { providerId, cam, ...options } = liveCamBodySchema.extend({
+    recordingMaxHeight: recordingMaxHeightSchema.optional(),
+    scraperPluginId: z.string().trim().min(1).optional(),
+    scrapeEnabled: z.boolean().optional(),
+  }).parse(request.body);
+  return liveCams.record(providerId, cam, options);
 });
 app.get<{ Params: { tokenPath: string }; Querystring: Record<string, unknown> }>("/api/live-cams/proxy/:tokenPath", async (request, reply) => {
   return liveCams.proxy(request.params.tokenPath, reply, request.query, typeof request.headers.range === "string" ? request.headers.range : undefined);
@@ -345,21 +350,6 @@ function ensureSourcePlugin(pluginId: string) {
   if (pluginId === manualPluginId) return;
   plugins.get(pluginId, false);
   if (!db.getPluginState(pluginId).installed) throw Object.assign(new Error("Install the selected plugin before associating it"), { statusCode: 409 });
-}
-
-function ensureScraperPlugin(pluginId: string, profileUrl?: string) {
-  const entry = plugins.list().find((candidate) => candidate.manifest.id === pluginId);
-  if (!entry?.installed || !entry.enabled) throw Object.assign(new Error("Install and enable the selected scraper plugin first"), { statusCode: 409 });
-  if (!entry.manifest.capabilities.includes("media-listing")) throw Object.assign(new Error(`${entry.manifest.name} cannot scrape media URLs`), { statusCode: 409 });
-  if (profileUrl && !pluginMatchesSource(entry.manifest, profileUrl)) throw Object.assign(new Error(`${entry.manifest.name} does not support this URL`), { statusCode: 409 });
-  return plugins.get(pluginId);
-}
-
-function scraperInterval(pluginId: string): number {
-  const manifest = plugins.list().find((candidate) => candidate.manifest.id === pluginId)?.manifest;
-  if (manifest?.polling?.mode === "live") return Math.max(manifest.polling.minimumIntervalSeconds, Number(db.getSettings().defaultLiveIntervalSeconds ?? manifest.polling.defaultIntervalSeconds));
-  if (manifest?.polling) return manifest.polling.defaultIntervalSeconds;
-  return Math.max(300, Number(db.getSettings().defaultScrapeIntervalMinutes ?? 360) * 60);
 }
 
 function validateScraperInterval(pluginId: string, intervalSeconds: number): number {
@@ -518,11 +508,11 @@ app.post<{ Params: { id: string }; Body: unknown }>("/api/performers/:id/sources
     scraperPluginId: z.string().min(1).optional(), scrapeEnabled: z.boolean().optional(), enabled: z.boolean().optional(), autoDownload: z.boolean().optional(),
   }).parse(request.body);
   ensureSourcePlugin(body.pluginId);
-  if (body.scraperPluginId) ensureScraperPlugin(body.scraperPluginId, body.profileUrl);
+  if (body.scraperPluginId) plugins.getScraper(body.scraperPluginId, body.profileUrl);
   if (body.scrapeEnabled && !body.scraperPluginId) throw Object.assign(new Error("Select a scraper plugin before enabling scraping"), { statusCode: 409 });
   const domain = domainFromUrl(body.profileUrl);
   const source = db.addSource(performer.id, body.pluginId, { externalId: body.profileUrl, profileUrl: body.profileUrl, domain, label: body.label || domain });
-  return db.updateSource(source.id, { scraperPluginId: body.scraperPluginId, scrapeEnabled: body.scrapeEnabled, enabled: body.enabled, autoDownload: body.autoDownload, ...(body.scraperPluginId ? { syncIntervalSeconds: scraperInterval(body.scraperPluginId) } : {}) });
+  return db.updateSource(source.id, { scraperPluginId: body.scraperPluginId, scrapeEnabled: body.scrapeEnabled, enabled: body.enabled, autoDownload: body.autoDownload, ...(body.scraperPluginId ? { syncIntervalSeconds: plugins.scraperInterval(body.scraperPluginId) } : {}) });
 });
 app.delete<{ Params: { id: string }; Body: unknown }>("/api/performers/:id", async (request) => {
   const performer = db.getPerformer(request.params.id);
@@ -543,18 +533,18 @@ app.patch<{ Params: { id: string }; Body: unknown }>("/api/sources/:id", async (
     scraperPluginId: z.union([z.string().min(1), z.null()]).optional(), scrapeEnabled: z.boolean().optional(),
     pluginId: z.string().min(1).optional(), label: z.string().trim().min(1).max(160).optional(), profileUrl: z.string().url().optional(), enabled: z.boolean().optional(),
     autoDownload: z.boolean().optional(), syncIntervalSeconds: z.number().int().min(5).max(31_536_000).optional(), syncIntervalMinutes: z.number().int().min(1).max(525600).optional(),
-    recordingMaxHeight: z.number().int().min(0).max(4320).optional(),
+    recordingMaxHeight: recordingMaxHeightSchema.optional(),
   }).parse(request.body);
   const current = db.getSource(request.params.id);
   if (!current) throw Object.assign(new Error("Source not found"), { statusCode: 404 });
   if (body.pluginId) ensureSourcePlugin(body.pluginId);
   const scraperPluginId = body.scraperPluginId === undefined ? current.scraperPluginId : body.scraperPluginId ?? undefined;
   const profileUrl = body.profileUrl ?? current.profileUrl;
-  if (scraperPluginId) ensureScraperPlugin(scraperPluginId, profileUrl);
+  if (scraperPluginId) plugins.getScraper(scraperPluginId, profileUrl);
   if (body.scrapeEnabled && !scraperPluginId) throw Object.assign(new Error("Select a scraper plugin before enabling scraping"), { statusCode: 409 });
   const requestedInterval = body.syncIntervalSeconds ?? (body.syncIntervalMinutes === undefined ? undefined : body.syncIntervalMinutes * 60);
   const syncIntervalSeconds = scraperPluginId
-    ? validateScraperInterval(scraperPluginId, requestedInterval ?? (body.scraperPluginId && body.scraperPluginId !== current.scraperPluginId ? scraperInterval(scraperPluginId) : current.syncIntervalSeconds))
+    ? validateScraperInterval(scraperPluginId, requestedInterval ?? (body.scraperPluginId && body.scraperPluginId !== current.scraperPluginId ? plugins.scraperInterval(scraperPluginId) : current.syncIntervalSeconds))
     : current.syncIntervalSeconds;
   const { syncIntervalMinutes: _legacyInterval, ...patch } = body;
   const values = { ...patch, syncIntervalSeconds, ...(body.scraperPluginId === null ? { scraperPluginId: null, scrapeEnabled: false } : {}), ...(body.profileUrl ? { domain: domainFromUrl(body.profileUrl) } : {}) };

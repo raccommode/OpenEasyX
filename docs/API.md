@@ -37,6 +37,32 @@ Password fields are returned as `••••••••`. Sending that sentine
 
 There is no Viewer bridge plugin. The media library, live service, queue, and plugin manager run in the same Open EasyX server.
 
+## Starting a live recording
+
+Send `POST /api/live-cams/record` with the room's `providerId` and `cam` from `GET /api/live-cams`. A successful request returns `{ "itemId": "...", "status": "queued" }`.
+
+```json
+{
+  "providerId": "org.easyx.chaturbate",
+  "cam": {
+    "id": "example",
+    "username": "example",
+    "pageUrl": "https://chaturbate.com/example/"
+  },
+  "recordingMaxHeight": 720,
+  "scraperPluginId": "org.easyx.chaturbate",
+  "scrapeEnabled": true
+}
+```
+
+| Optional field | Effect |
+| --- | --- |
+| `recordingMaxHeight` | Select the native quality for this recording. Use an integer height from 1 to 4320, or `0` for the best available. Omit the field to use the source's quality setting or the plugin default. The plugin determines which variants it can capture. |
+| `scraperPluginId` | Select the plugin that records this job and assign it to this source for future scans. It must be installed, support the room URL, list media and resolve downloads. Omit it to use the source's assigned scraper, falling back to the room provider. |
+| `scrapeEnabled` | Set to `true` to enable scheduled scans for the room, or `false` for a manual recording with future scans disabled. Omit it to preserve the existing schedule. New sources start with automatic scraping off. Enabling it on a source without an assigned scraper selects the room provider if compatible. |
+
+Automatic scans follow the existing auto-download policy. To change the default quality for future recordings of this source, send `recordingMaxHeight` to `PATCH /api/sources/:id`.
+
 ## Discovery and library
 
 | Method | Path | Purpose |
@@ -96,7 +122,7 @@ The former single-match `{ "pluginId", "candidate" }` body remains supported. Di
 | `GET` | `/api/items` | List up to 500 recent media items |
 | `POST` | `/api/items/:id/queue` | Queue an available or failed item |
 
-`pluginId` records the provider that discovered a URL. It is provenance and is never replaced by scraper assignment. New URLs always have no `scraperPluginId` and remain `Reference only`; installing a plugin never assigns it to existing sources. `scraperPluginId` is selected manually for one URL and must name an installed plugin that declares `media-listing` and whose `sourceUrlPatterns` match the URL. `scrapeEnabled` explicitly includes or excludes only that URL from scheduled scraping. Clearing `scraperPluginId` also disables scraping.
+`pluginId` records the provider that discovered a URL. It is provenance and is never replaced by scraper assignment. New URLs default to `Reference only` until a scraper is selected. Installing a plugin leaves existing source assignments unchanged. `scraperPluginId` is selected manually for one URL and must name an installed plugin that declares `media-listing` and whose `sourceUrlPatterns` match the URL. `scrapeEnabled` explicitly includes or excludes only that URL from scheduled scraping. Clearing `scraperPluginId` also disables scraping.
 
 `syncIntervalSeconds` is the per-URL schedule. The selected plugin can publish a recommended default and a safe minimum. Values down to five seconds are supported for live-aware plugins. The legacy `syncIntervalMinutes` patch field remains accepted and is converted to seconds.
 

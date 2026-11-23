@@ -18,10 +18,13 @@ import { canMatchVideoExcerpt, fingerprintVideo, verifyVideoContainment, videoFi
 import type { Source } from "./database.js";
 
 /**
- * Plugin config for one download, with the source's recording quality applied. A
- * source set to automatic (0) keeps the plugin's own setting (normally highest).
+ * A requested height applies only to this job, including 0 for the highest quality.
+ * Without an override, sources set to automatic keep the plugin default.
  */
-export function recordingConfig(config: Record<string, unknown>, source: Pick<Source, "recordingMaxHeight">): Record<string, unknown> {
+export function recordingConfig(config: Record<string, unknown>, source: Pick<Source, "recordingMaxHeight">, requestedHeight?: unknown): Record<string, unknown> {
+  if (typeof requestedHeight === "number" && Number.isInteger(requestedHeight) && requestedHeight >= 0 && requestedHeight <= 4320) {
+    return { ...config, recordingMaxHeight: requestedHeight };
+  }
   return source.recordingMaxHeight > 0 ? { ...config, recordingMaxHeight: source.recordingMaxHeight } : config;
 }
 
@@ -266,7 +269,8 @@ export class DownloadQueue {
       if (!performer || !source) throw new Error("The performer or source no longer exists");
       const settings = outputSettings(this.db.getSettings());
       const resolutionController = new AbortController(); control.abort = resolutionController;
-      const request = await plugin.resolveDownload(this.plugins.context(item.pluginId, resolutionController.signal, recordingConfig(this.db.getPluginState(item.pluginId).config, source)), {
+      const config = recordingConfig(this.db.getPluginState(item.pluginId).config, source, item.metadata.live === true ? item.metadata.recordingMaxHeight : undefined);
+      const request = await plugin.resolveDownload(this.plugins.context(item.pluginId, resolutionController.signal, config), {
         externalId: item.externalId, identityKey: item.identityKey, title: item.title, pageUrl: item.pageUrl,
         mediaType: item.mediaType as any, filename: item.filename, qualityScore: item.qualityScore,
         expectedBytes: item.expectedBytes, publishedAt: item.publishedAt, metadata: item.metadata,
