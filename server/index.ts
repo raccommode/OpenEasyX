@@ -16,7 +16,7 @@ import { domainFromUrl } from "./utils.js";
 import { BrowserLoginManager } from "./browser-login.js";
 import { LogStore, type LogWriter } from "./log-store.js";
 import { LiveCamImages } from "./live-cam-images.js";
-import { LiveCamService } from "./live-cams.js";
+import { LiveCamService, liveCamProfileAge } from "./live-cams.js";
 import { restoreLiveCamPerformers } from "./live-cam-restore.js";
 import { PluginRepositoryManager } from "./plugin-repositories.js";
 import { LibraryDatabase } from "./library-database.js";
@@ -78,7 +78,8 @@ function refreshLiveCamFavorites(providerId?: string) {
 }
 
 app.setErrorHandler((error, request, reply) => {
-  const status = typeof (error as { statusCode?: unknown }).statusCode === "number" ? Number((error as { statusCode: number }).statusCode) : 500;
+  const statusCode = (error as { statusCode?: unknown }).statusCode;
+  const status = typeof statusCode === "number" ? statusCode : error instanceof z.ZodError ? 400 : 500;
   const message = error instanceof Error ? error.message : String(error);
   app.log[status >= 500 ? "error" : "warn"]({ err: error, method: request.method, url: request.url, scope: "http" }, "Request failed");
   reply.status(status >= 400 && status < 600 ? status : 500).send({ error: message,
@@ -226,7 +227,7 @@ const liveCamBodySchema = z.object({
   cam: z.object({
     id: z.string().trim().min(1).max(300), username: z.string().trim().min(1).max(160), title: z.string().max(300).optional(),
     pageUrl: z.string().url().max(4096), thumbnailUrl: z.string().url().max(4096).optional(), profileImageUrl: z.string().url().max(4096).optional(), viewers: z.number().int().min(0).optional(),
-    age: z.number().int().min(18).max(120).optional(), gender: z.string().max(40).optional(), tags: z.array(z.string().max(80)).max(50).optional(),
+    age: z.number().int().min(18).optional().transform(liveCamProfileAge), gender: z.string().max(40).optional(), tags: z.array(z.string().max(80)).max(50).optional(),
   }),
 });
 

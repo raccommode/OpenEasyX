@@ -21,6 +21,9 @@ type LiveCamListQuery = LiveCamQuery & { providerId?: string; favoritesOnly?: bo
 
 function text(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function whole(value: unknown): number { const parsed = Number(value); return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0; }
+export function liveCamProfileAge(age: number | undefined): number | undefined {
+  return age !== undefined && age > 120 ? undefined : age;
+}
 function usernameFromUrl(value: string): string {
   try { return new URL(value).pathname.split("/").filter(Boolean).at(-1)?.replace(/^@/, "") || "live"; }
   catch { return "live"; }
@@ -66,7 +69,7 @@ export class LiveCamService {
     const { performerId: _previousPerformerId, ...unlinkedCam } = cam;
     const performer = this.findPerformer(cam.providerId, cam, performers);
     if (performer) this.saveImage?.(cam.providerId, cam, performer);
-    return { ...unlinkedCam, ...(performer ? { performerId: performer.id } : {}) };
+    return { ...unlinkedCam, age: liveCamProfileAge(cam.age), ...(performer ? { performerId: performer.id } : {}) };
   }
 
   private livePlugins(providerId?: string) {

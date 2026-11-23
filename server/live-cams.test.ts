@@ -24,6 +24,18 @@ async function fixture() {
 }
 
 describe("Open EasyX live cams", () => {
+  it("omits implausibly high profile ages from room lists and details", async () => {
+    const { plugins, service } = await fixture();
+    plugins.install("test.live");
+    const cams = [18, 120, 504].map((age) => ({
+      id: `cam${age}`, username: `cam${age}`, pageUrl: `https://live.test/cam${age}`, age,
+    }));
+    plugins.get("test.live").listLiveCams = async () => ({ cams, total: 3, page: 1, pageSize: 24, pages: 1 });
+    const { items } = await service.list({ page: 1, pageSize: 24 });
+    expect(Object.fromEntries(items.map((cam) => [cam.id, cam.age]))).toEqual({ cam18: 18, cam120: 120, cam504: undefined });
+    expect((await service.get("test.live", "cam504")).age).toBeUndefined();
+  });
+
   it("keeps I/O responsive during a large favorite import and preserves a concurrent unfollow", async () => {
     const { database, plugins, service } = await fixture(); plugins.install("test.live");
     const cams = Array.from({ length: 300 }, (_, i) => ({ id: `bulk${i}`, username: `bulk${i}`, pageUrl: `https://live.test/bulk${i}`, online: true }));
