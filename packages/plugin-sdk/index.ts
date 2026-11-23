@@ -4,6 +4,7 @@ export type PluginCapability =
   | "media-listing"
   | "download-resolver"
   | "live-cam"
+  | "video-dubbing"
   | "subtitle-generation"
   | "library-hook";
 
@@ -29,6 +30,7 @@ export type PluginManifest = {
   capabilities: PluginCapability[];
   /** Supported import languages and translation targets for a subtitle-generation provider. */
   subtitleLanguages?: Array<{ code: string; label: string }>;
+  dubbingLanguages?: Array<{ code: string; label: string }>;
   settings?: SettingField[];
   browserAuth?: {
     loginUrl: string;
@@ -192,7 +194,18 @@ export type LiveStream = {
   contentType?: string;
 };
 
+export type DubbingJob = {
+  mediaId: string;
+  fingerprint: string;
+  source: string;
+  dataDir: string;
+  workDir: string;
+  output: string;
+  language: string;
+};
+
 export interface EasyXPlugin {
+  renderDub?(context: PluginContext, job: DubbingJob, report: (phase: string, progress: number) => void): Promise<"rendered" | "original" | "silent">;
   manifest: PluginManifest;
   testConnection?(context: PluginContext): Promise<{ ok: boolean; message: string }>;
   searchPeople?(context: PluginContext, query: string): Promise<PersonCandidate[]>;

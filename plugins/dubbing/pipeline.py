@@ -1,0 +1,69 @@
+import gc
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+from runtime import parent_watch, progress, provision, publish
+
+
+def release_models():
+    import torch
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
+def run(job):
+    data, work, source = (Path(job[key]).resolve() for key in ("dataDir", "workDir", "source"))
+    target = job["language"]
+    work.mkdir(parents=True, exist_ok=True)
+    audio = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index",
+                            "-of", "csv=p=0", str(source)], capture_output=True, text=True, check=True)
+    if not audio.stdout.strip():
+        return "silent"
+    os.environ.setdefault("HF_HOME", str(data / "dubbing-models" / "huggingface"))
+    os.environ.setdefault("TORCH_HOME", str(data / "dubbing-models" / "torch"))
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+    provision(data)
+    import torch
+    torch.set_num_threads(min(4, os.cpu_count() or 1))
+    from dialogue import separate_dialogue, transcribe
+    from voices import mix_voices, speak, translate
+
+    progress("Separating dialogue from original soundtrack", 2)
+    mix, dialogue = separate_dialogue(source, work)
+    release_models()
+    progress("Identifying speakers", 15)
+    cues = transcribe(dialogue, work, data / "subtitle-models")
+    release_models()
+    if not cues:
+        return "silent"
+    if all(c["language"] == target for c in cues):
+        return "original"
+    progress("Translating dialogue", 30)
+    texts = translate(cues, target, work/f"translation-{target}.json")
+    release_models()
+    wav_dir = work / f"voice-{target}"
+    wav_dir.mkdir(exist_ok=True)
+    speak(cues, texts, target, work, wav_dir)
+    release_models()
+    mixed = wav_dir / "soundtrack.wav"
+    progress("Mixing voices with original music and effects", 69)
+    mix_voices(mix, dialogue, cues, wav_dir, work, mixed)
+    from lips import render
+    changed = render(source, mixed, cues, wav_dir, Path(job["output"]), language=target, source_audio=mix)
+    progress(f"Lip synchronization applied to {changed} frames", 99)
+    # Keep shared analysis for other selected languages. Per-language PCM is only needed to resume an unfinished render.
+    import shutil
+    shutil.rmtree(wav_dir)
+    return "rendered"
+
+
+if __name__ == "__main__":
+    parent_watch()
+    publish(outcome=run(json.loads(sys.argv[1])))

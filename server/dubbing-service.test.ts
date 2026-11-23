@@ -1,0 +1,68 @@
+import { expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import Fastify from "fastify";
+import localDubbing from "../plugins/dubbing/index.js";
+import { Catalog } from "./catalog.js";
+import { Database } from "./database.js";
+import { LibraryDatabase } from "./library-database.js";
+import { PluginManager } from "./plugin-manager.js";
+import { SubtitleService } from "./subtitle-service.js";
+import { DubbingService } from "./dubbing-service.js";
+import { registerLibraryRoutes } from "./library-routes.js";
+import type { EasyXPlugin } from "../packages/plugin-sdk/index.js";
+
+it("publishes only finished versions, supports resuming a failed language and serves seekable video", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-lifecycle-"));
+  const mediaDir = path.join(root, "media");
+  const db = new Database(root);
+  const library = new LibraryDatabase(root);
+  const catalog = new Catalog(library, mediaDir, root, false);
+  const manager = new PluginManager(db, []);
+  let installed = false;
+  const gates = new Map<string, () => void>();
+  let fail = true;
+  const plugin: EasyXPlugin = { ...localDubbing, async renderDub({ signal }, job, report) {
+    report("Synthesizing", 55);
+    await new Promise<void>((resolve) => { gates.set(job.language, resolve); signal!.addEventListener("abort", () => resolve(), { once: true }); });
+    if (job.language === "es" && fail) throw new Error("Temporary model failure");
+    fs.writeFileSync(job.output, job.language + "-render");
+    return "rendered";
+  } };
+  vi.spyOn(manager, "dubbingProvider").mockImplementation(() => installed ? plugin : undefined);
+  const ctx = manager.context.bind(manager);
+  vi.spyOn(manager, "context").mockImplementation((...args) => ({ ...ctx(...args), config: { fr: true, es: true } }));
+  const dub = new DubbingService(library, manager, catalog, root);
+  const subtitles = new SubtitleService(library, manager, root, mediaDir, vi.fn());
+  const app = Fastify();
+  registerLibraryRoutes(app, library, catalog, db, root, subtitles, dub);
+  try {
+    fs.writeFileSync(path.join(mediaDir, "dialogue.mp4"), "original");
+    await catalog.scan();
+    const media = library.listMedia({}).items[0];
+    const url = `/api/media/${media.id}`;
+    dub.sync();
+    expect(dub.status(media)).toEqual({ installed: false, variants: [] });
+    installed = true;
+    dub.sync();
+    expect(dub.overview().current).toMatchObject({ progress: 55, language: "fr" });
+    expect((await app.inject(url+"/stream?dub=fr")).statusCode).toBe(404);
+    gates.get("fr")!();
+    await vi.waitFor(() => expect(dub.overview().current).toMatchObject({ language: "es" }));
+    const stream = await app.inject({ url: url+"/stream?dub=fr", headers: { range: "bytes=0-1" } });
+    expect([stream.statusCode, stream.body]).toEqual([206, "fr"]);
+    gates.get("es")!();
+    await vi.waitFor(() => expect(dub.overview().errors).toMatchObject([{ language: "es", error: "Temporary model failure" }]));
+    fail = false;
+    await app.inject({ method: "POST", url: url+"/dubbing/es/retry" });
+    gates.get("es")!();
+    await vi.waitFor(() => expect(dub.status(media).variants.every((v) => v.status === "ready")).toBe(true));
+    expect((await app.inject(url+"/stream?dub=es")).body).toBe("es-render");
+    library.sqlite.prepare("UPDATE media SET size=size+1 WHERE id=?").run(media.id);
+    expect((await app.inject(url+"/stream?dub=fr")).statusCode).toBe(404);
+  } finally {
+    await dub.close(); await subtitles.close(); await app.close(); library.close(); db.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -69,6 +69,10 @@ export class PluginManager {
       if (!Array.isArray(languages) || !languages.length || languages.some((item) => !isSubtitleLanguageCode(item?.code) || typeof item.label !== "string" || !item.label.trim())) throw new Error("Subtitle plugins must declare supported language codes and labels");
       if (new Set(languages.map((item) => item.code.toLowerCase())).size !== languages.length) throw new Error("Subtitle language codes must be unique");
     }
+    if (plugin.manifest.capabilities.includes("video-dubbing")) {
+      const languages = plugin.manifest.dubbingLanguages;
+      if (!plugin.renderDub || !languages?.length || languages.some(({ code, label }) => !isSubtitleLanguageCode(code) || !label)) throw new Error("Dubbing plugins must declare a renderer and target languages");
+    }
     if (plugin.manifest.fallback !== undefined && typeof plugin.manifest.fallback !== "boolean") throw new Error("Invalid plugin fallback flag");
     if (plugin.manifest.sourceUrlPatterns && (!plugin.manifest.sourceUrlPatterns.length || plugin.manifest.sourceUrlPatterns.some((pattern) => typeof pattern !== "string" || !pattern.trim()))) throw new Error("Invalid source URL patterns");
     if (plugin.manifest.polling && (!Number.isInteger(plugin.manifest.polling.defaultIntervalSeconds) || !Number.isInteger(plugin.manifest.polling.minimumIntervalSeconds) || plugin.manifest.polling.minimumIntervalSeconds < 5 || plugin.manifest.polling.defaultIntervalSeconds < plugin.manifest.polling.minimumIntervalSeconds)) throw new Error("Invalid plugin polling policy");
@@ -120,9 +124,17 @@ export class PluginManager {
     return this.get(pluginId);
   }
 
+  dubbingProvider() {
+    return this.activeProvider("video-dubbing");
+  }
+
   subtitleProvider() {
+    return this.activeProvider("subtitle-generation");
+  }
+
+  private activeProvider(capability: "video-dubbing" | "subtitle-generation") {
     for (const plugin of this.plugins.values()) {
-      if (!plugin.manifest.capabilities.includes("subtitle-generation")) continue;
+      if (!plugin.manifest.capabilities.includes(capability)) continue;
       const { installed, enabled } = this.db.getPluginState(plugin.manifest.id);
       if (installed && enabled) return plugin;
     }
@@ -246,6 +258,10 @@ export class PluginManager {
       if (active && active.manifest.id !== pluginId) {
         throw Object.assign(new Error(`Uninstall ${active.manifest.name} before installing another subtitle provider`), { statusCode: 409 });
       }
+    }
+    if (this.get(pluginId, false).manifest.capabilities.includes("video-dubbing")) {
+      const active = this.dubbingProvider();
+      if (active && active.manifest.id !== pluginId) throw Object.assign(new Error("Uninstall the current dubbing provider first"), { statusCode: 409 });
     }
     const previous = this.db.getPluginState(pluginId).config;
     const config = this.mergedConfig(pluginId, incoming, true);

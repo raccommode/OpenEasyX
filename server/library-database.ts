@@ -156,6 +156,17 @@ export class LibraryDatabase {
         value_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS video_dubs (
+        media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+        language TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL,
+        phase TEXT NOT NULL DEFAULT '',
+        progress REAL NOT NULL DEFAULT 0,
+        error TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY(media_id, language)
+      );
       CREATE TABLE IF NOT EXISTS subtitle_jobs (
         media_id TEXT PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
         fingerprint TEXT NOT NULL DEFAULT '',

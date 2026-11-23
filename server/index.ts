@@ -22,6 +22,7 @@ import { LibraryDatabase } from "./library-database.js";
 import { Catalog } from "./catalog.js";
 import { catalogScanIntervalMs, scheduleCatalogScans } from "./catalog-scheduler.js";
 import { registerLibraryRoutes } from "./library-routes.js";
+import { DubbingService } from "./dubbing-service.js";
 import { SubtitleService } from "./subtitle-service.js";
 import { settingsSchema } from "./output-settings.js";
 import { exportBackup, importBackup, parseBackup } from "./backup.js";
@@ -44,7 +45,12 @@ const catalog = new Catalog(libraryDb, mediaDir, dataDir, undefined, (relativePa
 const pluginRepositories = new PluginRepositoryManager(dataDir, path.resolve("plugins"), externalPluginsDir);
 const plugins = new PluginManager(db, pluginRepositories.roots(), path.join(dataDir, "sessions"), writeLog);
 await plugins.load();
+const dubbing = new DubbingService(libraryDb, plugins, catalog, dataDir);
 const subtitles = new SubtitleService(libraryDb, plugins, dataDir, mediaDir, writeLog);
+async function syncMediaPlugins() {
+  await subtitles.sync();
+  dubbing.sync();
+}
 const queue = new DownloadQueue(
   db, plugins, mediaDir, writeLog, (relativePath, replacedPath) => catalog.indexStoredMedia(relativePath, replacedPath),
   (item) => catalog.deleteStoredMedia(item.storagePath!),
@@ -101,7 +107,7 @@ app.setErrorHandler((error, request, reply) => {
 });
 
 await app.register(fastifyHttpProxy, { upstream: "http://127.0.0.1:6080", prefix: "/browser", websocket: true });
-const library = registerLibraryRoutes(app, libraryDb, catalog, db, dataDir, subtitles);
+const library = registerLibraryRoutes(app, libraryDb, catalog, db, dataDir, subtitles, dubbing);
 const sourceSync = new SourceSync(db, mediaDir, (id, url) => plugins.getScraper(id, url), (id) => plugins.context(id), (ids) => queue.applyStoredMediaDates(ids));
 registerPerformerMergeRoutes(app, db, libraryDb, dataDir, (id) => performerOperations.has(id) || performerRefreshStatus.running || discoveryStatus.running || db.listSources(id).some((source) => sourceSync.active.has(source.id)));
 
@@ -133,7 +139,7 @@ app.get("/api/plugin-repositories", async () => pluginRepositories.list());
 async function reloadPlugins() {
   plugins.setRoots(pluginRepositories.roots());
   await plugins.load();
-  await subtitles.sync();
+  await syncMediaPlugins();
   return plugins.list();
 }
 app.post<{ Body: { url?: unknown; name?: unknown } }>("/api/plugin-repositories", async (request) => {
@@ -153,14 +159,14 @@ app.delete<{ Params: { id: string } }>("/api/plugin-repositories/:id", async (re
 });
 app.post<{ Params: { id: string }; Body: Record<string, unknown> | undefined }>("/api/plugins/:id/install", async (request) => {
   plugins.install(request.params.id, request.body ?? {});
-  await subtitles.sync();
+  await syncMediaPlugins();
   liveCams.resetProviderSession(request.params.id);
   refreshLiveCamFavorites(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
 app.delete<{ Params: { id: string } }>("/api/plugins/:id", async (request) => {
   plugins.uninstall(request.params.id);
-  await subtitles.sync();
+  await syncMediaPlugins();
   await browserLogin.removeProfile(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
@@ -168,12 +174,12 @@ app.post<{ Params: { id: string }; Body: { enabled?: boolean } }>("/api/plugins/
   // Backwards-compatible endpoint for older clients. Disabling now means
   // uninstalling; enabling performs the same validated install operation.
   if (request.body?.enabled === false) plugins.uninstall(request.params.id); else plugins.install(request.params.id);
-  await subtitles.sync();
+  await syncMediaPlugins();
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
 });
 app.put<{ Params: { id: string }; Body: Record<string, unknown> }>("/api/plugins/:id/config", async (request) => {
   plugins.configure(request.params.id, request.body ?? {});
-  await subtitles.sync();
+  await syncMediaPlugins();
   liveCams.resetProviderSession(request.params.id);
   refreshLiveCamFavorites(request.params.id);
   return plugins.list().find((plugin) => plugin.manifest.id === request.params.id);
@@ -214,7 +220,7 @@ app.post<{ Params: { id: string }; Body: Record<string, unknown> | undefined }>(
   }
   const installed = db.getPluginState(request.params.id).installed;
   if (installed) plugins.configure(request.params.id, incoming); else plugins.install(request.params.id, incoming);
-  await subtitles.sync();
+  await syncMediaPlugins();
   liveCams.resetProviderSession(request.params.id);
   await browserLogin.removeProfile(request.params.id);
   refreshLiveCamFavorites(request.params.id);
@@ -629,7 +635,7 @@ app.post<{ Body: unknown; Querystring: { settings?: string; plugins?: string } }
   const backup = parseBackup(request.body);
   const off = (value?: string) => value === "0" || value === "false";
   const result = importBackup(db, plugins, backup, { settings: !off(request.query.settings), plugins: !off(request.query.plugins) });
-  await subtitles.sync();
+  await syncMediaPlugins();
   app.log.info({ scope: "backup", performers: result.performers, sourcesAdded: result.sources.added, sourcesSkipped: result.sources.skipped.length }, "Backup imported");
   return result;
 });
@@ -664,12 +670,12 @@ let stopCatalogScans: (() => void) | undefined;
 const shutdown = async () => {
   // A second signal while live recordings are being saved exits at once; they are recovered on the next start.
   if (shuttingDown) process.exit(0);
-  shuttingDown = true; stopCatalogScans?.(); await Promise.all([queue.shutdown(), subtitles.close()]);
+  shuttingDown = true; stopCatalogScans?.(); await Promise.all([queue.shutdown(), subtitles.close(), dubbing.close()]);
   await browserLogin.stop(); await app.close(); libraryDb.close(); db.close(); process.exit(0);
 };
 process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);
 await app.listen({ port, host: "0.0.0.0" });
-await subtitles.sync();
+await syncMediaPlugins();
 setTimeout(() => refreshLiveCamFavorites(), 500).unref();
 setInterval(() => refreshLiveCamFavorites(), 5 * 60_000).unref();
 stopCatalogScans = scheduleCatalogScans(catalog, scanIntervalMs, (error) => app.log.error(error, "Library scan failed"));

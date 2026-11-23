@@ -234,6 +234,7 @@ export class Catalog {
       path.join(this.dataDir, "playback-cache", `${mediaId}-h264-v1.mp4`),
     ];
     for (const file of cached) fs.rmSync(file, { force: true });
+    fs.rmSync(path.join(this.dataDir, "dubbing", mediaId), { recursive: true, force: true });
     fs.rmSync(path.join(this.dataDir, "subtitles", mediaId), { recursive: true, force: true });
     fs.rmSync(path.join(this.dataDir, "subtitles", "work", mediaId), { recursive: true, force: true });
   }

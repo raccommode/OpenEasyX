@@ -64,6 +64,7 @@ export type CastState = {
   device: string;
   remoteTime: number; remoteDuration: number; remotePaused: boolean;
   start: (localTime: number) => Promise<void>;
+  replaceSource: (streamUrl: string, mimeType: string, seconds: number, playing: boolean) => Promise<void>;
   stop: () => void;
   togglePlay: () => void;
   seek: (seconds: number) => void;
@@ -107,6 +108,18 @@ export function observeCastPlayer(framework: any, context: any, url: string, cal
     disposed = true;
     controller.removeEventListener(framework.RemotePlayerEventType.ANY_CHANGE, update);
   } };
+}
+
+function castRequest(chrome: any, media: CastMedia, seconds: number, playing: boolean) {
+  const info = new chrome.cast.media.MediaInfo(receiverUrl(media.streamUrl), media.mimeType || "video/mp4");
+  info.streamType = chrome.cast.media.StreamType.BUFFERED;
+  if (media.duration > 0) info.duration = media.duration;
+  info.metadata = new chrome.cast.media.GenericMediaMetadata();
+  info.metadata.title = media.title; info.metadata.subtitle = media.performer;
+  if (media.thumbnailUrl) info.metadata.images = [new chrome.cast.Image(receiverUrl(media.thumbnailUrl))];
+  const request = new chrome.cast.media.LoadRequest(info);
+  request.currentTime = seconds; request.autoplay = playing;
+  return request;
 }
 
 export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: CastMedia, notice: (message: string) => void, resumeLocal: (seconds: number, playing: boolean) => void): CastState {
@@ -187,14 +200,7 @@ export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: 
       catch (error) { if (String(error) !== "cancel") notice("No cast session could be started."); return; }
       if (remote.current !== binding || video.current !== element) return;
       const session = context.getCurrentSession(); if (!session) return;
-      const info = new chrome.cast.media.MediaInfo(url, media.mimeType || "video/mp4");
-      info.streamType = chrome.cast.media.StreamType.BUFFERED;
-      if (media.duration > 0) info.duration = media.duration;
-      info.metadata = new chrome.cast.media.GenericMediaMetadata();
-      info.metadata.title = media.title; info.metadata.subtitle = media.performer;
-      if (media.thumbnailUrl) info.metadata.images = [new chrome.cast.Image(receiverUrl(media.thumbnailUrl))];
-      const request = new chrome.cast.media.LoadRequest(info);
-      request.currentTime = localTime; request.autoplay = true;
+      const request = castRequest(chrome, media, localTime, true);
       try { await session.loadMedia(request); if (remote.current === binding && video.current === element) element?.pause(); }
       catch { notice("The TV could not play this file. Chromecast plays MP4 (H.264/AAC) and WebM; other formats need a re-encoding preset."); }
       return;
@@ -210,6 +216,13 @@ export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: 
       : "Casting from the player needs Chrome over HTTPS (for example via the Synology reverse proxy) or Safari (AirPlay). In Chrome you can also use ⋮ → Cast… to cast this tab.");
   };
 
+  const replaceSource = async (streamUrl: string, mimeType: string, seconds: number, playing: boolean) => {
+    const win = window as CastWindow;
+    const session = win.cast?.framework?.CastContext.getInstance().getCurrentSession();
+    if (session?.getMediaSession()?.media?.contentId !== receiverUrl(media.streamUrl)) throw new Error("The Cast session changed. Select the audio language again.");
+    await session.loadMedia(castRequest(win.chrome, { ...media, streamUrl, mimeType }, seconds, playing));
+  };
+
   const stop = () => { (window as CastWindow).cast?.framework?.CastContext.getInstance().endCurrentSession(true); };
   const togglePlay = () => remote.current?.controller.playOrPause();
   const seek = (seconds: number) => {
@@ -218,5 +231,5 @@ export function usePlayerCast(video: RefObject<HTMLVideoElement | null>, media: 
     current.controller.seek(); setRemoteTime(current.player.currentTime);
   };
 
-  return { available: chromecast || airplay || remotePlayback, casting, device, remoteTime, remoteDuration, remotePaused, start, stop, togglePlay, seek };
+  return { available: chromecast || airplay || remotePlayback, casting, device, remoteTime, remoteDuration, remotePaused, start, replaceSource, stop, togglePlay, seek };
 }

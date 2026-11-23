@@ -1,0 +1,9 @@
+omnivoice==0.2.1
+transformers==5.24.0
+faster-whisper==1.2.1
+av==16.1.0
+sentencepiece==0.2.2
+opencv-python-headless==4.12.0.88
+demucs-infer @ https://github.com/openmirlab/demucs-infer/archive/a8552bb9da29a56018ae2f1828d360cc60830b54.zip
+sherpa-onnx==2.0.3
+speechbrain==1.1.2

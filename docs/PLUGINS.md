@@ -65,6 +65,7 @@ IDs must be stable lowercase reverse-domain identifiers. Supported capabilities 
 - `live-cam`
 - `library-hook`
 - `subtitle-generation`
+- `video-dubbing`
 
 Only declare capabilities the plugin actually implements. `live-cam` exposes direct browser playback inside Open EasyX: implement `resolveLiveStream`, and implement `listLiveCams` when the provider offers a public room directory. Live plugins without a public directory can still contribute configured performer sources.
 
@@ -73,6 +74,8 @@ Providers with an exact room-status endpoint can also implement `getLiveCam(cont
 Library hooks can implement `afterDownload` for outbound notifications, `acceptLibraryDeletion` for inbound deletion notifications, or both. The core owns item state: an accepted relative path is matched to a completed download and recorded as `deleted` without exposing database access to plugin code.
 
 A `subtitle-generation` provider declares its supported languages in `manifest.subtitleLanguages` as an array of `{ code, label }` entries. It implements `importSubtitle(content)` to return validated WebVTT and `runSubtitleWorker(context, options)` to process indexed videos. Open EasyX supplies `dataDir`, `mediaDir`, the active library `databasePath` and the requested translation `languages`. The worker promise stays pending until the worker exits. On `context.signal` abort, stop child processes before resolving. The server waits for that shutdown before starting a worker with new settings. The official implementation in `plugins/subtitles/` shows the job and track schema.
+
+A `video-dubbing` provider declares `manifest.dubbingLanguages` as `{ code, label }` entries and a boolean setting for each language code. Implement `renderDub(context, job, report)` and observe `context.signal` for cancellation. Each job provides the source file, a shared working directory for that video and a temporary MP4 output path for one language. Call `report(phase, percent)` for settings progress. Return `rendered` once the MP4 is complete, `original` when the source is already in the target language, or `silent` when there is no translatable speech. The server publishes completed files and handles retries.
 
 Set `fallback: true` only for a deliberately generic parser such as Web Media. The interface suppresses a fallback when a source-specific plugin exists for that URL, so a generic HTML parser is not presented as equivalent to a working platform extractor.
 

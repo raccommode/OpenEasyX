@@ -29,15 +29,16 @@ WHISPER_MODEL = os.environ.get("EASYX_WHISPER_MODEL", "small")
 TRANSLATION_MODEL = os.environ.get("EASYX_TRANSLATION_MODEL", "facebook/nllb-200-distilled-600M")
 CHUNK_SECONDS = max(120, min(1800, int(os.environ.get("EASYX_SUBTITLE_CHUNK_SECONDS", "600"))))
 
+CATALOG = Path(__file__).resolve().parents[2] / "packages"
 LANGUAGES = {
     item["code"]: (item["label"], item["nllb"])
-    for item in json.loads(Path(__file__).with_name("languages.json").read_text(encoding="utf-8"))
+    for item in json.loads((CATALOG / "translation-languages.json").read_text(encoding="utf-8"))
 }
-# Whisper source codes and NLLB tokenizer language tags. Output choices stay in languages.json.
+# Whisper source codes and NLLB tokenizer language tags. Additional detected languages can be translated into the output choices.
 SOURCE_LANGUAGES = {
     **LANGUAGES,
     **{item["code"]: (item["label"], item["nllb"])
-       for item in json.loads(Path(__file__).with_name("source-languages.json").read_text(encoding="utf-8"))},
+       for item in json.loads((CATALOG / "other-speech-languages.json").read_text(encoding="utf-8"))},
 }
 DETECTION_THRESHOLD = 0.5
 

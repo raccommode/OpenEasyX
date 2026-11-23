@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { AlertTriangle, ArrowLeft, Cast, ChevronsLeft, ChevronsRight, FastForward, ZoomOut, Clock3, Grid3X3, Heart, LoaderCircle, Maximize, Minimize, Pause, Play, RefreshCw, Trash2, Volume2, VolumeX } from "lucide-react";
+import { dubbingStreamUrl, PlayerDubbing, useMediaDubbing } from "./PlayerDubbing";
 import { PlayerSubtitles, selectedSubtitleTrack, useMediaSubtitles } from "./PlayerSubtitles";
 import { api } from "./api";
 import { initialAutoplay, nextMediaId, PHOTO_AUTOPLAY_SECONDS } from "./playback";
@@ -43,7 +44,15 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
 }) {
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const surface = useRef<HTMLDivElement>(null); const lastSaved = useRef(0);
   const initialAudio = useRef(loadPlayerAudio());
-  const recoveryPosition = useRef<number | undefined>(undefined);
+  const recovery = useRef<{ seconds: number; playing: boolean } | undefined>(undefined);
+  const [dub, setDub] = useState<{ id: string; language: string }>();
+  const [compatibleId, setCompatibleId] = useState("");
+  const [switchingDub, setSwitchingDub] = useState(false);
+  const dubRequest = useRef(0);
+  const dubbing = useMediaDubbing(media.kind === "video" ? media.id : undefined);
+  const language = dub?.id === media.id ? dub.language : "";
+  const streamUrl = dubbingStreamUrl(media.streamUrl, language, compatibleId === media.id);
+  const mimeType = language || compatibleId === media.id ? "video/mp4" : media.mimeType;
   const [playbackError, setPlaybackError] = useState("");
   const [retry, setRetry] = useState(0);
   const [playing, setPlaying] = useState(false); const [waiting, setWaiting] = useState(false); const [controls, setControls] = useState(true);
@@ -53,30 +62,41 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   const [autoplay, setAutoplay] = useState(() => initialAutoplay(media.kind, autoStart, readPlayerPreference("open-easyx.autoplay")));
   const [photoRemaining, setPhotoRemaining] = useState(PHOTO_AUTOPLAY_SECONDS); const [photoReady, setPhotoReady] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [captionMenu, setCaptionMenu] = useState(false);
-  const captionMenuOpen = useRef(false); captionMenuOpen.current = captionMenu;
+  const [menu, setMenu] = useState<"audio" | "subtitles" | null>(null);
+  const menuOpen = useRef(false); menuOpen.current = !!menu;
   const [preferredTrack, setPreferredTrack] = useState(() => readPlayerPreference("open-easyx.subtitle-track") || "auto");
   const { state: subtitles, update: updateSubtitles } = useMediaSubtitles(media.kind === "video" ? media.id : undefined);
   const subtitleTrack = selectedSubtitleTrack(preferredTrack, subtitles?.tracks ?? [], subtitles?.targetLanguages);
   const [zoom, setZoom] = useState<ZoomState>(NO_ZOOM); const zoomRef = useRef(zoom); zoomRef.current = zoom; const zoomStart = useRef<ZoomState | undefined>(undefined);
   const [speedHold, setSpeedHold] = useState(false); const holdRate = useRef(1);
   const [seekFlash, setSeekFlash] = useState<{ side: GestureSide; seconds: number; key: number } | undefined>(undefined); const seekFlashTimer = useRef<number | undefined>(undefined);
-  const cast = usePlayerCast(video, media, setNotice, (seconds, resumePlaying) => {
+  const cast = usePlayerCast(video, { ...media, streamUrl, mimeType }, setNotice, (seconds, resumePlaying) => {
     const element = video.current; if (!element) return;
+    if (recovery.current || element.readyState === 0) {
+      recovery.current = { seconds, playing: resumePlaying };
+      return;
+    }
     element.currentTime = seconds; setCurrentTime(seconds);
     if (resumePlaying) safePlay(element);
   });
 
-  const compatibilityPlayback = useRef(false);
+  const restorePoint = (element: HTMLVideoElement) => recovery.current ?? {
+    seconds: Number.isFinite(element.currentTime) ? element.currentTime : currentTime,
+    playing: !element.paused,
+  };
   const useCompatiblePlayback = () => {
     const element = video.current;
-    if (!element || compatibilityPlayback.current) return false;
-    compatibilityPlayback.current = true;
-    recoveryPosition.current = Number.isFinite(element.currentTime) ? element.currentTime : 0;
+    if (!element || (!language && compatibleId === media.id)) return false;
+    recovery.current ??= { seconds: Number.isFinite(element.currentTime) ? element.currentTime : 0, playing: true };
+    element.autoplay = false;
     setPlaybackError(""); setWaiting(true); setPlaying(false);
-    setNotice("Preparing a browser-compatible video. This can take a while for long recordings.");
-    const url = new URL(media.streamUrl, window.location.href); url.searchParams.set("compatible", "1");
-    element.src = url.href; element.load();
+    if (language) {
+      setDub(undefined);
+      setNotice("This dubbed version could not be played. Returning to original audio.");
+    } else {
+      setCompatibleId(media.id);
+      setNotice("Preparing a browser-compatible video. This can take a while for long recordings.");
+    }
     return true;
   };
   const failPlayback = (message: string, tryCompatibility = false) => { if (tryCompatibility && useCompatiblePlayback()) return; setPlaybackError(message); setWaiting(false); setPlaying(false); video.current?.pause(); };
@@ -91,20 +111,20 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   };
   const reloadPlayback = () => {
     const element = video.current; if (!element) return;
-    recoveryPosition.current = Number.isFinite(element.currentTime) ? element.currentTime : currentTime;
+    recovery.current = { seconds: Number.isFinite(element.currentTime) ? element.currentTime : currentTime, playing: true };
     setPlaybackError(""); setWaiting(true); setPlaying(false);
     element.load();
   };
 
   const save = (completed = false, force = false) => {
-    const element = video.current; if (!element || !Number.isFinite(element.duration)) return Promise.resolve();
+    const element = video.current; if (!element || recovery.current || !Number.isFinite(element.duration)) return Promise.resolve();
     if (!force && !completed && Math.abs(element.currentTime - lastSaved.current) < 8) return Promise.resolve();
     lastSaved.current = element.currentTime;
     return api(`/api/media/${media.id}/progress`, { method: "PUT", body: JSON.stringify({ position: element.currentTime, duration: element.duration || media.duration || 0, completed }) }).catch((error) => setNotice(error.message));
   };
   const closeViewer = () => { void save(false, true); close(); };
   const autoHide = useRef<ReturnType<typeof createControlsAutoHide>>(undefined);
-  autoHide.current ??= createControlsAutoHide({ show: () => setControls(true), hide: () => setControls(false), paused: () => video.current?.paused ?? true, pinned: () => captionMenuOpen.current });
+  autoHide.current ??= createControlsAutoHide({ show: () => setControls(true), hide: () => setControls(false), paused: () => video.current?.paused ?? true, pinned: () => menuOpen.current });
   const reveal = () => autoHide.current?.reveal();
   const deleteCurrent = async () => {
     if (!remove || deleting) return;
@@ -170,7 +190,27 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     return { id: event.pointerId, x: event.clientX - rect.left, y: event.clientY - rect.top, pointerType: event.pointerType || "mouse", time: event.timeStamp || performance.now() };
   };
   const toggleMute = () => { const element = video.current; if (!element) return; element.muted = !element.muted; setMuted(element.muted); savePlayerAudio({ volume: element.volume, muted: element.muted }); };
-  const selectTrack = (id: string) => { setPreferredTrack(id); writePlayerPreference("open-easyx.subtitle-track", id); setCaptionMenu(false); };
+  const selectTrack = (id: string) => { setPreferredTrack(id); writePlayerPreference("open-easyx.subtitle-track", id); setMenu(null); };
+  const selectDub = async (nextLanguage: string) => {
+    const element = video.current;
+    if (!element || nextLanguage === language) { setMenu(null); return; }
+    const request = ++dubRequest.current;
+    const point = cast.casting ? { seconds: cast.remoteTime, playing: !cast.remotePaused } : restorePoint(element);
+    if (cast.casting) {
+      setSwitchingDub(true);
+      try {
+        const nextUrl = dubbingStreamUrl(media.streamUrl, nextLanguage, compatibleId === media.id);
+        await cast.replaceSource(nextUrl, nextLanguage || compatibleId === media.id ? "video/mp4" : media.mimeType, point.seconds, point.playing);
+      } catch (err) {
+        if (request === dubRequest.current) setNotice(err instanceof Error ? err.message : "The TV could not switch audio languages.");
+        return;
+      } finally { if (request === dubRequest.current) setSwitchingDub(false); }
+    }
+    if (request !== dubRequest.current) return;
+    recovery.current = { seconds: point.seconds, playing: !cast.casting && point.playing };
+    element.autoplay = false;
+    setDub({ id: media.id, language: nextLanguage }); setPlaybackError(""); setWaiting(true); setMenu(null);
+  };
   const toggleAutoplay = () => { const value = !autoplay; setAutoplay(value); writePlayerPreference("open-easyx.autoplay", String(value)); };
   const next = async () => {
     await save(true, true);
@@ -187,14 +227,18 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   }, [media.id, media.kind]);
   useEffect(() => {
     lastSaved.current = 0; autoHide.current?.cancel();
-    recoveryPosition.current = undefined; compatibilityPlayback.current = false; setPlaybackError("");
+    recovery.current = undefined; setDub(undefined); setCompatibleId(""); setPlaybackError(""); setSwitchingDub(false);
     if (media.kind === "video" && video.current) {
-      video.current.src = media.streamUrl; video.current.load();
+      video.current.autoplay = autoStart; video.current.src = media.streamUrl; video.current.load();
     }
     initialAudio.current = loadPlayerAudio(); setVolume(initialAudio.current.volume); setMuted(initialAudio.current.muted);
     setPlaying(false); setWaiting(false); setControls(true); setCurrentTime(media.progressSeconds || 0); setDuration(media.duration || 0); setBuffered(0);
-    setPhotoRemaining(PHOTO_AUTOPLAY_SECONDS); setPhotoReady(false); setCaptionMenu(false); setZoom(NO_ZOOM); setSpeedHold(false); setSeekFlash(undefined);
+    setPhotoRemaining(PHOTO_AUTOPLAY_SECONDS); setPhotoReady(false); setMenu(null); setZoom(NO_ZOOM); setSpeedHold(false); setSeekFlash(undefined);
+    return () => { dubRequest.current++; };
   }, [media.id]);
+  useEffect(() => {
+    if (language && dubbing && !dubbing.variants.some((variant) => variant.code === language && variant.status === "ready")) void selectDub("");
+  }, [dubbing, language]);
   useEffect(() => {
     if (media.kind !== "image") return;
     setPhotoRemaining(PHOTO_AUTOPLAY_SECONDS);
@@ -212,18 +256,21 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
       reload: reloadPlayback,
       failed: () => failPlayback("The video image is still frozen. Try reloading the video.", true),
     });
-  }, [media.id, media.kind, retry]);
+  }, [media.id, media.kind, streamUrl, retry]);
   useEffect(() => {
     video.current?.querySelectorAll("track").forEach((element) => {
       element.track.mode = element.dataset.trackId === subtitleTrack ? "showing" : "disabled";
     });
-  }, [subtitleTrack, subtitles?.tracks]);
+  }, [subtitleTrack, subtitles?.tracks, streamUrl]);
   useEffect(() => {
-    if (!subtitles?.pluginEnabled && !subtitles?.tracks.length) setCaptionMenu(false);
+    if (!subtitles?.pluginEnabled && !subtitles?.tracks.length) setMenu((open) => open === "subtitles" ? null : open);
   }, [subtitles]);
   useEffect(() => {
+    if (!dubbing?.variants.length) setMenu((open) => open === "audio" ? null : open);
+  }, [dubbing]);
+  useEffect(() => {
     const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && captionMenu) { setCaptionMenu(false); return; }
+      if (event.key === "Escape" && menu) { setMenu(null); return; }
       if (media.kind !== "video" || ["INPUT", "SELECT", "BUTTON"].includes((event.target as HTMLElement).tagName)) return;
       reveal();
       if (event.code === "Space" || event.key.toLowerCase() === "k") { event.preventDefault(); togglePlayback(); }
@@ -231,20 +278,29 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
       else if (event.key.toLowerCase() === "m") toggleMute(); else if (event.key.toLowerCase() === "f") void toggleFullscreen();
     };
     window.addEventListener("keydown", key); return () => window.removeEventListener("keydown", key);
-  }, [captionMenu, currentTime, media.id, media.kind, fullscreen, pageFullscreen, cast.casting, cast.remoteTime]);
+  }, [menu, currentTime, media.id, media.kind, fullscreen, pageFullscreen, cast.casting, cast.remoteTime]);
   // Reset timers and active holds when leaving this media, rather than on each timeupdate.
   useEffect(() => () => { autoHide.current?.cancel(); recognizer.current?.dispose(); window.clearTimeout(seekFlashTimer.current); }, [media.id]);
-  useEffect(() => { if (!captionMenu) reveal(); }, [captionMenu]);
+  useEffect(() => { if (!menu) reveal(); }, [menu]);
   useEffect(() => { reveal(); }, [fullscreen]);
 
   const progress = shownDuration ? Math.min(100, shownTime / shownDuration * 100) : 0; const bufferedProgress = duration && !cast.casting ? Math.min(100, buffered / duration * 100) : 0;
 
   return <article className="watch-page">
-    <div className="theater-stage">{media.kind === "video" ? <div ref={player} className={`custom-player ${pageFullscreen ? "page-fullscreen" : ""} ${controls || !shownPlaying ? "controls-visible" : "controls-hidden"} ${zoom.scale > 1 ? "zoomed" : ""}`} tabIndex={0} onPointerMove={(event) => { if (event.pointerType === "mouse") reveal(); }} onMouseLeave={() => shownPlaying && !captionMenu && setControls(false)}>
+    <div className="theater-stage">{media.kind === "video" ? <div ref={player} className={`custom-player ${pageFullscreen ? "page-fullscreen" : ""} ${controls || !shownPlaying ? "controls-visible" : "controls-hidden"} ${zoom.scale > 1 ? "zoomed" : ""}`} tabIndex={0} onPointerMove={(event) => { if (event.pointerType === "mouse") reveal(); }} onMouseLeave={() => shownPlaying && !menu && setControls(false)}>
       <div ref={surface} className="player-surface" onPointerDown={(event) => { if (event.button > 0) return; event.currentTarget.setPointerCapture?.(event.pointerId); recognizer.current?.down(gesturePoint(event)); }}
         onPointerMove={(event) => recognizer.current?.move(gesturePoint(event))} onPointerUp={(event) => recognizer.current?.up(gesturePoint(event))} onPointerCancel={(event) => recognizer.current?.cancel(gesturePoint(event))}
-        onContextMenu={(event) => { if (speedHold) event.preventDefault(); }}><video ref={video} style={zoom.scale > 1 ? { transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: "0 0" } : undefined} src={media.streamUrl} poster={media.thumbnailUrl} playsInline preload="metadata" autoPlay={autoStart}
-        onLoadedMetadata={(event) => { const element = event.currentTarget; const resumeAt = recoveryPosition.current; recoveryPosition.current = undefined; setDuration(element.duration || media.duration || 0); element.volume = initialAudio.current.volume; element.muted = initialAudio.current.muted; element.currentTime = resumeAt !== undefined ? Math.min(resumeAt, Number.isFinite(element.duration) ? Math.max(0, element.duration - 0.1) : resumeAt) : !media.completed && media.progressSeconds > 0 && media.progressSeconds < element.duration - 5 ? media.progressSeconds : 0; if ((resumeAt !== undefined || autoStart) && element.paused) safePlay(element); }}
+        onContextMenu={(event) => { if (speedHold) event.preventDefault(); }}><video ref={video} style={zoom.scale > 1 ? { transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: "0 0" } : undefined} src={streamUrl} poster={media.thumbnailUrl} playsInline preload="metadata" autoPlay={autoStart}
+        onLoadedMetadata={(event) => {
+          const element = event.currentTarget;
+          const pending = recovery.current; recovery.current = undefined;
+          setDuration(element.duration || media.duration || 0);
+          element.volume = initialAudio.current.volume; element.muted = initialAudio.current.muted;
+          if (pending) element.currentTime = Math.min(pending.seconds, Number.isFinite(element.duration) ? Math.max(0, element.duration - 0.1) : pending.seconds);
+          else element.currentTime = !media.completed && media.progressSeconds > 0 && media.progressSeconds < element.duration - 5 ? media.progressSeconds : 0;
+          if ((pending ? pending.playing : autoStart) && element.paused) safePlay(element);
+          else if (pending && !pending.playing) { element.pause(); setWaiting(false); }
+        }}
         onError={(event) => { const code = event.currentTarget.error?.code; failPlayback(code === 3 || code === 4 ? "This video could not be decoded. Its format may not be supported by this browser." : "The video could not be loaded. Check the connection and try again.", code === 3 || code === 4); }}
         onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); void save(); }} onProgress={(event) => { const element = event.currentTarget; if (element.buffered.length) setBuffered(element.buffered.end(element.buffered.length - 1)); }}
         onPlay={() => { setPlaying(true); reveal(); }} onPlaying={() => { setPlaying(true); setWaiting(false); setPlaybackError(""); }} onPause={() => { setPlaying(false); setWaiting(false); void save(false, true); }} onWaiting={() => setWaiting(true)} onCanPlay={() => setWaiting(false)}
@@ -260,7 +316,8 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
       <div className="player-controls" onClick={(event) => event.stopPropagation()} onPointerDown={reveal}><div className="player-timeline"><span className="player-buffered" style={{ width: `${bufferedProgress}%` }}/><span className="player-elapsed" style={{ width: `${progress}%` }}/><input type="range" min="0" max={shownDuration || 0} step="0.1" value={Math.min(shownTime, shownDuration || 0)} onChange={(event) => seek(Number(event.target.value))} aria-label="Video position"/></div>
         <div className="player-control-row"><div className="player-controls-left"><button className="player-icon-button" onClick={togglePlayback} aria-label={shownPlaying ? "Pause" : "Play"}>{shownPlaying ? <Pause fill="currentColor"/> : <Play fill="currentColor"/>}</button><div className="player-volume"><button className="player-icon-button" onClick={toggleMute} aria-label={muted || volume === 0 ? "Unmute" : "Mute"}>{muted || volume === 0 ? <VolumeX/> : <Volume2/>}</button><input aria-label="Volume" type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} onChange={(event) => { const element = video.current; if (!element) return; element.volume = Number(event.target.value); element.muted = element.volume === 0; }}/></div><span className="player-time"><b>{playerTime(shownTime)}</b><i>/</i><span>{playerTime(shownDuration)}</span></span></div>
           <div className="player-controls-right"><button className={`player-autoplay ${autoplay ? "active" : ""}`} aria-label="Autoplay" aria-pressed={autoplay} onClick={toggleAutoplay}><span>Auto</span><i/></button>
-            {subtitles && <PlayerSubtitles key={media.id} mediaId={media.id} state={subtitles} selected={subtitleTrack} automatic={preferredTrack === "auto"} open={captionMenu} toggle={() => { setCaptionMenu(!captionMenu); setControls(true); autoHide.current?.cancel(); }} select={selectTrack} update={updateSubtitles} setNotice={setNotice}/>}
+            <PlayerDubbing state={dubbing} selected={language} busy={switchingDub} open={menu === "audio"} toggle={() => { setMenu(menu === "audio" ? null : "audio"); setControls(true); autoHide.current?.cancel(); }} select={(code) => void selectDub(code)}/>
+            {subtitles && <PlayerSubtitles key={media.id} mediaId={media.id} state={subtitles} selected={subtitleTrack} automatic={preferredTrack === "auto"} open={menu === "subtitles"} toggle={() => { setMenu(menu === "subtitles" ? null : "subtitles"); setControls(true); autoHide.current?.cancel(); }} select={selectTrack} update={updateSubtitles} setNotice={setNotice}/>}
             <button className={`player-icon-button player-cast-button ${cast.casting ? "active" : ""} ${cast.available ? "" : "unavailable"}`} onClick={() => cast.casting ? cast.stop() : void cast.start(shownTime)} aria-label={cast.casting ? `Stop casting to ${cast.device}` : "Cast to a TV"} title={cast.casting ? `Casting to ${cast.device}` : cast.available ? "Cast to a TV" : "Cast (see how to enable it)"}><Cast/></button>
             <button className="player-icon-button" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{fullscreen ? <Minimize/> : <Maximize/>}</button></div></div></div>
     </div> : <div ref={player} className={`image-stage ${pageFullscreen ? "page-fullscreen" : ""}`}><img src={media.streamUrl} alt={media.title} onLoad={() => setPhotoReady(true)} onError={() => setPhotoReady(true)}/><div className="photo-controls"><div className="photo-timeline"><i style={{ width: `${autoplay && photoReady ? (PHOTO_AUTOPLAY_SECONDS - photoRemaining) / PHOTO_AUTOPLAY_SECONDS * 100 : 0}%` }}/></div><div className="photo-control-row"><span>{autoplay ? photoReady ? `Next item in ${photoRemaining}s` : "Loading photo…" : "Autoplay is off"}</span><div><button className={`player-autoplay ${autoplay ? "active" : ""}`} aria-label="Autoplay" aria-pressed={autoplay} onClick={toggleAutoplay}><span>Auto</span><i/></button><button className="player-icon-button" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{fullscreen ? <Minimize/> : <Maximize/>}</button></div></div></div></div>}</div>

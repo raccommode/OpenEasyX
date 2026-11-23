@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Catalog } from "./catalog.js";
 import type { Database } from "./database.js";
 import { LibraryDatabase, type LibraryQuery, type MediaKind } from "./library-database.js";
+import type { DubbingService } from "./dubbing-service.js";
 import type { SubtitleService } from "./subtitle-service.js";
 import { subtitleFilePath, writeManualSubtitle } from "./subtitles.js";
 
@@ -48,7 +49,7 @@ export function parseMediaRange(value: string, size: number): { start: number; e
   return { start, end: Math.min(requestedEnd, size - 1) };
 }
 
-export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, libraryDb: LibraryDatabase, catalog: Catalog, downloadDb: Database, dataDir: string, subtitles: SubtitleService) {
+export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, libraryDb: LibraryDatabase, catalog: Catalog, downloadDb: Database, dataDir: string, subtitles: SubtitleService, dubbing?: DubbingService) {
   const requiredMedia = (id: string) => {
     const media = libraryDb.getMedia(id);
     if (!media) throw Object.assign(new Error("Media not found"), { statusCode: 404 });
@@ -91,6 +92,14 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
     const languages: unknown[] = request.body.languages;
     if (!languages.every((item): item is string => typeof item === "string")) throw Object.assign(new Error("Languages must be an array of language codes"), { statusCode: 400 });
     return subtitles.configure({ enabled: request.body.enabled, languages });
+  });
+  app.get("/api/dubbing/status", async () => dubbing?.overview() ?? { languages: [], selected: [], current: null, errors: [] });
+  app.get<{ Params: { id: string } }>("/api/media/:id/dubbing", async ({ params }) => dubbing?.status(requiredMedia(params.id)) ?? { installed: false, variants: [] });
+  app.post<{ Params: { id: string; language: string } }>("/api/media/:id/dubbing/:language/retry", async ({ params }) => {
+    if (!dubbing) throw Object.assign(new Error("Dubbing is unavailable"), { statusCode: 409 });
+    const media = requiredMedia(params.id);
+    dubbing.retry(media, params.language);
+    return dubbing.status(media);
   });
   app.get("/api/subtitles/status", async () => subtitles.overview());
   app.get<{ Params: { id: string } }>("/api/media/:id/subtitles", async (request) => subtitles.mediaStatus(request.params.id) ?? requiredMedia(request.params.id));
@@ -151,9 +160,14 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
   });
 
   const sendMedia = async (request: FastifyRequest, reply: FastifyReply, id: string) => {
-    const media = requiredMedia(id); const playback = await catalog.playbackFile(media, (request.query as { compatible?: string }).compatible === "1"); const file = playback.file; let stat: fs.Stats;
+    const media = requiredMedia(id);
+    const { compatible, dub } = request.query as { compatible?: string; dub?: string };
+    const playback = dub === undefined ? await catalog.playbackFile(media, compatible === "1") : { file: dubbing?.file(media, dub), mimeType: "video/mp4" };
+    const file = playback.file;
+    if (!file) return reply.status(404).send({ error: "Dubbed version is unavailable" });
+    let stat: fs.Stats;
     try { stat = fs.statSync(file); } catch { throw Object.assign(new Error("Media file is not available"), { statusCode: 404 }); }
-    if (!stat.isFile() || stat.size <= 0) { libraryDb.markMediaUnplayable(media.id); throw Object.assign(new Error("Media file is not playable"), { statusCode: 404 }); }
+    if (!stat.isFile() || stat.size <= 0) { if (!dub) libraryDb.markMediaUnplayable(media.id); throw Object.assign(new Error("Media file is not playable"), { statusCode: 404 }); }
     const range = request.headers.range;
     reply.header("accept-ranges", "bytes").header("content-type", playback.mimeType).header("cache-control", "private, max-age=3600");
     if (!range) return reply.header("content-length", stat.size).send(fs.createReadStream(file));

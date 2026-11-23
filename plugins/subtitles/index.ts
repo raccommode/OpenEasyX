@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { definePlugin } from "../../packages/plugin-sdk/index.js";
 import { normalizeSubtitleContent } from "./import.js";
-import languages from "./languages.json" with { type: "json" };
+import languages from "../../packages/translation-languages.json" with { type: "json" };
 
 export default definePlugin({
   manifest: {

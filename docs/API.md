@@ -52,6 +52,18 @@ The official provider has the plugin ID `org.easyx.subtitles`. Use the standard 
 
 Settings updates and imports require an installed subtitle provider. Manual imports also work when automatic generation is paused.
 
+### Local Dubbing
+
+Install `org.easyx.dubbing` using the standard plugin endpoint. Save a boolean for each target language with `PUT /api/plugins/org.easyx.dubbing/config`, for example `{"fr":true,"es":true}`. The plugin processes indexed videos while at least one language is selected.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/dubbing/status` | Get supported and selected languages, active stage and failures |
+| `GET` | `/api/media/:id/dubbing` | Get the status of each language version, including completed renders |
+| `POST` | `/api/media/:id/dubbing/:language/retry` | Retry a failed selected language |
+| `GET` | `/api/media/:id/stream?dub=fr` | Stream the finished MP4 with HTTP range support |
+
+
 ## Starting a live recording
 
 Send `POST /api/live-cams/record` with the room's `providerId` and `cam` from `GET /api/live-cams`. A successful request returns `{ "itemId": "...", "status": "queued" }`.

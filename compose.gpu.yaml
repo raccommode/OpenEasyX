@@ -1,0 +1,5 @@
+services:
+  open-easyx:
+    gpus: all
+    environment:
+      EASYX_DUBBING_DEVICE: cuda

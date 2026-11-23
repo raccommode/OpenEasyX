@@ -109,6 +109,16 @@ The player’s **Automatic** option follows your selected language order and fal
 
 When upgrading from a version with built-in subtitles, install **Local Subtitles** to resume generation using your previous settings. The plugin reuses `/data/subtitles` and `/data/subtitle-models` and installs its Python packages under `/data/subtitle-runtime`. Outside Docker, use FFmpeg, FFprobe and Python 3.11 with virtual environment support. To use an interpreter with the plugin dependencies already installed, set `EASYX_SUBTITLE_PYTHON` to its executable path.
 
+### Local Dubbing
+
+Install **Local Dubbing** under **Plugins → Features & addons**. Open its settings and select the languages you want. Processing starts when you save a language and covers existing and newly indexed videos, one version at a time. The settings show the active step and any failures. Open a finished video and use the dubbing selector to switch between the original and the rendered versions.
+
+The plugin isolates dialogue, identifies speakers, translates their lines and synthesizes each voice from a reference in the same video. It mixes the new voices with the original background and synchronizes the mouths of identified on-screen speakers. Separation and speaker matching are estimates. Music under speech, overlapping voices, quick cuts and obscured mouths can affect the result. The original video stays available.
+
+Initial setup downloads Python packages and model weights. Inference runs on the server, including during voice cloning. Model files and the isolated Python environment live under `/data/dubbing-models` and `/data/dubbing-runtime`. Allow disk space for a new MP4 per selected language and temporary uncompressed audio for the current video. Completed versions remain playable after uninstall.
+
+On a native Apple Silicon Mac, supported stages use Metal. For a Linux host with NVIDIA Container Toolkit, run `docker compose -f compose.yaml -f compose.gpu.yaml up -d` to give the container GPU access. CPU processing is available. Native installations need Python 3.11 or 3.12, FFmpeg and FFprobe. `EASYX_DUBBING_PYTHON` can point to an already provisioned interpreter. Model and runtime references are listed in the [dubbing plugin notes](plugins/dubbing/README.md).
+
 ### Source plugins
 
 **ViralXXXPorn** supports public model video collections (`/models/<name>/`), search results (`/search/<query>/`), video lists, and individual `/video/<id>/...` and `/short/<id>/...` pages. Collection scans follow pagination up to **Maximum videos per scan** (100 by default). Downloads refresh the page's public MP4 link and select its highest available resolution. Photo albums and account-restricted videos are not supported.

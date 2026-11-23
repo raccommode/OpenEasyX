@@ -70,3 +70,7 @@
   .settings-page-heading h2 { font-size: 25px; }
   .settings-category-menu { grid-template-columns: 1fr; }
 }
+
+.dubbing-errors > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.dubbing-errors > div > span { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.dubbing-errors .quiet { flex: none; }
