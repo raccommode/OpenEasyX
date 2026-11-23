@@ -28,6 +28,7 @@ done
 # The dependency overrides must preserve the imports used by the authentication helper.
 docker exec "$container" /opt/ofscraper/bin/python -c 'from ofscraper.main.open import load; from ofscraper.data.api.init import getstatus; import idna, lxml.etree; print("OF-Scraper imports OK", idna.__version__, lxml.etree.LXML_VERSION)'
 docker exec "$container" sh -lc 'test "$(awk "/^Uid:/ { print \$2 }" /proc/1/status)" = 99 && test "$(cat /proc/1/comm)" = tini'
+docker exec --user 99:100 "$container" sh -c 'runtime_home=$(tr "\0" "\n" </proc/1/environ | sed -n "s/^HOME=//p"); test -d "$runtime_home" && test -w "$runtime_home"'
 docker exec "$container" sh -lc 'test -w /data && test -f /data/easyx.sqlite && test -f /data/open-easyx-library.sqlite'
 docker exec -e EXPECTED_VERSION="$version" "$container" node -e "fetch('http://127.0.0.1:3210/api/health').then(r=>r.json()).then(v=>{if(v.product!=='Open EasyX'||!v.ok||v.version!==process.env.EXPECTED_VERSION)throw Error(JSON.stringify(v))})"
 docker exec -e EXPECTED_VERSION="$version" "$container" node -e "fetch('http://127.0.0.1:3210/api/version').then(r=>r.json()).then(v=>{if(v.version!==process.env.EXPECTED_VERSION)throw Error(JSON.stringify(v))})"
@@ -38,6 +39,6 @@ docker cp scripts/browser-paste-smoke.mjs "$container:/tmp/browser-paste-smoke.m
 docker exec "$container" node /tmp/browser-paste-smoke.mjs
 docker exec "$container" node -e "fetch('http://127.0.0.1:3210/api/plugins/org.easyx.manyvids/browser-login',{method:'DELETE'}).then(r=>{if(!r.ok)throw Error('stop '+r.status)})"
 docker cp scripts/easyx-browser-fetch.test.py "$container:/tmp/easyx-browser-fetch.test.py"
-docker exec -e EASYX_BROWSER_FETCH_SCRIPT=/usr/local/bin/easyx-browser-fetch "$container" /opt/easyx/bin/python /tmp/easyx-browser-fetch.test.py
+docker exec --user 99:100 -e EASYX_BROWSER_FETCH_SCRIPT=/usr/local/bin/easyx-browser-fetch "$container" /opt/easyx/bin/python /tmp/easyx-browser-fetch.test.py
 sleep 1
 docker exec "$container" sh -lc 'if ps -eo stat | grep -q "^Z"; then exit 1; fi'

@@ -18,8 +18,19 @@ if [ "$(id -u)" = "0" ]; then
   chown -R "$puid:$pgid" "$data_dir"
   chown "$puid:$pgid" "$media_dir"
 
+  if ! setpriv --reuid="$puid" --regid="$pgid" --clear-groups sh -c '[ -d "${HOME:-}" ] && [ -w "$HOME" ] && [ -x "$HOME" ]'; then
+    HOME="/run/easyx-home-$puid"
+    install -d -m 0700 -o "$puid" -g "$pgid" "$HOME"
+    export HOME
+  fi
+
   umask 002
   exec setpriv --reuid="$puid" --regid="$pgid" --clear-groups /usr/bin/tini -- "$@"
+fi
+
+if [ ! -d "${HOME:-}" ] || [ ! -w "$HOME" ] || [ ! -x "$HOME" ]; then
+  HOME=$(mktemp -d "${TMPDIR:-/tmp}/easyx-home.XXXXXXXX")
+  export HOME
 fi
 
 exec /usr/bin/tini -- "$@"

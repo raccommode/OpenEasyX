@@ -31,6 +31,12 @@ class FavoritesBrowserTests(unittest.TestCase):
             def do_GET(self):
                 path = urlparse(self.path)
                 cls.requests.append(path.path)
+                if path.path == "/room":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(b'<!doctype html><script>fetch("/stream.m3u8")</script>')
+                    return
                 if path.path == "/favorites":
                     state = '<script>window.__PRELOADED_STATE__={userSession:{currentUser:{id:77}}}</script>' if cls.mode == "legacy" else ""
                     self.send_response(200)
@@ -75,6 +81,13 @@ class FavoritesBrowserTests(unittest.TestCase):
         return subprocess.run([sys.executable, HELPER, "--stripchat-favorites", self.cookies],
                               env={**os.environ, "EASYX_STRIPCHAT_FAVORITES_URL": f"http://127.0.0.1:{self.server.server_port}/favorites"},
                               capture_output=True, text=True, timeout=30, check=False)
+
+    def test_capture_media_with_an_unwritable_home(self):
+        base = f"http://127.0.0.1:{self.server.server_port}"
+        result = subprocess.run([sys.executable, HELPER, "--capture-media", base + "/room"],
+                                env={**os.environ, "HOME": "/root"}, capture_output=True, text=True, timeout=45)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["url"], base + "/stream.m3u8")
 
     def test_modern_account_uses_imported_cookies_and_dynamic_identity(self):
         result = self.read("modern")

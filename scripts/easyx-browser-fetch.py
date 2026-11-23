@@ -22,6 +22,15 @@ MEDIA_URL_RE = re.compile(
 )
 
 
+def browser_environment(profile: str) -> dict[str, str]:
+    env = {**os.environ, "LANG": "en_US.UTF-8"}
+    home = env.get("HOME", "")
+    if not os.path.isdir(home) or not os.access(home, os.W_OK | os.X_OK):
+        # The private temporary profile is removed after this Chromium process exits.
+        env["HOME"] = profile
+    return env
+
+
 def rendered_html(url: str) -> str:
     executable = next(
         (value for value in (shutil.which("chromium"), shutil.which("chromium-browser"), shutil.which("google-chrome")) if value),
@@ -48,7 +57,7 @@ def rendered_html(url: str) -> str:
             capture_output=True,
             text=True,
             timeout=75,
-            env={**os.environ, "LANG": "en_US.UTF-8"},
+            env=browser_environment(profile),
             check=False,
         )
     if result.returncode != 0 or not result.stdout.strip():
@@ -268,7 +277,7 @@ def captured_media(url: str, cookies_file: str | None = None) -> str:
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            env={**os.environ, "LANG": "en_US.UTF-8"},
+            env=browser_environment(profile),
         )
         try:
             page = None
@@ -431,7 +440,7 @@ def stripchat_favorite(url: str, cookies_file: str, model_id: int, follow: bool)
         process = subprocess.Popen([
             executable, "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
             "--remote-allow-origins=*", f"--remote-debugging-port={port}", f"--user-data-dir={profile}", "about:blank",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, "LANG": "en_US.UTF-8"})
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=browser_environment(profile))
         try:
             page = None
             deadline = time.monotonic() + 10
@@ -574,7 +583,7 @@ def stripchat_favorites(cookies_file: str) -> str:
         process = subprocess.Popen([
             executable, "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
             "--remote-allow-origins=*", f"--remote-debugging-port={port}", f"--user-data-dir={profile}", "about:blank",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, "LANG": "en_US.UTF-8"})
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=browser_environment(profile))
         try:
             page = None
             deadline = time.monotonic() + 10
