@@ -2,7 +2,7 @@ import { maxConcurrentDownloadsLimit } from "./download-limits.js";
 import path from "node:path";
 import fs from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
-import Fastify from "fastify";
+import Fastify, { LogController, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyHttpProxy from "@fastify/http-proxy";
 import fastifyStatic from "@fastify/static";
 import pino from "pino";
@@ -57,7 +57,19 @@ restoreLiveCamPerformers(db, plugins, liveCams, (error, providerId, username) =>
 });
 queue.start();
 
-const app = Fastify({ loggerInstance: appLogger, bodyLimit: 8 * 1024 * 1024 });
+const loggedHttpErrors = new WeakSet<FastifyRequest>();
+class HttpLogController extends LogController {
+  override incomingRequest() { /* Log the outcome only when a request fails. */ }
+
+  override requestCompleted(error: Error | null | undefined, request: FastifyRequest, reply: FastifyReply) {
+    if (error) return super.requestCompleted(error, request, reply);
+    if (reply.statusCode < 400 || loggedHttpErrors.has(request)) return;
+    request.log[reply.statusCode >= 500 ? "error" : "warn"]({
+      scope: "http", method: request.method, url: request.url, statusCode: reply.statusCode,
+    }, "Request failed");
+  }
+}
+const app = Fastify({ loggerInstance: appLogger, logController: new HttpLogController(), bodyLimit: 8 * 1024 * 1024 });
 const discoveryStatus = { running: false, completed: 0, total: 0, progress: 0, query: "", error: "" };
 const performerOperations = new Set<string>();
 function beginPerformerOperation(id: string) {
@@ -81,7 +93,8 @@ app.setErrorHandler((error, request, reply) => {
   const statusCode = (error as { statusCode?: unknown }).statusCode;
   const status = typeof statusCode === "number" ? statusCode : error instanceof z.ZodError ? 400 : 500;
   const message = error instanceof Error ? error.message : String(error);
-  app.log[status >= 500 ? "error" : "warn"]({ err: error, method: request.method, url: request.url, scope: "http" }, "Request failed");
+  loggedHttpErrors.add(request);
+  app.log[status >= 500 ? "error" : "warn"]({ err: error, statusCode: status, method: request.method, url: request.url, scope: "http" }, "Request failed");
   reply.status(status >= 400 && status < 600 ? status : 500).send({ error: message,
     ...(error instanceof PerformerConflictError ? { code: error.code, conflict: error.conflict } : {}) });
 });

@@ -2,10 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Menu, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
 import { api } from "./api";
 import { UnifiedNavigation } from "./UnifiedNavigation";
-
-type RemoteOperationStatus = { running: boolean; progress: number; error?: string };
-type LiveOperationStatus = { running: boolean; percent: number };
-const idleOperation: LiveOperationStatus = { running: false, percent: 0 };
+import { idleOperation, watchOperationStatus, type LiveOperationStatus } from "./operation-status";
 
 export function operationLabel(label: string, operation: LiveOperationStatus): string {
   return operation.running ? `${label} · ${Math.max(0, Math.min(100, Math.round(operation.percent)))}%` : label;
@@ -13,43 +10,16 @@ export function operationLabel(label: string, operation: LiveOperationStatus): s
 
 function useLiveOperation(endpoint: string) {
   const [status, setStatus] = useState<LiveOperationStatus>(idleOperation);
-  const statusRef = useRef(status); const startedAt = useRef(0); const seenRunning = useRef(false);
-  const completing = useRef(false); const completionTimer = useRef<number | undefined>(undefined);
-  const update = (next: LiveOperationStatus) => { statusRef.current = next; setStatus(next); };
-  const begin = () => {
-    if (completionTimer.current !== undefined) window.clearTimeout(completionTimer.current);
-    startedAt.current = Date.now(); seenRunning.current = false; completing.current = false;
-    update({ running: true, percent: 0 });
-  };
+  const watcher = useRef<ReturnType<typeof watchOperationStatus> | null>(null);
   useEffect(() => {
-    let disposed = false; let polling = false;
-    const poll = async () => {
-      if (polling) return; polling = true;
-      try {
-        const remote = await api<RemoteOperationStatus>(endpoint);
-        if (disposed) return;
-        if (remote.running) {
-          if (completionTimer.current !== undefined) window.clearTimeout(completionTimer.current);
-          seenRunning.current = true; completing.current = false;
-          update({ running: true, percent: remote.progress });
-        } else if (statusRef.current.running && !completing.current) {
-          if (!seenRunning.current && Date.now() - startedAt.current < 650) return;
-          if (remote.error) { update(idleOperation); return; }
-          completing.current = true; update({ running: true, percent: 100 });
-          completionTimer.current = window.setTimeout(() => {
-            completing.current = false; update(idleOperation);
-          }, 550);
-        }
-      } catch { /* The action itself reports API errors to the page. */ }
-      finally { polling = false; }
-    };
-    void poll(); const interval = window.setInterval(() => void poll(), 300);
+    const operation = watchOperationStatus(endpoint, setStatus);
+    watcher.current = operation;
     return () => {
-      disposed = true; window.clearInterval(interval);
-      if (completionTimer.current !== undefined) window.clearTimeout(completionTimer.current);
+      operation.dispose();
+      watcher.current = null;
     };
   }, [endpoint]);
-  return { ...status, begin };
+  return { ...status, begin: () => watcher.current?.begin() };
 }
 
 export function AppChrome({ title, scanningLibrary = false, onScanLibrary, onRefreshPerformers, children }: { title: string; scanningLibrary?: boolean; onScanLibrary: () => void; onRefreshPerformers: () => void; children: ReactNode }) {
@@ -104,8 +74,8 @@ export function AppChrome({ title, scanningLibrary = false, onScanLibrary, onRef
         <button ref={menu} className="easyx-menu-button" aria-label="Open navigation" aria-expanded={mobileNavigationOpen} aria-controls="primary-navigation" onClick={() => setMobileNavigationOpen(true)}><Menu size={20}/></button>
         <div className="easyx-header-title"><p>OPEN EASYX</p><h1>{title}</h1></div>
         <div className="easyx-header-actions">
-          <button className="easyx-scan-button easyx-header-operation" aria-label={operationLabel("Scan library", { running: scanRunning, percent: scan.percent })} disabled={scanRunning} aria-busy={scanRunning} onClick={() => { scan.begin(); onScanLibrary(); }}><RefreshCw className={scanRunning ? "spin" : ""} size={17}/><span>{operationLabel("Scan library", { running: scanRunning, percent: scan.percent })}</span></button>
-          <button className="primary easyx-header-operation" aria-label={operationLabel("Refresh performers", performers)} disabled={performers.running} aria-busy={performers.running} onClick={() => { performers.begin(); onRefreshPerformers(); }}><Search className={performers.running ? "spin" : ""} size={17}/><span>{operationLabel("Refresh performers", performers)}</span></button>
+          <button className="easyx-scan-button easyx-header-operation" aria-label={operationLabel("Scan library", { running: scanRunning, percent: scan.percent })} disabled={scanRunning} aria-busy={scanRunning} onClick={() => { onScanLibrary(); scan.begin(); }}><RefreshCw className={scanRunning ? "spin" : ""} size={17}/><span>{operationLabel("Scan library", { running: scanRunning, percent: scan.percent })}</span></button>
+          <button className="primary easyx-header-operation" aria-label={operationLabel("Refresh performers", performers)} disabled={performers.running} aria-busy={performers.running} onClick={() => { onRefreshPerformers(); performers.begin(); }}><Search className={performers.running ? "spin" : ""} size={17}/><span>{operationLabel("Refresh performers", performers)}</span></button>
         </div>
       </header>
       {children}
