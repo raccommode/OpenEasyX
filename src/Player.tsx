@@ -4,7 +4,6 @@ import { PlayerSubtitles, selectedSubtitleTrack, useMediaSubtitles } from "./Pla
 import { api } from "./api";
 import { initialAutoplay, nextMediaId, PHOTO_AUTOPLAY_SECONDS } from "./playback";
 import { loadPlayerAudio, savePlayerAudio } from "./player-audio";
-import { createPlayerAudioBoost, loadPlayerAudioBoost, MAX_AUDIO_BOOST, savePlayerAudioBoost, type PlayerAudioBoost } from "./player-audio-boost";
 import { monitorVideoStalls } from "./video-stall-recovery";
 import { usePlayerFullscreen } from "./player-fullscreen";
 import { createControlsAutoHide } from "./player-controls";
@@ -44,9 +43,6 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
 }) {
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const surface = useRef<HTMLDivElement>(null); const lastSaved = useRef(0);
   const initialAudio = useRef(loadPlayerAudio());
-  const audioBoost = useRef<PlayerAudioBoost | undefined>(undefined);
-  const selectedBoost = useRef(loadPlayerAudioBoost());
-  const [boost, setBoost] = useState(selectedBoost.current);
   const recoveryPosition = useRef<number | undefined>(undefined);
   const [playbackError, setPlaybackError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -84,20 +80,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     return true;
   };
   const failPlayback = (message: string, tryCompatibility = false) => { if (tryCompatibility && useCompatiblePlayback()) return; setPlaybackError(message); setWaiting(false); setPlaying(false); video.current?.pause(); };
-  const resumeAudioBoost = () => {
-    const value = selectedBoost.current; const output = audioBoost.current;
-    void output?.setBoost(value).then((enabled) => {
-      if (audioBoost.current !== output || enabled || selectedBoost.current !== value || value === 1) return;
-      selectedBoost.current = 1; setBoost(1); savePlayerAudioBoost(1);
-      void audioBoost.current?.setBoost(1);
-      setNotice("Audio boost is unavailable in this browser. Standard volume is still available.");
-    });
-  };
-  const changeBoost = (value: number) => {
-    selectedBoost.current = value; setBoost(value); savePlayerAudioBoost(value); resumeAudioBoost();
-  };
   const safePlay = (element: HTMLVideoElement) => {
-    resumeAudioBoost();
     const requestedSource = element.src;
     void element.play().catch((reason: unknown) => {
       // A decode error may already have switched to the compatibility copy.
@@ -186,7 +169,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     const rect = event.currentTarget.getBoundingClientRect();
     return { id: event.pointerId, x: event.clientX - rect.left, y: event.clientY - rect.top, pointerType: event.pointerType || "mouse", time: event.timeStamp || performance.now() };
   };
-  const toggleMute = () => { const element = video.current; if (!element) return; resumeAudioBoost(); element.muted = !element.muted; setMuted(element.muted); savePlayerAudio({ volume: element.volume, muted: element.muted }); };
+  const toggleMute = () => { const element = video.current; if (!element) return; element.muted = !element.muted; setMuted(element.muted); savePlayerAudio({ volume: element.volume, muted: element.muted }); };
   const selectTrack = (id: string) => { setPreferredTrack(id); writePlayerPreference("open-easyx.subtitle-track", id); setCaptionMenu(false); };
   const toggleAutoplay = () => { const value = !autoplay; setAutoplay(value); writePlayerPreference("open-easyx.autoplay", String(value)); };
   const next = async () => {
@@ -202,12 +185,6 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   useEffect(() => {
     if (media.kind === "image") void api(`/api/media/${media.id}/progress`, { method: "PUT", body: JSON.stringify({ position: 0, duration: 0, completed: true }) }).catch(() => {});
   }, [media.id, media.kind]);
-  useEffect(() => {
-    const element = video.current; if (media.kind !== "video" || !element) return;
-    const output = createPlayerAudioBoost(element); audioBoost.current = output;
-    resumeAudioBoost();
-    return () => { audioBoost.current = undefined; output.dispose(); };
-  }, [media.kind]);
   useEffect(() => {
     lastSaved.current = 0; autoHide.current?.cancel();
     recoveryPosition.current = undefined; compatibilityPlayback.current = false; setPlaybackError("");
@@ -270,7 +247,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
         onLoadedMetadata={(event) => { const element = event.currentTarget; const resumeAt = recoveryPosition.current; recoveryPosition.current = undefined; setDuration(element.duration || media.duration || 0); element.volume = initialAudio.current.volume; element.muted = initialAudio.current.muted; element.currentTime = resumeAt !== undefined ? Math.min(resumeAt, Number.isFinite(element.duration) ? Math.max(0, element.duration - 0.1) : resumeAt) : !media.completed && media.progressSeconds > 0 && media.progressSeconds < element.duration - 5 ? media.progressSeconds : 0; if ((resumeAt !== undefined || autoStart) && element.paused) safePlay(element); }}
         onError={(event) => { const code = event.currentTarget.error?.code; failPlayback(code === 3 || code === 4 ? "This video could not be decoded. Its format may not be supported by this browser." : "The video could not be loaded. Check the connection and try again.", code === 3 || code === 4); }}
         onTimeUpdate={(event) => { setCurrentTime(event.currentTarget.currentTime); void save(); }} onProgress={(event) => { const element = event.currentTarget; if (element.buffered.length) setBuffered(element.buffered.end(element.buffered.length - 1)); }}
-        onPlay={() => { resumeAudioBoost(); setPlaying(true); reveal(); }} onPlaying={() => { setPlaying(true); setWaiting(false); setPlaybackError(""); }} onPause={() => { setPlaying(false); setWaiting(false); void save(false, true); }} onWaiting={() => setWaiting(true)} onCanPlay={() => setWaiting(false)}
+        onPlay={() => { setPlaying(true); reveal(); }} onPlaying={() => { setPlaying(true); setWaiting(false); setPlaybackError(""); }} onPause={() => { setPlaying(false); setWaiting(false); void save(false, true); }} onWaiting={() => setWaiting(true)} onCanPlay={() => setWaiting(false)}
         onVolumeChange={(event) => { setVolume(event.currentTarget.volume); setMuted(event.currentTarget.muted); initialAudio.current = { volume: event.currentTarget.volume, muted: event.currentTarget.muted }; savePlayerAudio(initialAudio.current); }} onEnded={() => void next()}>
         {subtitles?.tracks.map((track) => <track key={`${track.id}-${track.updatedAt}`} data-track-id={track.id} kind="subtitles" src={track.url} srcLang={track.language} label={track.label}/>)}
       </video></div>
@@ -281,7 +258,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
       {playbackError && <div className="player-error" role="alert"><AlertTriangle/><b>Video playback interrupted</b><span>{playbackError}</span><button className="quiet" onClick={() => { reloadPlayback(); setRetry((value) => value + 1); }}><RefreshCw/>Try again</button></div>}
       {waiting && !playbackError && <div className="player-buffering"><LoaderCircle className="spin"/></div>}{!shownPlaying && !(waiting && !cast.casting) && !playbackError && <button className="player-center-play" onClick={togglePlayback} aria-label="Play"><Play fill="currentColor"/></button>}
       <div className="player-controls" onClick={(event) => event.stopPropagation()} onPointerDown={reveal}><div className="player-timeline"><span className="player-buffered" style={{ width: `${bufferedProgress}%` }}/><span className="player-elapsed" style={{ width: `${progress}%` }}/><input type="range" min="0" max={shownDuration || 0} step="0.1" value={Math.min(shownTime, shownDuration || 0)} onChange={(event) => seek(Number(event.target.value))} aria-label="Video position"/></div>
-        <div className="player-control-row"><div className="player-controls-left"><button className="player-icon-button" onClick={togglePlayback} aria-label={shownPlaying ? "Pause" : "Play"}>{shownPlaying ? <Pause fill="currentColor"/> : <Play fill="currentColor"/>}</button><div className="player-volume"><button className="player-icon-button" onClick={toggleMute} aria-label={muted || volume === 0 ? "Unmute" : "Mute"}>{muted || volume === 0 ? <VolumeX/> : <Volume2/>}</button><input aria-label="Volume" type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} onChange={(event) => { const element = video.current; if (!element) return; resumeAudioBoost(); element.volume = Number(event.target.value); element.muted = element.volume === 0; }}/></div><select className={`player-audio-boost ${boost > 1 ? "active" : ""}`} aria-label="Audio boost" title="Amplify quiet videos" value={boost} onChange={(event) => changeBoost(Number(event.target.value))}>{Array.from({ length: MAX_AUDIO_BOOST }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value === 1 ? "Boost off" : `Boost ${value * 100}%`}</option>)}</select><span className="player-time"><b>{playerTime(shownTime)}</b><i>/</i><span>{playerTime(shownDuration)}</span></span></div>
+        <div className="player-control-row"><div className="player-controls-left"><button className="player-icon-button" onClick={togglePlayback} aria-label={shownPlaying ? "Pause" : "Play"}>{shownPlaying ? <Pause fill="currentColor"/> : <Play fill="currentColor"/>}</button><div className="player-volume"><button className="player-icon-button" onClick={toggleMute} aria-label={muted || volume === 0 ? "Unmute" : "Mute"}>{muted || volume === 0 ? <VolumeX/> : <Volume2/>}</button><input aria-label="Volume" type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} onChange={(event) => { const element = video.current; if (!element) return; element.volume = Number(event.target.value); element.muted = element.volume === 0; }}/></div><span className="player-time"><b>{playerTime(shownTime)}</b><i>/</i><span>{playerTime(shownDuration)}</span></span></div>
           <div className="player-controls-right"><button className={`player-autoplay ${autoplay ? "active" : ""}`} aria-label="Autoplay" aria-pressed={autoplay} onClick={toggleAutoplay}><span>Auto</span><i/></button>
             {subtitles && <PlayerSubtitles key={media.id} mediaId={media.id} state={subtitles} selected={subtitleTrack} open={captionMenu} toggle={() => { setCaptionMenu(!captionMenu); setControls(true); autoHide.current?.cancel(); }} select={selectTrack} update={updateSubtitles} setNotice={setNotice}/>}
             <button className={`player-icon-button player-cast-button ${cast.casting ? "active" : ""} ${cast.available ? "" : "unavailable"}`} onClick={() => cast.casting ? cast.stop() : void cast.start(shownTime)} aria-label={cast.casting ? `Stop casting to ${cast.device}` : "Cast to a TV"} title={cast.casting ? `Casting to ${cast.device}` : cast.available ? "Cast to a TV" : "Cast (see how to enable it)"}><Cast/></button>

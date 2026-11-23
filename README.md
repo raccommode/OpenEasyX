@@ -9,7 +9,7 @@ Open EasyX is one private, self-hosted application for discovering, downloading,
 - isolated partial downloads in `media/.downloads`, with restart-from-zero recovery;
 - an indexed video and photo library with favorites, history, progress, previews, and statistics;
 - direct live-cam aggregation and playback from installed source plugins;
-- optional local subtitle transcription, translation and SRT/WebVTT import through the plugin store;
+- optional automatic subtitle transcription and translation through the plugin store;
 - an official, built-in plugin store;
 - additional plugin repositories from GitHub, Gitea, Forgejo, GitLab, or any compatible HTTP(S), SSH, or Git remote;
 - integrated browser login for plugins that need an authenticated session.
@@ -103,7 +103,7 @@ npm run check
 
 Open **Plugins → Not installed → Features & addons**, then install **Local Subtitles**. The plugin transcribes indexed library videos with Whisper. Open **Plugins → Installed → Local Subtitles → Config** to choose translation languages, check progress or pause automatic generation. The first video that needs transcription downloads the speech dependencies and model. Translation downloads its own dependencies and model when first needed. Audio and transcripts are processed on the server.
 
-Use the **Subtitles** menu in the video player to select a track, import an SRT or WebVTT file, or retry a failed job. Uninstalling the plugin stops processing. Saved subtitle tracks remain playable, and reinstalling restores the saved language choices.
+By default, the player displays the original-language track as soon as it is ready. Use the **Subtitles** menu to select another track, follow generation progress or retry a failed job. The player remembers your selection, including **Off**. Uninstalling the plugin stops processing. Saved subtitle tracks remain playable, and reinstalling restores the saved language choices.
 
 When upgrading from a version with built-in subtitles, install **Local Subtitles** to resume generation using your previous settings. The plugin reuses `/data/subtitles` and `/data/subtitle-models` and installs its Python packages under `/data/subtitle-runtime`. Outside Docker, use FFmpeg, FFprobe and Python 3.11 with virtual environment support. To use an interpreter with the plugin dependencies already installed, set `EASYX_SUBTITLE_PYTHON` to its executable path.
 
