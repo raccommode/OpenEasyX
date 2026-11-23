@@ -15,6 +15,7 @@ MODEL_URL = ("https://raw.githubusercontent.com/Junhua-Liao/Light-ASD/"
              "ed38c232de5efe0261dbd68627c0ade7cdfe14eb/weight/" + MODEL)
 MODEL_SHA256 = "efc375833887eefa9d209dc92810e18519b04c3c73ea35a549f2a7f40b7d94d5"
 MODEL_SIZE = 4_175_289
+CONTEXT_SECONDS = 1.2
 
 
 @cache
@@ -96,15 +97,17 @@ class ActiveSpeaker:
 
 
 def track_windows(observations):
-    """Bound neural memory on long takes and never interpolate through missing faces or cuts."""
+    """Keep temporal context across brief misses bracketed by the same visible face."""
     from lips import same_face_position
     group = []
     previous_vector = None
     for observation in observations:
         t, box = observation[:2]
         vector = observation[2] if len(observation)>2 else None
-        appearance_cut = vector is not None and previous_vector is not None and vector @ previous_vector < .30
-        if group and (appearance_cut or t-group[-1][0] > .31 or not same_face_position(group[-1][1], box) or t-group[0][0] >= 1.8):
+        similarity = float(vector @ previous_vector) if vector is not None and previous_vector is not None else None
+        max_gap = .50 if similarity is not None and similarity >= .55 else .31
+        if group and ((similarity is not None and similarity < .30) or t-group[-1][0] > max_gap or
+                      not same_face_position(group[-1][1], box)):
             if len(group) >= 3:
                 yield group
             group = []
@@ -114,7 +117,7 @@ def track_windows(observations):
         yield group
 
 
-def track_scores(media, source_audio, model, observations):
+def _score_window(media, source_audio, model, observations):
     from lips import compressed_audio_window, orientation, oriented, timestamp, video_clock
     stream, origin, _ = video_clock(media)
     times = np.array([t for t, _ in observations])
@@ -160,6 +163,29 @@ def track_scores(media, source_audio, model, observations):
     return [(t, float(s)) for t,s in zip(sample_times, scores)]
 
 
+def track_scores(media, source_audio, model, observations):
+    """Give the bidirectional classifier context on both sides of a block without voting in an unseen gap."""
+    times = np.array([t for t, _ in observations])
+    left, end = times[0], times[-1]+.02
+    result = []
+    # A four-second input bounds the convolution activations on CPU. Keep
+    # only the center of overlapping inputs on longer tracks.
+    block = 4. if end-left <= 4. else 2.
+    for start in np.arange(left, end, block):
+        stop = min(end, start+block)
+        a, b = times.searchsorted([start-1., stop+1.], side='left')
+        for t, score in _score_window(media, source_audio, model, observations[a:b]):
+            if not start <= t < stop:
+                continue
+            pos = times.searchsorted(t)
+            if 0 < pos < len(times) and times[pos]-times[pos-1] > .31 and times[pos-1]+.02 < t < times[pos]-.02:
+                # An occlusion can supply surrounding context but is never
+                # evidence that a particular face is visible on this frame.
+                score = 0.
+            result.append((t, score))
+    return result
+
+
 def speaking_face(values, assigned, speaker):
     ranked = sorted(values.items(), key=lambda item: -item[1])
     identity, score = ranked[0]
@@ -169,7 +195,19 @@ def speaking_face(values, assigned, speaker):
     return None
 
 
-def confirm_candidates(source, source_audio, candidates, motion, speakers, cues, solo):
+def contextual_tracks(samples, padding, cue):
+    """Keep real observations around a short word, bounded by cuts, other speakers and other faces."""
+    before = [sample for sample in padding if sample[0]<cue["start"]]
+    after = [sample for sample in padding if sample[0]>=cue["end"]]
+    left = max((t for t,box,_ in before if box is None), default=-float("inf"))
+    right = min((t for t,box,_ in after if box is None), default=float("inf"))
+    extended = [sample for sample in before if sample[0]>left] + samples + [sample for sample in after if sample[0]<right]
+    for group in track_windows(extended):
+        if sum(cue["start"]<=t<cue["end"] for t,_ in group)>=2:
+            yield group
+
+
+def confirm_candidates(source, source_audio, candidates, motion, speakers, cues, solo, context):
     """Resolve an ambiguous solo turn using the source soundtrack and contemporaneous face tracks."""
     ambiguous = {}
     single_voice = len({cue["speaker"] for cue in cues}) == 1
@@ -198,11 +236,13 @@ def confirm_candidates(source, source_audio, candidates, motion, speakers, cues,
                 identity = max(available, key=lambda i:len(tracks[i]), default=None)
                 if identity is not None:
                     samples = solo[idx]
-                    for group in track_windows(samples):
+                    cue = cues[idx]
+                    for group in contextual_tracks(samples, context.get(idx, ()), cue):
                         if model is None:
                             model = ActiveSpeaker()
                         for t, score in track_scores(media, audio, model, group):
-                            evidence[round(t*25)] = {identity: score}
+                            if cue["start"]<=t<cue["end"]:
+                                evidence[round(t*25)] = {identity: score}
                     if evidence:
                         motion.solo[idx] = samples
                         confirmed[idx] = {frame: speaking_face(values, assigned, cues[idx]["speaker"])

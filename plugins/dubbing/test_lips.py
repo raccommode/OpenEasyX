@@ -163,6 +163,56 @@ class LipSyncTests(unittest.TestCase):
         self.assertEqual(seen(.11, b, {}), {})
         self.assertEqual(seen(.35, b, {}), {})
 
+    def test_temporary_face_loss_preserves_speech_context_but_never_votes_inside_the_gap(self):
+        import active_speaker
+        a, b = np.eye(2, dtype="float32")
+        box = np.float32([20, 12, 50, 70])
+        times = np.r_[np.arange(0, 1.3, .1), np.arange(1.54, 7.5, .1)]
+        observations = [(t, box, a) for t in times]
+        groups = list(active_speaker.track_windows(observations))
+        self.assertEqual(len(groups), 1)
+        windows = []
+        def probe(_media, _audio, _model, rows):
+            left, right = rows[0][0], rows[-1][0]
+            windows.append((left, right))
+            return [(t, float(right-left > 2.)) for t in np.arange(left, right+.02, .04)]
+        with patch.object(active_speaker, "_score_window", probe):
+            scores = active_speaker.track_scores(None, None, None, groups[0])
+        self.assertTrue(all(score == 1. for t,score in scores if .1 < t < 1.18))
+        gap = [score for t,score in scores if 1.23 < t < 1.51]
+        self.assertGreater(len(gap), 3)
+        self.assertFalse(any(gap))
+        self.assertGreater(len(windows), 1)
+        self.assertGreater(windows[0][1], windows[1][0])
+        self.assertLessEqual(max(end-start for start,end in windows), 4.)
+        cut = [(t,box,a if t<1.4 else b) for t in times]
+        self.assertEqual(len(list(active_speaker.track_windows(cut))), 2)
+        # An identity-free detection has no evidence for bridging the miss.
+        self.assertEqual(len(list(active_speaker.track_windows([(t,box) for t in times]))), 2)
+
+    def test_short_word_uses_the_same_face_on_both_sides_without_voting_outside_the_word(self):
+        import active_speaker
+        a, b = np.eye(2, dtype="float32")
+        box = np.float32([20,12,50,70])
+        cue = {"start": 1., "end": 1.31, "speaker": 0}
+        samples = [(1+i/10,box,a) for i in range(4)]
+        # A competing face at .5 and an identity cut at 1.8 bound this source context.
+        padding = [(.3,box,a),(.4,box,a),(.5,None,None),(.6,box,a),(.7,box,a),(.8,box,a),(.9,box,a),
+                   (1.4,box,a),(1.5,box,a),(1.6,box,a),(1.7,box,a),(1.8,box,b),(1.9,box,b),(2.,box,b)]
+        groups = list(active_speaker.contextual_tracks(samples,padding,cue))
+        self.assertEqual(len(groups),1)
+        self.assertEqual((groups[0][0][0],groups[0][-1][0]),(.6,1.7))
+        anchors = lips.SpeakerAnchors()
+        anchors[0,7] = [(1.1,box),(1.2,box)]
+        from unittest.mock import MagicMock
+        with patch.object(active_speaker.av,"open",return_value=MagicMock()), \
+             patch.object(active_speaker.sf,"SoundFile",return_value=MagicMock()), \
+             patch.object(active_speaker,"ActiveSpeaker"), \
+             patch.object(active_speaker,"track_scores",return_value=[(.8,.99),(1.12,.95),(1.24,.1),(1.52,.99)]):
+            votes = active_speaker.confirm_candidates(None, "audio", {0:{7: [(t,r) for t,r,_ in samples]}},
+                anchors, {}, [cue], {0:samples}, {0:padding})
+        self.assertEqual(votes[0], {28:7,31:None})
+
     def test_brief_detector_misses_follow_visible_features_and_never_cross_a_cut(self):
         import cv2
         rng = np.random.default_rng(927)
@@ -204,6 +254,19 @@ class LipSyncTests(unittest.TestCase):
         speaking[86:100, 38:75] += 30
         self.assertLess(lips.mouth_motion(prev, same), .1)
         self.assertGreater(lips.mouth_motion(prev, speaking), 10)
+
+    def test_short_word_onset_requires_same_face_and_motion_within_the_word(self):
+        box = np.float32([20,12,50,70])
+        a, b = np.eye(2, dtype="float32")
+        crop = np.random.default_rng(21).integers(30,160,(112,112),dtype="uint8")
+        mouth = crop.copy()
+        mouth[86:100,38:75] += 30
+        previous = (.10,(box,a,crop))
+        self.assertTrue(lips.onset_articulation(previous,(box,a,mouth),.20,.13))
+        self.assertFalse(lips.onset_articulation(previous,(box,a,mouth),.20,.18))
+        self.assertFalse(lips.onset_articulation(previous,(box,b,mouth),.20,.13))
+        self.assertFalse(lips.onset_articulation(previous,(box,a,crop),.20,.13))
+        self.assertFalse(lips.onset_articulation(None,(box,a,mouth),.20,.13))
 
     def test_orthogonal_display_rotation_and_mirroring(self):
         pixels = np.arange(6*8*3, dtype="uint8").reshape(6, 8, 3)

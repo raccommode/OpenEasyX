@@ -12,8 +12,8 @@ const languages = subtitleLanguages.filter(({ code }) => supported.has(code)).ma
 
 export default definePlugin({
   manifest: {
-    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.2.0", author: "Open EasyX",
-    capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: "2",
+    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.2.1", author: "Open EasyX",
+    capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: "3",
     description: "Clone each speaker’s voice, translate the dialogue and synchronize visible lips locally.",
     settings: [
       ...languages.map(({ code, label }) => ({ key: code, label, type: "boolean" as const, default: false })),

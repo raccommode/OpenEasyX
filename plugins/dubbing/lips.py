@@ -347,23 +347,40 @@ class SpeakerAnchors(defaultdict):
         ids[0] = identity
 
 
+def onset_articulation(previous, face, t, start):
+    if previous is None:
+        return False
+    at, old = previous
+    elapsed = t-at
+    # Keep a measured onset if at least half this frame pair belongs to
+    # the word. A preceding speaker, a long miss or a cut gives no evidence.
+    return (at<start<=t and .07<=elapsed<=.20 and t-start>=elapsed/2 and
+            old[1]@face[1]>=.55 and same_face_position(old[0],face[0]) and
+            mouth_motion(old[2],face[2])>.65)
+
+
 def learn_speakers(source, cues, models, lip_model=None, anchors=None, source_audio=None):
+    from active_speaker import CONTEXT_SECONDS
     prototypes = []
     evidence = defaultdict(lambda: defaultdict(lambda: [0., 0]))
     quiet = defaultdict(lambda: [0., 0])
     candidates = defaultdict(lambda: defaultdict(list))
     solo = defaultdict(list)
+    context = defaultdict(list)
     multiple = set()
     turns, history, tracking = Timeline(cues), MotionHistory(), FaceTracks()
+    surroundings = Timeline([{**cue, "start": cue["start"]-CONTEXT_SECONDS, "end": cue["end"]+CONTEXT_SECONDS}
+                             if cue["end"]-cue["start"] < 2*CONTEXT_SECONDS else cue for cue in cues])
     last_turn = max(c["end"] for c in cues)
     next_sample, last_report = -float("inf"), -1
     last_active, previous_speaker = -float("inf"), None
+    preceding_silence = None
     with av.open(str(source)) as src:
         stream, origin, duration = video_clock(src)
         transform = None
         for frame in src.decode(stream):
             t = timestamp(frame, stream) - origin
-            if t >= last_turn + 1:
+            if t >= last_turn + CONTEXT_SECONDS:
                 break
             if transform is None:
                 transform = orientation(frame)
@@ -374,15 +391,28 @@ def learn_speakers(source, cues, models, lip_model=None, anchors=None, source_au
             active = {cue["speaker"] for cue in active_cues.values()}
             if active:
                 last_active = t
-            if len(active) > 1 or t - last_active > 1:
+            learning = len(active) <= 1 and t-last_active <= 1
+            outside = [idx for idx in surroundings.at(t) if idx not in active_cues] if isinstance(anchors, SpeakerAnchors) else []
+            if not learning:
                 history.previous.clear()
+            if not learning and not outside:
+                preceding_silence = None
+                continue
+            image = oriented(frame, transform)
+            faces = models.detect(image)
+            preceding = preceding_silence
+            preceding_silence = (t, faces[0]) if len(faces)==1 and not active else None
+            for idx in outside:
+                if len(faces)>1 or active-{cues[idx]["speaker"]}:
+                    context[idx].append((t, None, None))
+                elif len(faces)==1:
+                    context[idx].append((t, faces[0][0], faces[0][1]))
+            if not learning:
                 continue
             speaker = next(iter(active), None)
             if speaker != previous_speaker:
                 history.previous.clear()
             previous_speaker = speaker
-            image = oriented(frame, transform)
-            faces = models.detect(image)
             ids = tracking.identify(faces, prototypes, t, learn=speaker is not None)
             if isinstance(anchors, SpeakerAnchors) and len(active_cues) == 1:
                 idx = next(iter(active_cues))
@@ -391,6 +421,9 @@ def learn_speakers(source, cues, models, lip_model=None, anchors=None, source_au
                 if len(faces)==1:
                     row, vector, _ = faces[0]
                     solo[idx].append((t, row, vector))
+                    if (0 in ids and cues[idx]["end"]-cues[idx]["start"]<2*CONTEXT_SECONDS and
+                            onset_articulation(preceding, faces[0], t, cues[idx]["start"])):
+                        anchors[idx, ids[0]].append((t, row[:4].copy()))
                 elif len(faces)>1:
                     multiple.add(idx)
             if lip_model is not None:
@@ -413,7 +446,7 @@ def learn_speakers(source, cues, models, lip_model=None, anchors=None, source_au
     if isinstance(anchors, SpeakerAnchors):
         from active_speaker import confirm_candidates
         anchors.local = confirm_candidates(source, source_audio, candidates, anchors, speakers, cues,
-                                          {i:samples for i,samples in solo.items() if i not in multiple})
+                                          {i:samples for i,samples in solo.items() if i not in multiple}, context)
     return prototypes, speakers
 
 
