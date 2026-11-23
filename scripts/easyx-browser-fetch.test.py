@@ -3,11 +3,13 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -81,6 +83,14 @@ class FavoritesBrowserTests(unittest.TestCase):
         return subprocess.run([sys.executable, HELPER, "--stripchat-favorites", self.cookies],
                               env={**os.environ, "EASYX_STRIPCHAT_FAVORITES_URL": f"http://127.0.0.1:{self.server.server_port}/favorites"},
                               capture_output=True, text=True, timeout=30, check=False)
+
+    def test_browser_environment_preserves_writable_home_and_replaces_an_invalid_one(self):
+        browser_env = runpy.run_path(HELPER)["browser_environment"]
+        with tempfile.TemporaryDirectory() as profile:
+            with patch.dict(os.environ, HOME=self.root.name):
+                self.assertEqual(browser_env(profile)["HOME"], self.root.name)
+            with patch.dict(os.environ, HOME=self.cookies):
+                self.assertEqual(browser_env(profile)["HOME"], profile)
 
     def test_capture_media_with_an_unwritable_home(self):
         base = f"http://127.0.0.1:{self.server.server_port}"
