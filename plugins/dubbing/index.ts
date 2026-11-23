@@ -4,7 +4,7 @@ import { mkdir, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { definePlugin } from "../../packages/plugin-sdk/index.js";
+import { definePlugin, type DubbingResult } from "../../packages/plugin-sdk/index.js";
 import subtitleLanguages from "../../packages/translation-languages.json" with { type: "json" };
 
 const supported = new Set(["en", "fr", "es", "de", "it", "pt", "ru", "ja", "ko", "zh"]);
@@ -12,8 +12,8 @@ const languages = subtitleLanguages.filter(({ code }) => supported.has(code)).ma
 
 export default definePlugin({
   manifest: {
-    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.1.1", author: "Open EasyX",
-    capabilities: ["video-dubbing"], dubbingLanguages: languages,
+    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.2.0", author: "Open EasyX",
+    capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: "2",
     description: "Clone each speaker’s voice, translate the dialogue and synchronize visible lips locally.",
     settings: [
       ...languages.map(({ code, label }) => ({ key: code, label, type: "boolean" as const, default: false })),
@@ -35,7 +35,7 @@ export default definePlugin({
       });
       let error = "";
       let setupError: Error | undefined;
-      let outcome: "rendered" | "original" | "silent" | undefined;
+      let outcome: DubbingResult | undefined;
       const lines = createInterface({ input: child.stdout });
       lines.on("line", (line) => {
         if (!line.startsWith("EASYX ")) return;
@@ -45,7 +45,9 @@ export default definePlugin({
             setupError = Object.assign(new Error(event.message), { code: event.errorCode });
           }
           if (typeof event.phase === "string" && Number.isFinite(event.progress)) report(event.phase, event.progress);
-          if (["rendered", "original", "silent"].includes(event.outcome)) outcome = event.outcome;
+          if (event.outcome === "rendered" && Number.isSafeInteger(event.lipSyncFrames) && event.lipSyncFrames >= 0) {
+            outcome = { outcome: "rendered", lipSyncFrames: event.lipSyncFrames };
+          } else if (["rendered", "original", "silent"].includes(event.outcome)) outcome = event.outcome;
         } catch { /* Ignore non-protocol model output. */ }
       });
       child.stderr.setEncoding("utf8").on("data", (chunk) => { error = (error + chunk).slice(-2000); });

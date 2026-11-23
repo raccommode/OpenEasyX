@@ -17,7 +17,7 @@ def release_models():
         torch.mps.empty_cache()
 
 
-def run(job):
+def run(job, details=None):
     data, work, source = (Path(job[key]).resolve() for key in ("dataDir", "workDir", "source"))
     target = job["language"]
     work.mkdir(parents=True, exist_ok=True)
@@ -64,7 +64,9 @@ def run(job):
     mix_voices(mix, dialogue, cues, wav_dir, work, mixed)
     from lips import render
     changed = render(source, mixed, cues, wav_dir, Path(job["output"]), language=target, source_audio=mix)
-    progress(f"Lip synchronization applied to {changed} frames", 99)
+    if details is not None:
+        details["lipSyncFrames"] = changed
+    progress(f"Animated visible speech in {changed} frames", 99)
     # Keep shared analysis for other selected languages. Per-language PCM is only needed to resume an unfinished render.
     import shutil
     shutil.rmtree(wav_dir)
@@ -75,4 +77,6 @@ if __name__ == "__main__":
     parent_watch()
     arg = sys.argv[1]
     job = json.loads(arg if arg.startswith("{") else Path(arg).read_text())
-    publish(outcome=run(job))
+    details = {}
+    outcome = run(job, details)
+    publish(outcome=outcome, **details)

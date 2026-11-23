@@ -185,6 +185,16 @@ export class LibraryDatabase {
         phase TEXT NOT NULL DEFAULT '',
         progress REAL NOT NULL DEFAULT 0,
         error TEXT NOT NULL DEFAULT '',
+        render_version TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY(media_id, language)
+      );
+      CREATE TABLE IF NOT EXISTS dubbing_outputs (
+        media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+        language TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        file_key TEXT NOT NULL,
+        lip_sync_frames INTEGER,
         PRIMARY KEY(media_id, language)
       );
       CREATE TABLE IF NOT EXISTS subtitle_jobs (
@@ -218,6 +228,10 @@ export class LibraryDatabase {
     const playbackColumns = new Set((this.sqlite.prepare("PRAGMA table_info(playback)").all() as Array<{ name: string }>).map((column) => column.name));
     const mediaColumns = new Set((this.sqlite.prepare("PRAGMA table_info(media)").all() as Array<{ name: string }>).map((column) => column.name));
     const subtitleColumns = new Set((this.sqlite.prepare("PRAGMA table_info(subtitle_jobs)").all() as Array<{ name: string }>).map((column) => column.name));
+    const dubColumns = this.sqlite.prepare("PRAGMA table_info(video_dubs)").all();
+    if (!dubColumns.some((column) => column.name === "render_version")) this.sqlite.exec("ALTER TABLE video_dubs ADD COLUMN render_version TEXT NOT NULL DEFAULT ''");
+    this.sqlite.exec(`INSERT OR IGNORE INTO dubbing_outputs(media_id,language,fingerprint,provider,file_key)
+      SELECT media_id,language,fingerprint,provider,'' FROM video_dubs WHERE status='ready'`);
     if (!subtitleColumns.has("phase")) this.sqlite.exec("ALTER TABLE subtitle_jobs ADD COLUMN phase TEXT NOT NULL DEFAULT 'detecting'");
     if (!subtitleColumns.has("target_language")) this.sqlite.exec("ALTER TABLE subtitle_jobs ADD COLUMN target_language TEXT NOT NULL DEFAULT ''");
     if (!mediaColumns.has("playable")) this.sqlite.exec("ALTER TABLE media ADD COLUMN playable INTEGER NOT NULL DEFAULT 1");

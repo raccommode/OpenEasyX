@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { AudioLines, Check } from "lucide-react";
 import { api } from "./api";
 
-type DubVariant = { code: string; label: string; status: "ready" | "original" | "silent" | "error" | "running" | "queued"; phase?: string; progress: number; error?: string };
+type DubVariant = { code: string; label: string; status: "ready" | "original" | "silent" | "error" | "running" | "queued"; phase?: string; progress: number; error?: string;
+  updateStatus?: "queued" | "running" | "error"; playbackVersion?: string; lipSyncFrames?: number };
 type MediaDubbing = { installed: boolean; variants: DubVariant[] };
 
 export function useMediaDubbing(mediaId?: string) {
@@ -20,7 +21,7 @@ export function useMediaDubbing(mediaId?: string) {
       try {
         const state = await api<MediaDubbing>(`/api/media/${mediaId}/dubbing`, { signal: controller.signal });
         if (!controller.signal.aborted) setResult({ mediaId, state });
-        poll = state.variants.some((variant) => variant.status === "queued" || variant.status === "running");
+        poll = state.variants.some((variant) => ["queued", "running"].includes(variant.updateStatus ?? variant.status));
       } catch { /* Retry after a network interruption. */ }
       finally {
         loading = false;
@@ -34,17 +35,27 @@ export function useMediaDubbing(mediaId?: string) {
   return result && result.mediaId === mediaId ? result.state : undefined;
 }
 
-export function dubbingStreamUrl(base: string, language: string, compatible: boolean) {
+export function dubbingStreamUrl(base: string, language: string, compatible: boolean, version?: string) {
   if (!language && !compatible) return base;
   const url = new URL(base, "http://localhost");
-  if (language) url.searchParams.set("dub", language);
+  if (language) {
+    url.searchParams.set("dub", language);
+    if (version) url.searchParams.set("v", version);
+  }
   else url.searchParams.set("compatible", "1");
   return /^https?:\/\//i.test(base) ? url.href : url.pathname + url.search + url.hash;
 }
 
 function statusLabel(variant: DubVariant) {
   switch (variant.status) {
-    case "ready": return "Dubbed audio";
+    case "ready": {
+      const description = variant.lipSyncFrames === undefined ? "Dubbed audio · Lip sync unknown"
+        : variant.lipSyncFrames > 0 ? "Dubbed audio with lip sync" : "Dubbed audio only";
+      if (variant.updateStatus === "queued") return description + " · Update queued";
+      if (variant.updateStatus === "running") return description + ` · Updating ${Math.round(variant.progress)}%`;
+      if (variant.updateStatus === "error") return description + " · Update failed";
+      return description;
+    }
     case "queued": return "Queued";
     case "running": return `${variant.phase || "Generating"} · ${Math.round(variant.progress)}%`;
     case "error": return "Failed · see plugin settings";

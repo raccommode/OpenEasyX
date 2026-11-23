@@ -55,7 +55,7 @@ class LipSyncTests(unittest.TestCase):
         sf.write(self.tmp/"1.wav", np.full(6400, .2, "float32"), rate)
         sf.write(mix, wave, rate)
         cues = [{"start": 0., "end": 2., "speaker": 0}, {"start": .60, "end": 1.12, "speaker": 1}]
-        seen, frame = {}, [-1]
+        seen, articulated, frame = {}, set(), [-1]
         rows = np.float32([[4, 2, 40, 40], [72, 2, 40, 40]])
         vectors = np.eye(3, dtype="float32")
         crop = np.zeros((112, 112), "uint8")
@@ -69,17 +69,20 @@ class LipSyncTests(unittest.TestCase):
         class Lips:
             def apply(self, image, row, audio, *, identity, t, amount):
                 seen[frame[0], int(row[0])] = "speaking"
+                if amount > 0:
+                    articulated.add(frame[0])
                 return True
             def rest(self, image, row, identity, t):
                 seen[frame[0], int(row[0])] = "resting"
                 return True
-        def learn(source, cues, faces, model, anchors):
+        def learn(source, cues, faces, model, anchors, source_audio=None):
             anchors[0, 0] = [(0.12, rows[0]), (.84, rows[0])]
             anchors[1, 1] = [(.72, rows[1])]
             return list(vectors[:2]), {0: 0, 1: 1}
         with patch.object(lips, "FaceModels", Faces), patch.object(lips, "LipModel", Lips), \
              patch.object(lips, "learn_speakers", learn), patch.object(lips, "progress"):
-            lips.render(source, mix, cues, self.tmp, out)
+            changed = lips.render(source, mix, cues, self.tmp, out)
+        self.assertEqual(changed, len(articulated))
         self.assertEqual(seen[0, 4], "resting")
         self.assertEqual(seen[7, 4], "speaking")
         self.assertEqual(seen[13, 4], "resting")
@@ -116,6 +119,74 @@ class LipSyncTests(unittest.TestCase):
         self.assertEqual(lips.identify(faces, protos), {0: 1, 2: 0})
         ambiguous = (vectors[0] + vectors[1]) / np.sqrt(2)
         self.assertEqual(lips.identify([(None, ambiguous, None)], protos), {})
+
+    def test_face_tracking_learns_continuous_poses_and_rejects_a_cut_to_a_listener(self):
+        rng = np.random.default_rng(83)
+        crop = rng.integers(30, 190, (112, 112), dtype="uint8")
+        box = np.float32([12, 8, 80, 80])
+        tracking, gallery = lips.FaceTracks(), []
+        for t, angle in enumerate(np.deg2rad([0, 33, 63, 92])):
+            vector = np.float32([np.cos(angle), np.sin(angle), 0])
+            self.assertEqual(tracking.identify([(box, vector, crop)], gallery, t/7, learn=True), {0: 0})
+        self.assertEqual(len(gallery), 1)
+        listener = (box, np.float32([0, 0, 1]), 255-crop)
+        self.assertEqual(tracking.identify([listener], gallery, .57), {})
+
+    def test_local_decision_rejects_an_offscreen_voice_a_rival_or_another_speakers_face(self):
+        from active_speaker import speaking_face
+        self.assertEqual(speaking_face({2: .97, 8: .18}, {}, 4), 2)
+        self.assertIsNone(speaking_face({2: .15}, {}, 4))
+        self.assertIsNone(speaking_face({2: .95, 8: .83}, {}, 4))
+        self.assertIsNone(speaking_face({2: .97, 8: .15}, {2: 7}, 4))
+        anchors = lips.SpeakerAnchors()
+        anchors.local[0] = {20: 2, 21: None}
+        self.assertEqual(anchors.face(0, .80, 8), 2)
+        self.assertIsNone(anchors.face(0, .84, 8))
+        self.assertIsNone(anchors.face(0, 1.20, 8))
+
+    def test_solo_pose_alias_rejects_a_known_competitor_and_a_cut_in_the_same_position(self):
+        from active_speaker import track_windows
+        anchors = lips.SpeakerAnchors()
+        a, b = np.eye(2, dtype="float32")
+        row = np.float32([20, 12, 50, 70])
+        track = [(t/10, row, a if t<4 else b) for t in range(8)]
+        anchors.solo[0] = track
+        self.assertEqual([len(g) for g in track_windows(track)], [4, 4])
+        class Model:
+            def describe(self, image, box):
+                raise AssertionError("a detected face already exists")
+        def seen(at, embedding, ids):
+            anchors.match_solo(0, at, None, Model(), [(row, embedding, None)], ids, 7, {7, 8})
+            return ids
+        self.assertEqual(seen(.11, a, {}), {0: 7})
+        self.assertEqual(seen(.11, a, {0: 8}), {0: 8})
+        self.assertEqual(seen(.11, b, {}), {})
+        self.assertEqual(seen(.35, b, {}), {})
+
+    def test_brief_detector_misses_follow_visible_features_and_never_cross_a_cut(self):
+        import cv2
+        rng = np.random.default_rng(927)
+        image = rng.integers(20, 225, (132, 130, 3), dtype="uint8")
+        moved = cv2.warpAffine(image, np.float32([[1,0,3],[0,1,2]]), (130,132))
+        cut = rng.integers(20, 225, image.shape, dtype="uint8")
+        row = np.float32([18,12,86,92,42,39,74,39,60,56,48,74,68,74,1])
+        right, other = np.eye(2, dtype="float32")
+        crop = np.zeros((112,112), "uint8")
+        initial = (row, right, crop)
+        def describe(_, tracked):
+            return tracked, right, crop
+        for next_frame, described, expected in [(moved, describe, True), (cut, describe, False),
+            (moved, lambda _, tracked: (tracked, other, crop), False)]:
+            continuity = lips.FaceContinuity()
+            continuity.recover(image, [initial], {0: 0}, {0:1}, .10, describe, {0})
+            faces, ids = [], {}
+            continuity.recover(next_frame, faces, ids, {0:1}, .14, described, {0})
+            self.assertEqual(bool(ids), expected)
+            if expected:
+                np.testing.assert_allclose(faces[0][0][4:14].reshape(5,2), row[4:14].reshape(5,2)+[3,2], atol=.45)
+                late, late_ids = [], {}
+                continuity.recover(moved, late, late_ids, {0:1}, .50, describe, {0})
+                self.assertFalse(late_ids)
 
     def test_speaker_assignment_requires_activity_unique_to_the_turn(self):
         observations = {4: {10: (120, 20), 11: (5, 20)}, 8: {10: (5, 20), 11: (125, 20)}}
@@ -203,6 +274,8 @@ class LipSyncTests(unittest.TestCase):
                               [(80+25*np.cos(t), 60+opening*np.sin(t)) for t in inner])
         source, target = mouth(2), mouth(8)
         prediction = np.full_like(original, 20)
+        flat = prediction.copy()
+        self.assertFalse(lips.compose_mouth(flat, source, source, prediction, np.eye(2, 3)))
         actual = original.copy()
         self.assertTrue(lips.compose_mouth(actual, source, target, prediction, np.eye(2, 3)))
         np.testing.assert_array_equal(actual[:30], original[:30])
@@ -269,7 +342,7 @@ class LipSyncTests(unittest.TestCase):
         self.assertIsNone(bank.choose(7, pose, blurred, lips.sealed_contour(mouth)))
         recovered = blurred.copy()
         baseline = blurred.copy()
-        self.assertTrue(lips.compose_mouth(baseline, mouth, mouth, blurred, np.eye(2, 3)))
+        self.assertFalse(lips.compose_mouth(baseline, mouth, mouth, blurred, np.eye(2, 3)))
         self.assertTrue(lips.compose_mouth(recovered, mouth, mouth, blurred, np.eye(2, 3),
                                            texture=(bank, 7, pose)))
         ref = native[46:54, 61:79].astype("float32")

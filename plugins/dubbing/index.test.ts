@@ -5,6 +5,22 @@ import path from "node:path";
 import { expect, it, vi } from "vitest";
 import plugin from "./index.js";
 
+it("reads the number of actively synchronized frames from the completed render event", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-render-result-"));
+  try {
+    const exe = path.join(root, "python");
+    fs.writeFileSync(exe, '#!/usr/bin/env python3\nprint(\'EASYX {"outcome":"rendered","lipSyncFrames":17}\')\n', { mode: 0o700 });
+    vi.stubEnv("EASYX_DUBBING_PYTHON", exe);
+    const result = await plugin.renderDub!(
+      { config: {}, signal: new AbortController().signal, fetch, runCommand: vi.fn(), log: vi.fn() },
+      { mediaId: "example", fingerprint: "sample", language: "fr", source: root, dataDir: root, workDir: root, output: path.join(root, "out.mp4") }, vi.fn(),
+    );
+    expect(result).toEqual({ outcome: "rendered", lipSyncFrames: 17 });
+  } finally {
+    vi.unstubAllEnvs(); fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("exits cleanly for a video with no audio before provisioning models", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-silent-"));
   try {

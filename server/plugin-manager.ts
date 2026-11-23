@@ -72,6 +72,8 @@ export class PluginManager {
     if (plugin.manifest.capabilities.includes("video-dubbing")) {
       const languages = plugin.manifest.dubbingLanguages;
       if (!plugin.renderDub || !languages?.length || languages.some(({ code, label }) => !isSubtitleLanguageCode(code) || !label)) throw new Error("Dubbing plugins must declare a renderer and target languages");
+      const revision = plugin.manifest.dubbingRenderVersion;
+      if (revision !== undefined && (typeof revision !== "string" || !revision.trim())) throw new Error("Invalid dubbing render version");
     }
     if (plugin.manifest.fallback !== undefined && typeof plugin.manifest.fallback !== "boolean") throw new Error("Invalid plugin fallback flag");
     if (plugin.manifest.sourceUrlPatterns && (!plugin.manifest.sourceUrlPatterns.length || plugin.manifest.sourceUrlPatterns.some((pattern) => typeof pattern !== "string" || !pattern.trim()))) throw new Error("Invalid source URL patterns");

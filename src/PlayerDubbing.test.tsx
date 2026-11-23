@@ -9,6 +9,17 @@ describe("library audio versions", () => {
     expect(dubbingStreamUrl("/stream?token=abc", "fr", true)).toBe("/stream?token=abc&dub=fr");
     expect(dubbingStreamUrl("/stream?token=abc", "", true)).toBe("/stream?token=abc&compatible=1");
     expect(dubbingStreamUrl("https://nas.test/stream", "de", false)).toBe("https://nas.test/stream?dub=de");
+    expect(dubbingStreamUrl("/stream", "fr", false, "rev2")).toBe("/stream?dub=fr&v=rev2");
+  });
+
+  it("keeps a published update playable and distinguishes detected lip movement from audio-only output", () => {
+    const html = renderToStaticMarkup(<PlayerDubbing {...controls} state={{ installed: true, variants: [
+      { code: "fr", label: "French", status: "ready", updateStatus: "running", progress: 34, lipSyncFrames: 0 },
+      { code: "es", label: "Spanish", status: "ready", progress: 100, lipSyncFrames: 124 },
+    ] }}/>);
+    expect(html).toContain("Dubbed audio only · Updating 34%");
+    expect(html).toContain("Dubbed audio with lip sync");
+    expect(html).not.toContain("disabled");
   });
 
   it("shows original audio and only permits completed versions", () => {

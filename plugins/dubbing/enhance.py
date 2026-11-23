@@ -1,13 +1,9 @@
 """Estimate a channel-aligned speech stem using Sherpa's 48 kHz DPDFNet2 model."""
-import hashlib
 import math
-import os
-import tempfile
-from pathlib import Path
-from urllib.request import urlopen
 
 import numpy as np
 from scipy.signal import resample_poly
+from model_assets import verified_asset
 
 
 MODEL = "dpdfnet2_48khz_hr.onnx"
@@ -18,41 +14,8 @@ MODEL_RATE = 48_000
 FRAME_SHIFT = 480
 
 
-def _verified(path):
-    return (path.is_file() and path.stat().st_size == MODEL_SIZE
-            and hashlib.sha256(path.read_bytes()).hexdigest() == MODEL_SHA256)
-
-
 def _model_file():
-    override = os.environ.get("EASYX_DUBBING_MODELS")
-    if override:
-        local = Path(override) / "sherpa-onnx" / MODEL
-        if local.exists():
-            if not _verified(local):
-                raise RuntimeError(f"Invalid DPDFNet model checksum at {local}")
-            return local
-
-    cache = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")).parent / "sherpa-onnx"
-    target = cache / MODEL
-    if _verified(target):
-        return target
-    if os.environ.get("HF_HUB_OFFLINE", "").upper() in {"1", "ON", "YES", "TRUE"}:
-        raise RuntimeError(f"DPDFNet model is unavailable offline. Place a verified copy at {target}")
-
-    with urlopen(MODEL_URL, timeout=60) as response:
-        data = response.read(MODEL_SIZE + 1)
-    if len(data) != MODEL_SIZE or hashlib.sha256(data).hexdigest() != MODEL_SHA256:
-        raise RuntimeError("Downloaded DPDFNet model has an invalid checksum")
-    cache.mkdir(parents=True, exist_ok=True)
-    pending = tempfile.NamedTemporaryFile(dir=cache, prefix=MODEL + ".", delete=False)
-    partial = Path(pending.name)
-    try:
-        with pending:
-            pending.write(data)
-        partial.replace(target)
-    finally:
-        partial.unlink(missing_ok=True)
-    return target
+    return verified_asset("sherpa-onnx", MODEL, MODEL_URL, MODEL_SIZE, MODEL_SHA256, label="DPDFNet model")
 
 
 def speech_enhancer():

@@ -167,16 +167,30 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
     const playback = dub === undefined ? await catalog.playbackFile(media, compatible === "1") : { file: dubbing?.file(media, dub), mimeType: "video/mp4" };
     const file = playback.file;
     if (!file) return reply.status(404).send({ error: "Dubbed version is unavailable" });
-    let stat: fs.Stats;
-    try { stat = fs.statSync(file); } catch { throw Object.assign(new Error("Media file is not available"), { statusCode: 404 }); }
-    if (!stat.isFile() || stat.size <= 0) { if (!dub) libraryDb.markMediaUnplayable(media.id); throw Object.assign(new Error("Media file is not playable"), { statusCode: 404 }); }
-    const range = request.headers.range;
-    reply.header("accept-ranges", "bytes").header("content-type", playback.mimeType).header("cache-control", "private, max-age=3600");
-    if (!range) return reply.header("content-length", stat.size).send(fs.createReadStream(file));
-    const parsed = parseMediaRange(range, stat.size);
-    if (!parsed) return reply.status(416).header("content-range", `bytes */${stat.size}`).send();
-    const { start, end } = parsed;
-    return reply.status(206).header("content-range", `bytes ${start}-${end}/${stat.size}`).header("content-length", end - start + 1).send(fs.createReadStream(file, { start, end }));
+    // Keep the opened file across publication of a replacement, including range requests.
+    let fd: number | undefined;
+    try { fd = fs.openSync(file, "r"); } catch { throw Object.assign(new Error("Media file is not available"), { statusCode: 404 }); }
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.size <= 0) { if (!dub) libraryDb.markMediaUnplayable(media.id); throw Object.assign(new Error("Media file is not playable"), { statusCode: 404 }); }
+      let range = request.headers.range;
+      reply.header("accept-ranges", "bytes").header("content-type", playback.mimeType).header("cache-control", dub ? "private, no-cache" : "private, max-age=3600");
+      if (dub) {
+        const etag = `"${stat.ino}-${stat.size}-${stat.mtimeMs}"`;
+        reply.header("etag", etag);
+        const matches = request.headers["if-none-match"]?.split(",").map((value) => value.trim().replace(/^W\//, ""));
+        if (matches?.includes("*") || matches?.includes(etag)) return reply.code(304).send();
+        if (request.headers["if-range"] && request.headers["if-range"] !== etag) range = undefined;
+      }
+      const part = range ? parseMediaRange(range, stat.size) : undefined;
+      if (range && !part) return reply.code(416).header("content-range", `bytes */${stat.size}`).send();
+      if (part) reply.code(206).header("content-range", `bytes ${part.start}-${part.end}/${stat.size}`);
+      const stream = fs.createReadStream(file, { fd, ...part });
+      fd = undefined; // The stream owns the descriptor.
+      return reply.header("content-length", part ? part.end - part.start + 1 : stat.size).send(stream);
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
   };
   app.get<{ Params: { id: string } }>("/api/media/:id/stream", async (request, reply) => sendMedia(request, reply, request.params.id));
 

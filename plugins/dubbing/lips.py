@@ -45,42 +45,147 @@ class FaceModels:
         self.detector = cv2.FaceDetectorYN.create(model_path("detector", "face_detection_yunet_2023mar.onnx"), "", (640, 640), .80)
         self.recognizer = cv2.FaceRecognizerSF.create(model_path("face", "face_recognition_sface_2021dec_int8.onnx"), "")
 
-    def detect(self, image):
+    def detect(self, image, *, relaxed=False):
         h, w = image.shape[:2]
         scale = min(1., 768 / max(w, h))
         small = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else image
         self.detector.setInputSize(small.shape[1::-1])
-        _, rows = self.detector.detect(small)
+        if relaxed:
+            self.detector.setScoreThreshold(.55)
+        try:
+            _, rows = self.detector.detect(small)
+        finally:
+            if relaxed:
+                self.detector.setScoreThreshold(.80)
         faces = []
         for row in (() if rows is None else rows):
             row = row.copy()
             row[:14] /= scale
             if min(row[2:4]) < 28:
                 continue
-            aligned = self.recognizer.alignCrop(image, row)
-            embedding = self.recognizer.feature(aligned).reshape(-1).copy()
-            embedding /= max(np.linalg.norm(embedding), 1e-8)
-            faces.append((row, embedding, cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)))
+            faces.append(self.describe(image, row))
         return faces
 
+    def describe(self, image, row):
+        aligned = self.recognizer.alignCrop(image, row)
+        embedding = self.recognizer.feature(aligned).reshape(-1).copy()
+        embedding /= max(np.linalg.norm(embedding), 1e-8)
+        return row, embedding, cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
 
-def identify(faces, prototypes, learn=False, limit=128):
+
+def identify(faces, prototypes):
     """One visible face per identity. Reject close competing matches."""
     identities = {}
     if prototypes and faces:
-        scores = np.array([[face[1] @ prototype for prototype in prototypes] for face in faces])
+        scores = np.array([[np.max(prototype @ face[1]) for prototype in prototypes] for face in faces])
         rows, cols = linear_sum_assignment(-scores)
         for row, col in zip(rows, cols):
             score = scores[row, col]
             others = np.delete(scores[row], col)
             if score >= .45 and (not others.size or score >= others.max() + .045):
                 identities[int(row)] = int(col)
-    if learn:
-        for i, (_, vector, _) in enumerate(faces):
-            if i not in identities and len(prototypes) < limit and all(vector @ old < .38 for old in prototypes):
-                identities[i] = len(prototypes)
-                prototypes.append(vector)
     return identities
+
+
+class FaceTracks:
+    """Carry compatible appearances through gradual pose changes, never across a cut to a different face."""
+    def __init__(self):
+        self.previous = {}
+
+    def identify(self, faces, prototypes, t, learn=False):
+        ids = identify(faces, prototypes)
+        links = {}
+        for i, (box, vector, crop) in enumerate(faces):
+            matches = []
+            for identity, (at, old_box, old_vector, old_crop) in self.previous.items():
+                if 0 < t-at < .32 and same_face_position(box, old_box) and vector @ old_vector >= .55:
+                    # A continuous upper face remains recognizable even when the mouth changes shape.
+                    upper = np.s_[30:79, 20:92]
+                    if crop[upper].std() >= 3 and cv2.matchTemplate(crop[upper], old_crop[upper], cv2.TM_CCOEFF_NORMED)[0, 0] >= .60:
+                        matches.append(identity)
+            if len(matches) == 1:
+                links[i] = matches[0]
+        for i, identity in links.items():
+            if identity in (v for j, v in ids.items() if j != i) or list(links.values()).count(identity) != 1:
+                continue
+            if i in ids and ids[i] != identity:
+                continue
+            ids[i] = identity
+            if learn:
+                vector = faces[i][1]
+                examples = np.atleast_2d(prototypes[identity])
+                if len(examples) < 12 and np.max(examples @ vector) < .77:
+                    prototypes[identity] = np.vstack((examples, vector))
+        if learn:
+            for i, (_, vector, _) in enumerate(faces):
+                if i not in ids and len(prototypes) < 128 and all(np.max(old @ vector) < .38 for old in prototypes):
+                    ids[i] = len(prototypes)
+                    prototypes.append(vector)
+        self.previous = {identity: (t, *faces[i]) for i, identity in ids.items()}
+        return ids
+
+
+def follow_face(previous, current, row, scale):
+    """Track eyes, nose and upper cheek texture through a short detector miss."""
+    x,y,w,h = row[:4]*scale
+    mask = np.zeros_like(previous)
+    cv2.ellipse(mask, (round(x+.50*w), round(y+.43*h)), (max(2, round(.38*w)), max(2, round(.28*h))), 0, 0, 360, 255, -1)
+    points = cv2.goodFeaturesToTrack(previous, 35, .015, 3, mask=mask)
+    if points is None or len(points)<8:
+        return None
+    forward, ok, error = cv2.calcOpticalFlowPyrLK(previous, current, points, None)
+    reverse, back, _ = cv2.calcOpticalFlowPyrLK(current, previous, forward, None)
+    valid = (ok[:,0]>0) & (back[:,0]>0) & (error[:,0]<18) & (np.linalg.norm(reverse-points, axis=2)[:,0]<1.)
+    if valid.sum() < 8:
+        return None
+    mat, inliers = cv2.estimateAffinePartial2D(points[valid], forward[valid], method=cv2.RANSAC, ransacReprojThreshold=1.5)
+    if mat is None or inliers.sum()<max(7,.65*len(points[valid])) or not .82 < mat[0,0] < 1.22 or abs(mat[0,1])>.26:
+        return None
+    mat[:,2] /= scale
+    x,y,w,h = row[:4]
+    corners = np.float32([[x,y],[x+w,y],[x+w,y+h],[x,y+h]])
+    corners = cv2.transform(corners[None], mat)[0]
+    tracked = row.copy()
+    tracked[:2], tracked[2:4] = corners.min(0), np.ptp(corners, axis=0)
+    tracked[4:14] = cv2.transform(row[4:14].reshape(1,5,2), mat).ravel()
+    return tracked if same_face_position(row, tracked) else None
+
+
+class FaceContinuity:
+    def __init__(self):
+        self.gray = None
+        self.observed = {}
+
+    def recover(self, image, faces, ids, active, t, describe, owners):
+        if describe is None:
+            return
+        scale = min(1., 640/max(image.shape[:2]))
+        small = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale<1 else image
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        observed = {identity: (t, faces[i]) for i, identity in ids.items() if identity in active}
+        for identity, (last, old) in self.observed.items():
+            if identity in observed or identity not in active or t-last > .24 or self.gray is None:
+                continue
+            row = follow_face(self.gray, gray, old[0], scale)
+            if row is None:
+                continue
+            overlapping = [i for i, f in enumerate(faces) if same_face_position(row, f[0])]
+            if len(overlapping)>1:
+                continue
+            if overlapping:
+                i = overlapping[0]
+                if ids.get(i) in owners or ids.get(i) in active or faces[i][1] @ old[1] < .45:
+                    continue
+                face = faces[i]
+            else:
+                face = describe(image, row)
+                if face[1] @ old[1] < .48:
+                    continue
+                i = len(faces)
+                faces.append(face)
+            ids[i] = identity
+            observed[identity] = (last, face)
+        self.gray, self.observed = gray, observed
 
 
 def mouth_motion(previous, current):
@@ -197,11 +302,59 @@ def mux_frames(output, encoder, durations, frame=None):
         output.mux(packet)
 
 
-def learn_speakers(source, cues, models, lip_model=None, anchors=None):
+class SpeakerAnchors(defaultdict):
+    def __init__(self):
+        super().__init__(list)
+        self.local = {}
+        self.solo = {}
+
+    def face(self, cue, t, global_face):
+        votes = self.local.get(cue)
+        if votes is None:
+            return global_face
+        frame = round(t*25)
+        for offset in (0, -1, 1, -2, 2, -3, 3):
+            if frame+offset in votes:
+                return votes[frame+offset]
+        return None
+
+    def match_solo(self, idx, t, image, models, faces, ids, identity, owners):
+        observations = self.solo.get(idx)
+        if not observations or not hasattr(models, "describe") or len(faces)>1:
+            return
+        pos = bisect_left(observations, t, key=lambda r:r[0])
+        nearby = [r for r in observations[max(0,pos-2):pos+2] if abs(r[0]-t)<=.22]
+        if not nearby:
+            return
+        if 0 < pos < len(observations):
+            before, after = observations[pos-1:pos+1]
+            if before[0] < t < after[0] and before[2] @ after[2] < .30:
+                return
+        options = faces if faces else models.detect(image, relaxed=True)
+        if not options and 0 < pos < len(observations):
+            left, right = observations[pos-1:pos+1]
+            if right[0]-left[0]<=.28 and same_face_position(left[1],right[1]):
+                f = (t-left[0])/(right[0]-left[0])
+                options = [models.describe(image, np.float32((1-f)*left[1]+f*right[1]))]
+        if len(options)!=1 or (ids.get(0) in owners and ids[0]!=identity):
+            return
+        candidate = options[0]
+        scores = [candidate[1] @ vector for _,row,vector in nearby if same_face_position(row,candidate[0])]
+        if not scores or max(scores)<.48:
+            return
+        if not faces:
+            faces.append(candidate)
+        ids[0] = identity
+
+
+def learn_speakers(source, cues, models, lip_model=None, anchors=None, source_audio=None):
     prototypes = []
     evidence = defaultdict(lambda: defaultdict(lambda: [0., 0]))
     quiet = defaultdict(lambda: [0., 0])
-    turns, history = Timeline(cues), MotionHistory()
+    candidates = defaultdict(lambda: defaultdict(list))
+    solo = defaultdict(list)
+    multiple = set()
+    turns, history, tracking = Timeline(cues), MotionHistory(), FaceTracks()
     last_turn = max(c["end"] for c in cues)
     next_sample, last_report = -float("inf"), -1
     last_active, previous_speaker = -float("inf"), None
@@ -230,7 +383,16 @@ def learn_speakers(source, cues, models, lip_model=None, anchors=None):
             previous_speaker = speaker
             image = oriented(frame, transform)
             faces = models.detect(image)
-            ids = identify(faces, prototypes, learn=speaker is not None)
+            ids = tracking.identify(faces, prototypes, t, learn=speaker is not None)
+            if isinstance(anchors, SpeakerAnchors) and len(active_cues) == 1:
+                idx = next(iter(active_cues))
+                for i, identity in ids.items():
+                    candidates[idx][identity].append((t, faces[i][0][:4].copy()))
+                if len(faces)==1:
+                    row, vector, _ = faces[0]
+                    solo[idx].append((t, row, vector))
+                elif len(faces)>1:
+                    multiple.add(idx)
             if lip_model is not None:
                 for i, identity in ids.items():
                     lip_model.collect_rest(identity, image, faces[i][0], t)
@@ -247,7 +409,12 @@ def learn_speakers(source, cues, models, lip_model=None, anchors=None):
             if done > last_report:
                 progress("Matching visible speakers", done)
                 last_report = done
-    return prototypes, speaker_mapping(evidence, quiet)
+    speakers = speaker_mapping(evidence, quiet)
+    if isinstance(anchors, SpeakerAnchors):
+        from active_speaker import confirm_candidates
+        anchors.local = confirm_candidates(source, source_audio, candidates, anchors, speakers, cues,
+                                          {i:samples for i,samples in solo.items() if i not in multiple})
+    return prototypes, speakers
 
 
 @lru_cache(maxsize=1)
@@ -444,7 +611,10 @@ def compose_mouth(image, original, target, predicted, prediction_to_image, *, re
     if texture is not None:
         textures, identity, pose = texture
         inside = textures.restore(identity, pose, inside, target-origin, width)
-    region[:] = np.rint(warped*(1-alpha) + inside*alpha).astype("uint8")
+    composed = np.rint(warped*(1-alpha) + inside*alpha).astype("uint8")
+    if np.array_equal(composed, region):
+        return False
+    region[:] = composed
     return True
 
 
@@ -733,10 +903,12 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
     files = {i: wav_dir/f"{i}.wav" for i in range(len(cues)) if (wav_dir/f"{i}.wav").is_file()}
     models = FaceModels() if files else None
     lip_model = LipModel() if models else None
-    anchors = defaultdict(list)
-    prototypes, speakers = learn_speakers(source, cues, models, lip_model, anchors) if models else ([], {})
-    tails = source_speech_tails(source, cues, files, source_audio) if speakers else {}
+    anchors = SpeakerAnchors()
+    prototypes, speakers = learn_speakers(source, cues, models, lip_model, anchors, source_audio) if models else ([], {})
+    tails = source_speech_tails(source, cues, files, source_audio) if speakers or any(anchors.local.values()) else {}
     turns, voices, history = voice_timeline(cues, files, tails), VoiceFeatures(), MotionHistory()
+    tracking, continuity = FaceTracks(), FaceContinuity()
+    owners = set(speakers.values())
     last_motion, visible_turn, previous_boxes = {}, {}, {}
     changed = 0
     with TemporaryDirectory(dir=output.parent) as temp, av.open(str(source)) as src:
@@ -752,14 +924,24 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
                     video_origin, transform = at, orientation(frame)
                 image = oriented(frame, transform)
                 t = at - audio_origin
-                active = {speakers[c["speaker"]]: i for i, c in turns.at(t).items()
-                          if i in files and c["speaker"] in speakers}
+                active = {}
+                for i, cue in turns.at(t).items():
+                    if i in files:
+                        identity = anchors.face(i, min(t, cues[i]["end"]-.01), speakers.get(cue["speaker"]))
+                        if identity is not None:
+                            active[identity] = i
                 original = None
                 if active:
                     original = image
                     image = image.copy()
                     faces = models.detect(image)
-                    ids = identify(faces, prototypes)
+                    ids = tracking.identify(faces, prototypes, t)
+                    if len(active)==1:
+                        identity, idx = next(iter(active.items()))
+                        if identity not in ids.values() and idx in anchors.solo:
+                            anchors.match_solo(idx, t, image, models, faces, ids, identity, owners)
+                    continuity.recover(image, faces, ids, active, t, getattr(models, "describe", None), owners)
+                    tracking.previous = {identity: (t, *faces[i]) for i, identity in ids.items()}
                     boxes = {identity: faces[i][0][:4] for i, identity in ids.items()}
                     for identity, box in boxes.items():
                         if identity in previous_boxes and not same_face_position(previous_boxes[identity], box):
@@ -770,7 +952,7 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
                     for identity, motion in history.observe(t, faces, ids).items():
                         if motion > .65:
                             last_motion[identity] = t
-                    modified = False
+                    modified = voiced_edit = False
                     continuing = {}
                     for i, identity in ids.items():
                         if identity not in active:
@@ -783,25 +965,30 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
                         confirmed = previous is not None and previous[0] == idx and same_face_position(previous[1], row)
                         motion_age = t - last_motion.get(identity, -float("inf"))
                         in_source = t < cues[idx]["end"]
-                        if not confirmed and not (in_source and (motion_age < .2 or nearby_articulation(anchors[idx, identity], t, row))):
+                        if not confirmed and not (in_source and (
+                            idx in anchors.local or motion_age < .2 or nearby_articulation(anchors[idx, identity], t, row)
+                        )):
                             continue
                         local_time = t-cues[idx]["start"]
                         features = voices.at(files[idx], local_time)
                         continuing[identity] = idx, row[:4].copy()
                         if features is not None:
                             amount = voices.phrase(files[idx]).articulation(local_time)
-                            modified |= lip_model.apply(image, row, features, identity=identity, t=t, amount=amount)
+                            applied = lip_model.apply(image, row, features, identity=identity, t=t, amount=amount)
+                            modified |= applied
+                            voiced_edit |= applied and amount > 0
                         elif in_source or (t < tails.get(idx, 0.) and confirmed and motion_age < .2):
                             modified |= lip_model.rest(image, row, identity, t)
                     visible_turn = continuing
                     if not modified:
                         original = None
-                    changed += int(modified)
+                    changed += int(voiced_edit)
                 else:
                     history.previous.clear()
                     last_motion.clear()
                     visible_turn.clear()
                     previous_boxes.clear()
+                    continuity.gray, continuity.observed = None, {}
                 h, w = image.shape[:2]
                 if encoder is None:
                     encoder = dst.add_stream("libx264", rate=rate, options={"crf": "14", "preset": "medium"})

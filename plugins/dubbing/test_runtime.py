@@ -1,12 +1,17 @@
 import contextlib
+import hashlib
 import io
+import os
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 import runtime
+from model_assets import verified_asset
 
 
 class DubbingRuntimeTests(unittest.TestCase):
@@ -61,6 +66,70 @@ class DubbingRuntimeTests(unittest.TestCase):
             self.assertIn("No matching distribution found for flit_core", str(error.exception))
             self.assertNotIn("See above", str(error.exception))
             self.assertNotIn("subprocess-exited-with-error", str(error.exception))
+
+
+class ModelAssetTests(unittest.TestCase):
+    def setUp(self):
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(tmp)
+        self.enterContext(patch.dict(os.environ, {
+            "HF_HOME": str(self.root / "cache" / "huggingface"),
+            "EASYX_DUBBING_MODELS": str(self.root / "overrides"), "HF_HUB_OFFLINE": "",
+        }))
+        self.target = self.root / "cache" / "example" / "weights.bin"
+        self.data = b"verified weights"
+        self.args = ("example", "weights.bin", "https://example.invalid/weights.bin", len(self.data), hashlib.sha256(self.data).hexdigest())
+
+    def test_offline_cache_and_override_are_verified(self):
+        with patch.dict(os.environ, {"HF_HUB_OFFLINE": "on"}), patch("model_assets.urlopen") as download:
+            with self.assertRaisesRegex(RuntimeError, "unavailable offline"):
+                verified_asset(*self.args)
+            self.target.parent.mkdir(parents=True)
+            self.target.write_bytes(self.data)
+            self.assertEqual(verified_asset(*self.args), self.target)
+            override = self.root / "overrides" / "example" / "weights.bin"
+            override.parent.mkdir(parents=True)
+            override.write_bytes(b"X" * len(self.data))
+            with self.assertRaisesRegex(RuntimeError, "Invalid DPDFNet model checksum"):
+                verified_asset(*self.args, label="DPDFNet model")
+            override.write_bytes(self.data)
+            self.assertEqual(verified_asset(*self.args), override)
+            download.assert_not_called()
+
+    def test_invalid_download_preserves_the_existing_cache_and_cleans_temporary_files(self):
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(b"previous")
+        for response in (self.data[:-1], self.data + b"x", b"x" * len(self.data)):
+            with self.subTest(response=response), patch("model_assets.urlopen", return_value=io.BytesIO(response)):
+                with self.assertRaisesRegex(RuntimeError, "invalid checksum"):
+                    verified_asset(*self.args)
+            self.assertEqual(self.target.read_bytes(), b"previous")
+            self.assertEqual(list(self.target.parent.iterdir()), [self.target])
+
+    def test_concurrent_downloads_only_publish_verified_complete_files(self):
+        started = threading.Barrier(3)
+        finish = threading.Event()
+
+        class Response(io.BytesIO):
+            def read(self, n):
+                if self.tell() == 0:
+                    started.wait(timeout=5)
+                    if not finish.wait(timeout=5):
+                        raise TimeoutError("test download did not resume")
+                return super().read(n)
+
+        with patch("model_assets.urlopen", side_effect=lambda *a, **kw: Response(self.data)) as download, ThreadPoolExecutor(2) as pool:
+            futures = [pool.submit(verified_asset, *self.args) for _ in range(2)]
+            try:
+                started.wait(timeout=5)
+                self.assertFalse(self.target.exists())
+            finally:
+                finish.set()
+            self.assertEqual([f.result() for f in futures], [self.target, self.target])
+            self.assertEqual(verified_asset(*self.args), self.target)
+            self.assertEqual(download.call_count, 2)
+        self.assertEqual(self.target.read_bytes(), self.data)
+        self.assertEqual(list(self.target.parent.iterdir()), [self.target])
 
 
 if __name__ == "__main__":

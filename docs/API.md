@@ -59,7 +59,7 @@ Install `org.easyx.dubbing` using the standard plugin endpoint. Save a boolean f
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/dubbing/status` | Get supported and selected languages, the active stage and failures. A shared installation failure sets `runtimeSetup` on the error and returns an ISO timestamp in `runtimeRetryAt` while the queue is waiting |
-| `GET` | `/api/media/:id/dubbing` | Get the status of each language version, including completed renders |
+| `GET` | `/api/media/:id/dubbing` | Get each language variant. Published variants include a `playbackVersion` and, when reported by the renderer, the number of actively articulated frames in `lipSyncFrames`. An `updateStatus` alongside `ready` describes a replacement in progress or awaiting retry |
 | `POST` | `/api/media/:id/dubbing/:language/retry` | Retry a failed selected language |
 | `GET` | `/api/media/:id/stream?dub=fr` | Stream the finished MP4 with HTTP range support |
 

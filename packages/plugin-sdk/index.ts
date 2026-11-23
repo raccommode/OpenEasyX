@@ -31,6 +31,8 @@ export type PluginManifest = {
   /** Supported import languages and translation targets for a subtitle-generation provider. */
   subtitleLanguages?: Array<{ code: string; label: string }>;
   dubbingLanguages?: Array<{ code: string; label: string }>;
+  /** Change when existing rendered videos should be regenerated. */
+  dubbingRenderVersion?: string;
   settings?: SettingField[];
   browserAuth?: {
     loginUrl: string;
@@ -208,8 +210,10 @@ export type DubbingJob = {
   referenceVideos?: DubbingReferenceVideo[];
 };
 
+export type DubbingResult = "rendered" | "original" | "silent" | { outcome: "rendered"; lipSyncFrames?: number };
+
 export interface EasyXPlugin {
-  renderDub?(context: PluginContext, job: DubbingJob, report: (phase: string, progress: number) => void): Promise<"rendered" | "original" | "silent">;
+  renderDub?(context: PluginContext, job: DubbingJob, report: (phase: string, progress: number) => void): Promise<DubbingResult>;
   manifest: PluginManifest;
   testConnection?(context: PluginContext): Promise<{ ok: boolean; message: string }>;
   searchPeople?(context: PluginContext, query: string): Promise<PersonCandidate[]>;

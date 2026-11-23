@@ -45,13 +45,13 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const surface = useRef<HTMLDivElement>(null); const lastSaved = useRef(0);
   const initialAudio = useRef(loadPlayerAudio());
   const recovery = useRef<{ seconds: number; playing: boolean } | undefined>(undefined);
-  const [dub, setDub] = useState<{ id: string; language: string }>();
+  const [dub, setDub] = useState<{ id: string; language: string; version?: string }>();
   const [compatibleId, setCompatibleId] = useState("");
   const [switchingDub, setSwitchingDub] = useState(false);
   const dubRequest = useRef(0);
   const dubbing = useMediaDubbing(media.kind === "video" ? media.id : undefined);
   const language = dub?.id === media.id ? dub.language : "";
-  const streamUrl = dubbingStreamUrl(media.streamUrl, language, compatibleId === media.id);
+  const streamUrl = dubbingStreamUrl(media.streamUrl, language, compatibleId === media.id, dub?.version);
   const mimeType = language || compatibleId === media.id ? "video/mp4" : media.mimeType;
   const [playbackError, setPlaybackError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -193,13 +193,14 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   const selectTrack = (id: string) => { setPreferredTrack(id); writePlayerPreference("open-easyx.subtitle-track", id); setMenu(null); };
   const selectDub = async (nextLanguage: string) => {
     const element = video.current;
-    if (!element || nextLanguage === language) { setMenu(null); return; }
+    const nextVersion = dubbing?.variants.find((variant) => variant.code === nextLanguage)?.playbackVersion;
+    if (!element || (nextLanguage === language && nextVersion === dub?.version)) { setMenu(null); return; }
     const request = ++dubRequest.current;
     const point = cast.casting ? { seconds: cast.remoteTime, playing: !cast.remotePaused } : restorePoint(element);
     if (cast.casting) {
       setSwitchingDub(true);
       try {
-        const nextUrl = dubbingStreamUrl(media.streamUrl, nextLanguage, compatibleId === media.id);
+        const nextUrl = dubbingStreamUrl(media.streamUrl, nextLanguage, compatibleId === media.id, nextVersion);
         await cast.replaceSource(nextUrl, nextLanguage || compatibleId === media.id ? "video/mp4" : media.mimeType, point.seconds, point.playing);
       } catch (err) {
         if (request === dubRequest.current) setNotice(err instanceof Error ? err.message : "The TV could not switch audio languages.");
@@ -209,7 +210,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     if (request !== dubRequest.current) return;
     recovery.current = { seconds: point.seconds, playing: !cast.casting && point.playing };
     element.autoplay = false;
-    setDub({ id: media.id, language: nextLanguage }); setPlaybackError(""); setWaiting(true); setMenu(null);
+    setDub({ id: media.id, language: nextLanguage, version: nextVersion }); setPlaybackError(""); setWaiting(true); setMenu(null);
   };
   const toggleAutoplay = () => { const value = !autoplay; setAutoplay(value); writePlayerPreference("open-easyx.autoplay", String(value)); };
   const next = async () => {
@@ -237,7 +238,10 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     return () => { dubRequest.current++; };
   }, [media.id]);
   useEffect(() => {
-    if (language && dubbing && !dubbing.variants.some((variant) => variant.code === language && variant.status === "ready")) void selectDub("");
+    if (!language || !dubbing) return;
+    const selected = dubbing.variants.find((variant) => variant.code === language && variant.status === "ready");
+    if (!selected) void selectDub("");
+    else if (selected.playbackVersion !== dub?.version) void selectDub(language);
   }, [dubbing, language]);
   useEffect(() => {
     if (media.kind !== "image") return;
