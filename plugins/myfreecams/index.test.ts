@@ -10,7 +10,7 @@ describe("MyFreeCams capture", () => {
     const context = { config: {}, fetch, runCommand, log: vi.fn() };
     const items = await plugin.listMedia!(context, { id: "source", externalId: "Alice", performerId: "person", profileUrl: "https://mfc.im/Alice/chat", domain: "mfc.im" });
     const request = await plugin.resolveDownload!(context, items[0]);
-    expect(request).toMatchObject({ kind: "command", command: "ffmpeg", args: expect.arrayContaining(["-i", "https://cdn.test/live.m3u8", "-allowed_extensions", "m3u8,ts,mp4,m4s,pts,aac"]) });
+    expect(request).toMatchObject({ kind: "command", command: "ffmpeg", liveCaptureContainer: "matroska", args: expect.arrayContaining(["-i", "https://cdn.test/live.m3u8", "-allowed_extensions", "m3u8,ts,mp4,m4s,pts,aac"]) });
     expect(runCommand.mock.calls.every((call) => call[0] === "easyx-browser-fetch" || call[0] === "ffmpeg")).toBe(true);
   });
 });

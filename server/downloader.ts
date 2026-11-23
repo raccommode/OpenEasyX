@@ -32,7 +32,7 @@ type ActiveDownload = {
   /** Live recording of a performer with this priority; preempted when a higher one has to wait for a slot. */
   live?: boolean; priority?: number; startedAt?: number; preempted?: boolean; child?: ChildProcess; abort?: AbortController; paused: boolean; encoding?: boolean; matching?: boolean; action?: "stop" | "cancel" | "delete";
   /** Set while the application shuts down: the item is finished or recovered on the next start. */
-  shuttingDown?: boolean; escalation?: NodeJS.Timeout };
+  shuttingDown?: boolean; escalation?: NodeJS.Timeout; recoverableCapture?: boolean };
 
 /** How long a shutdown waits for live recordings to be saved. Docker's stop_grace_period should be longer. */
 export const SHUTDOWN_GRACE_MS = Math.max(5, Number(process.env.EASYX_SHUTDOWN_GRACE_SECONDS ?? 60) || 60) * 1000;
@@ -197,7 +197,11 @@ export class DownloadQueue {
     control.escalation = setTimeout(() => {
       control.escalation = undefined;
       if (this.active.get(itemId) !== control || !control.child) return;
-      if (cancelling) {
+      if (!cancelling && (control.encoding || control.matching)) return;
+      if (control.recoverableCapture && !cancelling) {
+        this.writeLog?.("warn", "download", "Live capture did not stop; saving its recorded clusters", { itemId });
+        this.signal(control, "SIGKILL");
+      } else if (cancelling) {
         this.writeLog?.("warn", "download", "Download did not stop after cancel; killing it", { itemId });
         this.signal(control, "SIGKILL");
       } else {
@@ -278,7 +282,9 @@ export class DownloadQueue {
       resolutionController.signal.throwIfAborted();
       const fallback = `${item.externalId}.${item.mediaType === "image" ? "jpg" : item.mediaType === "video" ? "mp4" : "bin"}`;
       const requestUrl = request.kind === "command" ? item.pageUrl ?? item.externalId : request.url;
-      const filename = safeSegment(request.filename ?? item.filename ?? filenameFromUrl(requestUrl, fallback), fallback);
+      const requestedFilename = safeSegment(request.filename ?? item.filename ?? filenameFromUrl(requestUrl, fallback), fallback);
+      const captureInMatroska = request.kind === "command" && request.liveCaptureContainer === "matroska";
+      const filename = captureInMatroska ? path.parse(requestedFilename).name + ".mp4" : requestedFilename;
       const destination = path.join(this.mediaRoot, downloadOutputPath(settings, item, performer.name, source.domain, filename));
       this.prepareOutputDirectory(path.dirname(destination));
       temporaryDirectory = path.join(this.downloadsRoot, safeSegment(item.id, "download"));
@@ -287,15 +293,47 @@ export class DownloadQueue {
       temporary = path.join(temporaryDirectory, filename);
       let checksum: string;
       if (request.kind === "command") {
+        const capturePath = captureInMatroska ? path.join(temporaryDirectory, LIVE_CAPTURE_NAME) : undefined;
+        const commandPath = capturePath ?? temporary;
         const placeholders: Record<string, string> = {
-          "{output}": temporary,
-          "{outputDir}": path.dirname(temporary),
-          "{outputName}": path.basename(temporary),
+          "{output}": commandPath,
+          "{outputDir}": temporaryDirectory,
+          "{outputName}": path.basename(commandPath),
         };
-        const commandOutput = await this.runCommandDownload(request.command, request.args.map((argument) => {
+        const args = request.args.map((argument) => {
           for (const [placeholder, value] of Object.entries(placeholders)) argument = argument.replaceAll(placeholder, value);
           return argument;
-        }), temporaryDirectory, item.expectedBytes, reportProgress, control, request.requireSuccessfulExit);
+        });
+        let commandOutput = "", stalledBeforeMedia = false;
+        control.recoverableCapture = Boolean(capturePath);
+        try {
+          commandOutput = await this.runCommandDownload(request.command, args, temporaryDirectory, item.expectedBytes, reportProgress, control, request.requireSuccessfulExit, capturePath ? (bytes) => {
+            if (!bytes) {
+              stalledBeforeMedia = true;
+              this.signal(control, "SIGKILL");
+              return;
+            }
+            this.writeLog?.("warn", "download", "Live capture stopped writing media; saving the recording", { itemId: item.id });
+            this.stopRecording(item.id);
+          } : undefined);
+        } catch (error) {
+          if (stalledBeforeMedia && !capturedFile(temporaryDirectory)) throw new Error("Live capture timed out before any media was recorded");
+          if (!capturePath || request.requireSuccessfulExit || control.action === "cancel" || control.action === "delete" || !capturedFile(temporaryDirectory)) throw error;
+          this.writeLog?.("warn", "download", "Live extractor exited early; saving the recorded media", { itemId: item.id, error: error instanceof Error ? error.message : String(error) });
+        } finally { control.recoverableCapture = false; }
+        if (control.action === "cancel" || control.action === "delete") throw new Error("Download cancelled");
+        if (capturePath) {
+          const captured = capturedFile(temporaryDirectory);
+          if (!captured) throw new Error("Live extractor exited without recording media");
+          const output = temporary;
+          temporary = captured;
+          control.action = undefined; control.encoding = true;
+          if (control.escalation) clearTimeout(control.escalation);
+          if (settings.recordingPreset === "source") {
+            await this.runCommandDownload("ffmpeg", remuxRecordingArgs(["-i", captured], output), temporaryDirectory, undefined, () => {}, control, true);
+            temporary = output;
+          }
+        }
         if (!fs.existsSync(temporary) || fs.statSync(temporary).size === 0) throw new Error("Extractor completed without producing a media file");
         const problems = /\[live-recorder\] stream problems: (\d+) segment\(s\) skipped, (\d+) failed request\(s\)(?:, (\d+) stalled capture\(s\))?/.exec(commandOutput);
         if (problems) this.writeLog?.("warn", "download", "Live stream encountered capture interruptions", { itemId: item.id, title: item.title, skippedSegments: Number(problems[1]), failedRequests: Number(problems[2]), stalledCaptures: Number(problems[3] ?? 0) });
@@ -505,9 +543,9 @@ export class DownloadQueue {
         if (input.parts) {
           const list = path.join(directory, "recovered-parts.txt");
           fs.writeFileSync(list, input.parts.map((part) => `file '${part.replaceAll("'", "'\\''")}'`).join("\n") + "\n");
-          await this.capture("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", list, "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", "-y", output], 30 * 60_000);
+          await this.capture("ffmpeg", remuxRecordingArgs(["-f", "concat", "-safe", "0", "-i", list], output), 30 * 60_000);
         } else {
-          await this.capture("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", input.file!, "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", "-y", output], 30 * 60_000);
+          await this.capture("ffmpeg", remuxRecordingArgs(["-i", input.file!], output), 30 * 60_000);
         }
         if (!fs.existsSync(output) || fs.statSync(output).size === 0) throw new Error("FFmpeg produced no video");
         if (liveAudioSyncEnabled() && (await this.audioGaps(output).catch(() => ({ count: 0 }))).count) {
@@ -520,7 +558,8 @@ export class DownloadQueue {
         const performer = this.db.getPerformer(item.performerId); const source = this.db.getSource(item.sourceId);
         if (!performer || !source) throw new Error("The performer or source no longer exists");
         const fallback = `${item.externalId}.mp4`;
-        const filename = safeSegment(item.filename ?? fallback, fallback);
+        const sourceFilename = safeSegment(item.filename ?? fallback, fallback);
+        const filename = input.file && capturedFile(directory) === input.file ? path.parse(sourceFilename).name + ".mp4" : sourceFilename;
         const destination = path.join(this.mediaRoot, downloadOutputPath(outputSettings(this.db.getSettings()), item, performer.name, source.domain, filename));
         this.prepareOutputDirectory(path.dirname(destination));
         const canonicalDate = this.db.setCanonicalMediaDate(item.id, item.publishedAt);
@@ -622,7 +661,7 @@ export class DownloadQueue {
     child.kill(signal);
   }
 
-  private runCommandDownload(command: string, args: string[], outputDirectory: string, expectedBytes: number | undefined, reportProgress: (progress?: number, downloadedBytes?: number, force?: boolean) => void, control: ActiveDownload, requireSuccessfulExit = false): Promise<string> {
+  private runCommandDownload(command: string, args: string[], outputDirectory: string, expectedBytes: number | undefined, reportProgress: (progress?: number, downloadedBytes?: number, force?: boolean) => void, control: ActiveDownload, requireSuccessfulExit = false, onCaptureStalled?: (bytes: number) => void): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
       control.child = child;
@@ -639,8 +678,24 @@ export class DownloadQueue {
         if (Number.isFinite(downloadedBytes) && downloadedBytes > 0) reportProgress(expectedBytes > 0 ? downloadedBytes / expectedBytes : undefined, downloadedBytes);
       };
       child.stdout.on("data", remember); child.stderr.on("data", remember);
+      const stallSeconds = Number(process.env.EASYX_LIVE_STALL_SECONDS);
+      const stallMs = (Number.isFinite(stallSeconds) && stallSeconds > 0 ? stallSeconds : 60) * 1000;
+      let lastBytes = 0, lastGrowth = Date.now(), stallSignalled = false, captureOpened = false;
       const poll = setInterval(() => {
         const downloadedBytes = this.directoryBytes(outputDirectory);
+        if (onCaptureStalled && !stallSignalled) {
+          const capture = path.join(outputDirectory, LIVE_CAPTURE_NAME);
+          const opened = captureOpened || downloadedBytes > 0 || fs.existsSync(capture) || fs.existsSync(capture + ".part");
+          // Allow slower page extraction to finish before FFmpeg opens its first file.
+          const deadline = opened ? stallMs : Math.max(stallMs, 120_000);
+          if (control.paused || downloadedBytes !== lastBytes || opened !== captureOpened) lastGrowth = Date.now();
+          else if (!control.action && Date.now() - lastGrowth >= deadline) {
+            stallSignalled = true;
+            onCaptureStalled(downloadedBytes);
+          }
+          lastBytes = downloadedBytes;
+          captureOpened = opened;
+        }
         if (downloadedBytes > 0) reportProgress(expectedBytes ? downloadedBytes / expectedBytes : undefined, downloadedBytes);
       }, 250); poll.unref();
       const finish = (error?: Error) => { if (settled) return; settled = true; clearInterval(poll); error ? reject(error) : resolve(output); };
@@ -739,6 +794,22 @@ export class DownloadQueue {
   }
 }
 
+const LIVE_CAPTURE_NAME = "live-capture.mkv";
+
+function capturedFile(directory: string) {
+  for (const name of [LIVE_CAPTURE_NAME, LIVE_CAPTURE_NAME + ".part"]) {
+    const file = path.join(directory, name);
+    try {
+      const stat = fs.statSync(file);
+      if (stat.isFile() && stat.size > 0) return file;
+    } catch { /* Look for the remaining staging file. */ }
+  }
+}
+
+function remuxRecordingArgs(inputArgs: string[], output: string) {
+  return ["-nostdin", "-hide_banner", "-loglevel", "error", ...inputArgs, "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", "-y", output];
+}
+
 const RECORDING_EXTENSIONS = new Set([".ts", ".mp4", ".mkv", ".flv", ".m4v", ".webm", ".part"]);
 
 /** What an interrupted recording left in its staging folder: recorder parts, or the largest partial file. */
@@ -748,6 +819,9 @@ export function recordedInput(directory: string): { parts?: string[]; file?: str
   let parts: string[] = [];
   try { parts = fs.readdirSync(partsDirectory).filter((name) => name.endsWith(".ts")).sort().map((name) => path.join(partsDirectory, name)).filter(nonEmpty); } catch { /* No recorder parts. */ }
   if (parts.length) return { parts };
+  // A restart during MP4 finalization can leave a larger, unindexed output beside the capture.
+  const captured = capturedFile(directory);
+  if (captured) return { file: captured };
   let files: string[] = [];
   try {
     files = fs.readdirSync(directory).map((name) => path.join(directory, name))

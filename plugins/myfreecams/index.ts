@@ -1,3 +1,4 @@
+import { liveCaptureArgs } from "../yt-dlp-utils.js";
 import { createLiveCamPlugin } from "../live-cam-plugin-factory.js";
 import { browserCapturedLiveStream } from "../browser-html-utils.js";
 import type { LiveCam } from "../../packages/plugin-sdk/index.js";
@@ -42,8 +43,8 @@ export default {
       ...(help?.stdout.includes("allowed_segment_extensions") ? ["-allowed_segment_extensions", extensions] : []),
       ...(help?.stdout.includes("extension_picky") ? ["-extension_picky", "0"] : [])] : [];
     const headers = Object.entries(stream.headers ?? {}).map(([name, value]) => `${name}: ${value}`).join("\r\n") + "\r\n";
-    return { kind: "command", command: "ffmpeg", filename: item.filename ?? `${cam.username}-live.mp4`,
+    return { kind: "command", command: "ffmpeg", liveCaptureContainer: "matroska", filename: item.filename ?? `${cam.username}-live.mp4`,
       args: ["-nostdin", "-hide_banner", "-loglevel", "warning", "-rw_timeout", "15000000", ...hlsArgs, "-headers", headers,
-        "-i", stream.url, "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", "-y", "{output}"] };
+        "-i", stream.url, "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", ...liveCaptureArgs, "-y", "{output}"] };
   },
 } satisfies typeof plugin;

@@ -29,12 +29,11 @@ describe("live recording output", () => {
   it("asks FFmpeg to retry failed live segments when it supports that", () => {
     const request = ytDlpDownload({ externalId: "live:alice", mediaType: "video", pageUrl: "https://live.test/alice" }, {}, { live: true, hls: true });
     const retry = ffmpegHlsRetryArgs();
-    if (retry.length) expect(request.args[request.args.indexOf("--downloader-args") + 1]).toBe(`ffmpeg_i:-rw_timeout 15000000 ${retry.join(" ")}`);
-    else expect(request.args).not.toContain("--downloader-args");
+    expect(request.args).toContain(["ffmpeg_i:-rw_timeout 15000000", ...retry].join(" "));
   });
 
   it("does not pass HLS-specific options to live extractors with an unknown protocol", () => {
-    expect(ytDlpDownload({ externalId: "live", mediaType: "video", pageUrl: "https://live.test/alice" }, {}, { live: true }).args).not.toContain("--downloader-args");
+    expect(ytDlpDownload({ externalId: "live", mediaType: "video", pageUrl: "https://live.test/alice" }, {}, { live: true }).args.join(" ")).not.toContain("ffmpeg_i");
   });
 
   it("records the highest quality without a format sort when set to automatic", () => {
@@ -59,10 +58,10 @@ describe("live recording output", () => {
     expect(request.args).not.toContain("--force-ipv4");
   });
 
-  it("writes browser-playable MP4 instead of MPEG-TS bytes behind an .mp4 name", () => {
+  it("stages live media in recoverable clusters for the final MP4", () => {
     const request = ytDlpDownload({ externalId: "live:alice", mediaType: "video", pageUrl: "https://live.test/alice", filename: "alice.mp4" }, {}, { live: true });
-    expect(request.args).toContain("--no-hls-use-mpegts");
-    expect(request.args).not.toContain("--hls-use-mpegts");
-    expect(request.args).toEqual(expect.arrayContaining(["--merge-output-format", "mp4", "--remux-video", "mp4"]));
+    expect(request.liveCaptureContainer).toBe("matroska");
+    expect(request.filename).toBe("alice.mp4");
+    expect(request.args).toContain("ffmpeg_o:-f matroska -cluster_time_limit 2000 -flush_packets 1");
   });
 });

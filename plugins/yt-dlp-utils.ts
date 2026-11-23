@@ -3,6 +3,8 @@ import { ytDlpHeightSort } from "./hls-quality.js";
 import { spawnSync } from "node:child_process";
 import type { CommandDownloadRequest, LiveCam, LiveStream, MediaCandidate, PluginContext } from "../packages/plugin-sdk/index.js";
 
+export const liveCaptureArgs = ["-f", "matroska", "-cluster_time_limit", "2000", "-flush_packets", "1"];
+
 type YtDlpEntry = Record<string, unknown> & { entries?: YtDlpEntry[] };
 
 function text(value: unknown): string | undefined {
@@ -138,10 +140,10 @@ export function ytDlpDownload(item: MediaCandidate, config: Record<string, unkno
   if (options.impersonate) args.push("--impersonate", options.impersonate);
   if (options.referer) args.push("--referer", options.referer);
   if (heightSort) args.push("--format-sort", heightSort);
-  args.push("--format", format, "--merge-output-format", "mp4", "--remux-video", "mp4", "--output", "{output}");
+  args.push("--format", format, "--output", "{output}");
   // Capture separate live video/audio together, preserving their shared timeline.
   if (options.live) {
-    args.push("--downloader", "ffmpeg", "--no-hls-use-mpegts");
+    args.push("--downloader", "ffmpeg", "--merge-output-format", "mkv", "--fixup", "never", "--socket-timeout", "20");
     // Retry a failed segment or playlist instead of skipping it (a skip leaves a freeze and an audio gap).
     // HLS demuxer options make non-HLS inputs fail, so only pass them for
     // providers known to return HLS rather than for every live extractor.
@@ -152,9 +154,13 @@ export function ytDlpDownload(item: MediaCandidate, config: Record<string, unkno
       // yt-dlp's per-input options replace the general options for that input.
       args.push("--downloader-args", `ffmpeg_i:${inputOptions}`, "--downloader-args", `ffmpeg_i2:${inputOptions} -isync 0`);
     }
+    // Each flushed cluster can be recovered without waiting for FFmpeg to write a final index.
+    args.push("--downloader-args", `ffmpeg_o:${liveCaptureArgs.join(" ")}`);
+  } else {
+    args.push("--merge-output-format", "mp4", "--remux-video", "mp4");
   }
   args.push(extractorUrl);
-  return { kind: "command", command: "yt-dlp", args, filename: item.filename ?? `${item.externalId}.mp4` };
+  return { kind: "command", command: "yt-dlp", args, ...(options.live ? { liveCaptureContainer: "matroska" } as const : {}), filename: item.filename ?? `${item.externalId}.mp4` };
 }
 
 export function positiveInteger(value: unknown, fallback: number, maximum = 500): number {

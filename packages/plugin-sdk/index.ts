@@ -93,6 +93,8 @@ export type CommandDownloadRequest = {
   command: string;
   args: string[];
   filename: string;
+  /** Write a crash-recoverable Matroska stream to {output} (or {output}.part) for the queue to finalize as MP4. */
+  liveCaptureContainer?: "matroska";
   /** Wrappers that finalize output themselves must exit successfully, even after a stop. */
   requireSuccessfulExit?: boolean;
 };
