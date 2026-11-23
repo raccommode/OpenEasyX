@@ -161,6 +161,8 @@ export class LibraryDatabase {
         fingerprint TEXT NOT NULL DEFAULT '',
         requested_languages_json TEXT NOT NULL DEFAULT '[]',
         status TEXT NOT NULL DEFAULT 'queued',
+        phase TEXT NOT NULL DEFAULT 'detecting',
+        target_language TEXT NOT NULL DEFAULT '',
         source_language TEXT NOT NULL DEFAULT '',
         source_language_probability REAL NOT NULL DEFAULT 0,
         progress REAL NOT NULL DEFAULT 0,
@@ -184,6 +186,9 @@ export class LibraryDatabase {
     `);
     const playbackColumns = new Set((this.sqlite.prepare("PRAGMA table_info(playback)").all() as Array<{ name: string }>).map((column) => column.name));
     const mediaColumns = new Set((this.sqlite.prepare("PRAGMA table_info(media)").all() as Array<{ name: string }>).map((column) => column.name));
+    const subtitleColumns = new Set((this.sqlite.prepare("PRAGMA table_info(subtitle_jobs)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!subtitleColumns.has("phase")) this.sqlite.exec("ALTER TABLE subtitle_jobs ADD COLUMN phase TEXT NOT NULL DEFAULT 'detecting'");
+    if (!subtitleColumns.has("target_language")) this.sqlite.exec("ALTER TABLE subtitle_jobs ADD COLUMN target_language TEXT NOT NULL DEFAULT ''");
     if (!mediaColumns.has("playable")) this.sqlite.exec("ALTER TABLE media ADD COLUMN playable INTEGER NOT NULL DEFAULT 1");
     if (!mediaColumns.has("media_date")) this.sqlite.exec("ALTER TABLE media ADD COLUMN media_date TEXT");
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS media_date_idx ON media(missing,kind,COALESCE(media_date,modified_at) DESC)");
@@ -436,7 +441,7 @@ export class LibraryDatabase {
       const value = JSON.parse(row.value_json) as Partial<SubtitleSettings>;
       return {
         enabled: value.enabled === true,
-        languages: Array.isArray(value.languages) ? [...new Set(value.languages.filter(isSubtitleLanguageCode))].sort() : [],
+        languages: Array.isArray(value.languages) ? [...new Set(value.languages.filter(isSubtitleLanguageCode))] : [],
       };
     } catch { return { enabled: false, languages: [] }; }
   }
@@ -467,7 +472,7 @@ export class LibraryDatabase {
   setSubtitleSettings(value: SubtitleSettings) {
     const normalized: SubtitleSettings = {
       enabled: value.enabled === true,
-      languages: [...new Set(value.languages.filter(isSubtitleLanguageCode))].sort(),
+      languages: [...new Set(value.languages.filter(isSubtitleLanguageCode))],
     };
     const stamp = new Date().toISOString();
     this.sqlite.prepare(`INSERT INTO settings(key,value_json,updated_at) VALUES('subtitles',?,?)
@@ -525,13 +530,21 @@ export class LibraryDatabase {
     const counts = this.sqlite.prepare(`SELECT COUNT(*) total,
       SUM(CASE WHEN status='complete' THEN 1 ELSE 0 END) complete,
       SUM(CASE WHEN status IN ('queued','running') THEN 1 ELSE 0 END) pending,
-      SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) errors FROM subtitle_jobs`).get() as Record<string, number>;
+      SUM(CASE WHEN status IN ('no_audio','no_speech') THEN 1 ELSE 0 END) skipped,
+      SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) errors FROM subtitle_jobs j
+      JOIN media m ON m.id=j.media_id WHERE m.missing=0 AND m.kind='video'`).get() as Record<string, number>;
     const runtime = this.sqlite.prepare("SELECT value_json FROM settings WHERE key='subtitle_worker_runtime'").get() as { value_json: string } | undefined;
     let worker: Record<string, unknown> = {};
-    try { worker = runtime ? JSON.parse(runtime.value_json) as Record<string, unknown> : {}; } catch { /* Ignore a partial heartbeat write. */ }
+    try { worker = runtime ? JSON.parse(runtime.value_json) ?? {} : {}; } catch { /* Ignore a partial heartbeat write. */ }
+    const active = settings.enabled && worker.state === "processing" && typeof worker.heartbeat === "string"
+      && Date.now() - Date.parse(worker.heartbeat) < 30_000;
+    const currentJob = active && typeof worker.mediaId === "string" ? this.sqlite.prepare(`SELECT m.title,j.progress,j.phase,
+      j.source_language AS sourceLanguage,j.target_language AS targetLanguage FROM subtitle_jobs j JOIN media m ON m.id=j.media_id
+      WHERE j.media_id=? AND j.status='running' AND m.missing=0 AND m.kind='video'`).get(worker.mediaId) : null;
     return {
       settings,
-      counts: { total: Number(counts.total ?? 0), complete: Number(counts.complete ?? 0), pending: Number(counts.pending ?? 0), errors: Number(counts.errors ?? 0) },
+      counts: { total: Number(counts.total ?? 0), complete: Number(counts.complete ?? 0), skipped: Number(counts.skipped ?? 0), pending: Number(counts.pending ?? 0), errors: Number(counts.errors ?? 0) },
+      currentJob: currentJob ?? null,
       worker: settings.enabled ? worker : { state: "disabled" },
     };
   }

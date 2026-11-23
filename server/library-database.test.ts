@@ -326,6 +326,37 @@ describe("media catalog", () => {
     restarted.close();
   });
 
+  it("upgrades existing subtitle jobs and reports only current library work", async () => {
+    const { data, media, db } = fixture();
+    for (const file of ["speech.mp4", "silent.mp4", "missing.mp4"]) fs.writeFileSync(path.join(media, file), file);
+    await new Catalog(db, media, data).scan();
+    const ids = Object.fromEntries(db.listMedia({}).items.map((item) => [item.relativePath, item.id]));
+    db.sqlite.exec("ALTER TABLE subtitle_jobs DROP COLUMN phase; ALTER TABLE subtitle_jobs DROP COLUMN target_language");
+    const stamp = new Date().toISOString();
+    const insert = db.sqlite.prepare("INSERT INTO subtitle_jobs(media_id,status,progress,updated_at) VALUES(?,?,?,?)");
+    insert.run(ids["speech.mp4"], "running", 85, stamp);
+    insert.run(ids["silent.mp4"], "no_speech", 100, stamp);
+    insert.run(ids["missing.mp4"], "error", 0, stamp);
+    db.sqlite.prepare("UPDATE media SET missing=1 WHERE id=?").run(ids["missing.mp4"]);
+    db.close();
+
+    const migrated = new LibraryDatabase(data);
+    try {
+      migrated.sqlite.prepare("UPDATE subtitle_jobs SET phase='translating',source_language='sv',target_language='fr' WHERE media_id=?").run(ids["speech.mp4"]);
+      const heartbeat = (stamp: string) => migrated.sqlite.prepare("INSERT OR REPLACE INTO settings(key,value_json,updated_at) VALUES('subtitle_worker_runtime',?,?)")
+        .run(JSON.stringify({ state: "processing", mediaId: ids["speech.mp4"], heartbeat: stamp }), stamp);
+      const settings = { enabled: true, languages: ["fr"] };
+      heartbeat(stamp);
+      expect(migrated.subtitleOverview(settings)).toMatchObject({
+        counts: { total: 2, complete: 0, skipped: 1, pending: 1, errors: 0 },
+        currentJob: { progress: 85, phase: "translating", sourceLanguage: "sv", targetLanguage: "fr" },
+      });
+      expect(migrated.subtitleOverview({ ...settings, enabled: false }).currentJob).toBeNull();
+      heartbeat(new Date(Date.now() - 60_000).toISOString());
+      expect(migrated.subtitleOverview(settings).currentJob).toBeNull();
+    } finally { migrated.close(); }
+  });
+
   it("stores subtitle preferences, tracks, and filter-consistent autoplay queues", async () => {
     const { data, media, db } = fixture();
     const directory = path.join(media, "Example Performer", "example.com");
@@ -336,7 +367,8 @@ describe("media catalog", () => {
     const video = items.find((item) => item.kind === "video")!;
 
     expect(db.subtitleSettings()).toEqual({ enabled: false, languages: [] });
-    expect(db.setSubtitleSettings({ enabled: true, languages: ["fr", "en", "fr"] })).toEqual({ enabled: true, languages: ["en", "fr"] });
+    expect(db.setSubtitleSettings({ enabled: true, languages: ["fr", "en", "fr"] })).toEqual({ enabled: true, languages: ["fr", "en"] });
+    expect(db.subtitleSettings().languages).toEqual(["fr", "en"]);
     expect(db.storedDownloaderSettings()).toBeUndefined();
     expect(db.downloaderSettings()).toEqual({ host: "localhost", port: 3210 });
     expect(db.setDownloaderSettings({ host: " downloader.local ", port: 4321 })).toEqual({ host: "downloader.local", port: 4321 });

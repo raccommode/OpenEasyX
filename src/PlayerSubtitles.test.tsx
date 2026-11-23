@@ -6,7 +6,7 @@ const track = { id: "manual-fr", language: "fr", label: "French", origin: "manua
 const state: SubtitleState = { pluginEnabled: false, status: "disabled", tracks: [], progress: 0, error: "" };
 
 function render(value: SubtitleState) {
-  return renderToStaticMarkup(<PlayerSubtitles mediaId="video" state={value} selected="off" open toggle={vi.fn()} select={vi.fn()} update={vi.fn()} setNotice={vi.fn()}/>);
+  return renderToStaticMarkup(<PlayerSubtitles mediaId="video" state={value} selected="off" automatic={false} open toggle={vi.fn()} select={vi.fn()} update={vi.fn()} setNotice={vi.fn()}/>);
 }
 
 describe("optional player subtitles", () => {
@@ -43,5 +43,19 @@ describe("optional player subtitles", () => {
     expect(selectedSubtitleTrack("fr", [original, track])).toBe(track.id);
     expect(selectedSubtitleTrack(track.id, [original, track])).toBe(track.id);
     expect(selectedSubtitleTrack("off", [original, track])).toBe("off");
+  });
+
+  it("automatically selects the first available target as translations arrive", () => {
+    const original = { ...track, id: "original", language: "en", origin: "original" as const };
+    const spanish = { ...track, id: "es", language: "es", origin: "generated" as const };
+    const french = { ...track, id: "fr", origin: "generated" as const };
+    const targets = ["fr", "es"];
+    expect(selectedSubtitleTrack("auto", [], targets)).toBe("off");
+    expect(selectedSubtitleTrack("auto", [original], targets)).toBe("original");
+    expect(selectedSubtitleTrack("auto", [original, spanish], targets)).toBe("es");
+    expect(selectedSubtitleTrack("auto", [original, spanish, track, french], targets)).toBe("fr");
+    expect(selectedSubtitleTrack("auto", [original, french], ["en", "fr"])).toBe("original");
+    expect(selectedSubtitleTrack("original", [original, french], targets)).toBe("original");
+    expect(selectedSubtitleTrack("off", [original, french], targets)).toBe("off");
   });
 });

@@ -51,6 +51,12 @@
 .subtitle-plugin-settings .settings-hero { margin-bottom: 0; }
 .subtitle-plugin-settings .language-grid button { min-height: 36px; }
 .subtitle-plugin-settings .worker-error { margin-bottom: 12px; }
+.subtitle-plugin-settings .language-grid small { color: #bbb3ba; font-size: 9px; }
+.subtitle-plugin-settings .settings-card .subtitle-current-title { color: #c1c1ca; overflow-wrap: anywhere; }
+.subtitle-plugin-settings .subtitle-job-progress { display: grid; gap: 6px; margin-bottom: 14px; }
+.subtitle-job-progress > div { display: flex; justify-content: space-between; gap: 12px; color: #c1c1ca; font-size: 11px; }
+.subtitle-job-progress strong { color: #eee; font-variant-numeric: tabular-nums; }
+.subtitle-job-progress progress { width: 100%; height: 8px; accent-color: var(--red); }
 
 @media (max-width: 800px) {
   .categorized-settings-layout { grid-template-columns: 1fr; }

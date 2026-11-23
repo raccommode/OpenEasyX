@@ -33,6 +33,13 @@ LANGUAGES = {
     item["code"]: (item["label"], item["nllb"])
     for item in json.loads(Path(__file__).with_name("languages.json").read_text(encoding="utf-8"))
 }
+# Whisper source codes and NLLB tokenizer language tags. Output choices stay in languages.json.
+SOURCE_LANGUAGES = {
+    **LANGUAGES,
+    **{item["code"]: (item["label"], item["nllb"])
+       for item in json.loads(Path(__file__).with_name("source-languages.json").read_text(encoding="utf-8"))},
+}
+DETECTION_THRESHOLD = 0.5
 
 
 def now() -> str:
@@ -81,9 +88,9 @@ def ensure_dependency(feature: str) -> None:
         return
     print(f"Preparing local {feature} dependencies", flush=True)
     def install(*args: str) -> None:
-        result = subprocess.run([sys.executable, "-m", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        result = subprocess.run([sys.executable, "-m", *args], stderr=subprocess.PIPE, text=True)
         if result.returncode:
-            raise RuntimeError(f"Installing {feature} dependencies failed: {result.stdout[-1200:]}")
+            raise RuntimeError(f"Installing {feature} dependencies failed: {result.stderr.strip()[-1200:]}")
     install("ensurepip")
     pip = ["pip", "--disable-pip-version-check", "install", "--no-cache-dir", "--progress-bar", "off"]
     if torch_requirement:
@@ -109,7 +116,7 @@ def fingerprint(row: sqlite3.Row) -> str:
 
 
 def discover(targets: list[str]) -> None:
-    requested = json.dumps(targets, separators=(",", ":"))
+    requested = json.dumps(sorted(set(targets)), separators=(",", ":"))
     stamp = now()
     with connect() as con:
         videos = con.execute(
@@ -128,14 +135,14 @@ def discover(targets: list[str]) -> None:
                 )
             elif video["previous_fingerprint"] != current:
                 con.execute(
-                    """UPDATE subtitle_jobs SET fingerprint=?,requested_languages_json=?,status='queued',source_language='',
+                    """UPDATE subtitle_jobs SET fingerprint=?,requested_languages_json=?,status='queued',phase='',target_language='',source_language='',
                     source_language_probability=0,progress=0,attempts=0,last_error='',completed_at=NULL,updated_at=? WHERE media_id=?""",
                     (current, requested, stamp, video["id"]),
                 )
                 con.execute("DELETE FROM subtitle_tracks WHERE media_id=? AND origin!='manual'", (video["id"],))
             else:
                 con.execute(
-                    "UPDATE subtitle_jobs SET requested_languages_json=?,status='queued',progress=0,attempts=0,last_error='',updated_at=? WHERE media_id=?",
+                    "UPDATE subtitle_jobs SET requested_languages_json=?,status='queued',phase='',target_language='',progress=0,attempts=0,last_error='',updated_at=? WHERE media_id=?",
                     (requested, stamp, video["id"]),
                 )
 
@@ -228,21 +235,33 @@ def write_track(media_id: str, track_id: str, language: str, label: str, origin:
         )
 
 
-def translate(cues: list[dict[str, Any]], source: str, targets: list[str], media_id: str) -> None:
+def report_progress(media_id: str, phase: str, progress: float, source: str, confidence: float, target: str = "") -> None:
+    with connect() as con:
+        con.execute("""UPDATE subtitle_jobs SET phase=?,target_language=?,progress=?,source_language=?,
+                    source_language_probability=?,updated_at=? WHERE media_id=?""",
+                    (phase, target, progress, source, confidence, now(), media_id))
+
+
+def translate(cues: list[dict[str, Any]], source: str, probability: float, targets: list[str], media_id: str, completed: int) -> None:
     if not targets:
         return
-    if source not in LANGUAGES:
+    total = completed + len(targets)
+    report_progress(media_id, "preparing", 80 + 19 * completed / total, source, probability, targets[0])
+    if source == "und":
+        raise RuntimeError("Spoken language could not be identified for translation. Original subtitles are available.")
+    if source not in SOURCE_LANGUAGES:
         raise RuntimeError(f"translation from detected language '{source}' is not supported yet")
     ensure_dependency("translation")
     import torch
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
     torch.set_num_threads(1)
-    tokenizer = AutoTokenizer.from_pretrained(TRANSLATION_MODEL, cache_dir=MODEL_ROOT, src_lang=LANGUAGES[source][1])
+    tokenizer = AutoTokenizer.from_pretrained(TRANSLATION_MODEL, cache_dir=MODEL_ROOT, src_lang=SOURCE_LANGUAGES[source][1])
     model = AutoModelForSeq2SeqLM.from_pretrained(TRANSLATION_MODEL, cache_dir=MODEL_ROOT)
     model.eval()
     with torch.inference_mode():
-        for target_index, target in enumerate(targets):
+        for target_index, target in enumerate(targets, start=completed):
+            report_progress(media_id, "translating", 80 + 19 * target_index / total, source, probability, target)
             translated: list[dict[str, Any]] = []
             for offset in range(0, len(cues), 8):
                 batch = cues[offset:offset + 8]
@@ -250,9 +269,9 @@ def translate(cues: list[dict[str, Any]], source: str, targets: list[str], media
                 output = model.generate(**encoded, forced_bos_token_id=tokenizer.convert_tokens_to_ids(LANGUAGES[target][1]), max_new_tokens=256)
                 texts = tokenizer.batch_decode(output, skip_special_tokens=True)
                 translated.extend({**cue, "text": " ".join(text.split())} for cue, text in zip(batch, texts))
+                fraction = (offset + len(batch)) / len(cues)
+                report_progress(media_id, "translating", 80 + 19 * (target_index + fraction) / total, source, probability, target)
             write_track(media_id, target, target, LANGUAGES[target][0], "generated", source, translated)
-            with connect() as con:
-                con.execute("UPDATE subtitle_jobs SET progress=?,updated_at=? WHERE media_id=?", (80 + 19 * (target_index + 1) / len(targets), now(), media_id))
 
 
 def save_transcript(file: Path, payload: dict[str, Any]) -> None:
@@ -268,7 +287,8 @@ def load_transcript(file: Path, expected: dict[str, Any]) -> dict[str, Any] | No
         return None
     if not isinstance(payload, dict) or any(payload.get(key) != value for key, value in expected.items()):
         return None
-    if not isinstance(payload.get("language"), str) or not isinstance(payload.get("probability"), (int, float)):
+    confidence = payload.get("probability")
+    if not isinstance(payload.get("language"), str) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
         return None
     cues = payload.get("cues")
     if not isinstance(cues, list) or any(
@@ -280,7 +300,7 @@ def load_transcript(file: Path, expected: dict[str, Any]) -> dict[str, Any] | No
     return payload
 
 
-def transcribe(row: sqlite3.Row, source: Path, duration: float) -> tuple[str, float, list[dict[str, Any]]]:
+def transcribe(row: sqlite3.Row, source: Path, duration: float, legacy: dict[str, Any] | None = None) -> tuple[str, float, list[dict[str, Any]]]:
     media_id = str(row["id"])
     work = SUBTITLE_ROOT / media_id / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -295,33 +315,67 @@ def transcribe(row: sqlite3.Row, source: Path, duration: float) -> tuple[str, fl
         length = min(CHUNK_SECONDS, duration - start)
         checkpoint = work / f"chunk-{index:06d}.json"
         payload = load_transcript(checkpoint, cache_key)
+        if payload is not None and payload["cues"] and "autoDetected" not in payload:
+            # Old workers stored forced language scores as 1. Only the first speech chunk
+            # could contain a detection. Later chunks are reusable once their language is verified.
+            first_detection = not legacy and not cues and payload["probability"] > DETECTION_THRESHOLD and (index == 0 or payload["probability"] < 1)
+            if not (language and payload["language"] == language) and not (not language and first_detection and payload["language"]):
+                payload = None
         if payload is not None:
-            language = language or payload.get("language", "")
-            probability = max(probability, float(payload.get("probability", 0)))
-            cues.extend(payload.get("cues", []))
-            continue
-        if model is None:
-            ensure_dependency("transcription")
-            from faster_whisper import WhisperModel
-            model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=1, num_workers=1, download_root=str(MODEL_ROOT))
-        audio = work / f"chunk-{index:06d}.flac"
-        extract_audio(source, audio, start, length)
-        try:
-            segments, info = model.transcribe(str(audio), task="transcribe", language=language or None, vad_filter=True, beam_size=1, condition_on_previous_text=False)
-            chunk_cues = [
-                {"start": round(start + float(segment.start), 3), "end": round(start + float(segment.end), 3), "text": " ".join(str(segment.text or "").split())}
-                for segment in segments if str(segment.text or "").strip()
-            ]
-            if chunk_cues:
-                language = language or str(info.language or "en")
-                probability = max(probability, float(info.language_probability or 0))
-            cues.extend(chunk_cues)
-            save_transcript(checkpoint, {**cache_key, "language": language, "probability": probability, "cues": chunk_cues})
-        finally:
-            audio.unlink(missing_ok=True)
-        with connect() as con:
-            con.execute("UPDATE subtitle_jobs SET source_language=?,source_language_probability=?,progress=?,updated_at=? WHERE media_id=?", (language, probability, min(80, 80 * (index + 1) / chunks), now(), media_id))
-    return language or "en", probability, cues
+            if not language and payload.get("autoDetected", True) and payload["cues"] and payload["language"] and payload["probability"] > DETECTION_THRESHOLD:
+                language, probability = payload["language"], payload["probability"]
+            cues.extend(payload["cues"])
+        else:
+            if model is None:
+                report_progress(media_id, "preparing", 80 * start / duration, language, probability)
+                ensure_dependency("transcription")
+                from faster_whisper import WhisperModel
+                model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=1, num_workers=1, download_root=str(MODEL_ROOT))
+            report_progress(media_id, "transcribing" if language else "detecting", 80 * start / duration, language, probability)
+            audio = work / f"chunk-{index:06d}.flac"
+            extract_audio(source, audio, start, length)
+            try:
+                segments, info = model.transcribe(str(audio), task="transcribe", language=language or None, vad_filter=True,
+                                                  beam_size=1, condition_on_previous_text=False, language_detection_segments=3,
+                                                  language_detection_threshold=DETECTION_THRESHOLD)
+                report_progress(media_id, "transcribing", 80 * start / duration, language, probability)
+                chunk_cues = []
+                next_update = 0.0
+                detected = False
+                for segment in segments:
+                    text = " ".join(str(segment.text or "").split())
+                    if not text:
+                        continue
+                    if not language and info.all_language_probs and info.language and info.language_probability > DETECTION_THRESHOLD:
+                        language, probability, detected = info.language, float(info.language_probability), True
+                        if legacy and language == legacy["language"]:
+                            report_progress(media_id, "transcribing", 80, language, probability)
+                            return language, probability, legacy["cues"]
+                    end = start + float(segment.end)
+                    chunk_cues.append({"start": round(start + float(segment.start), 3), "end": round(end, 3), "text": text})
+                    if time.monotonic() >= next_update:
+                        report_progress(media_id, "transcribing", 80 * min(end, start + length) / duration, language, probability)
+                        next_update = time.monotonic() + 1
+                cues.extend(chunk_cues)
+                save_transcript(checkpoint, {**cache_key, "language": language, "probability": probability,
+                                             "autoDetected": detected, "cues": chunk_cues})
+            finally:
+                audio.unlink(missing_ok=True)
+        if language and legacy and language == legacy["language"]:
+            # The fresh detection confirms the language used to transcribe the remainder.
+            report_progress(media_id, "transcribing", 80, language, probability)
+            return language, probability, legacy["cues"]
+        report_progress(media_id, "transcribing" if language or cues else "detecting", 80 * (start + length) / duration, language, probability)
+    return language or ("und" if cues else ""), probability, cues
+
+
+def finish_without_subtitles(media_id: str, status: str) -> None:
+    stamp = now()
+    with connect() as con:
+        con.execute("DELETE FROM subtitle_tracks WHERE media_id=? AND origin!='manual'", (media_id,))
+        con.execute("""UPDATE subtitle_jobs SET status=?,phase='',target_language='',source_language='',
+                    source_language_probability=0,progress=100,completed_at=?,updated_at=? WHERE media_id=?""",
+                    (status, stamp, stamp, media_id))
 
 
 def process(row: sqlite3.Row, targets: list[str]) -> None:
@@ -330,8 +384,7 @@ def process(row: sqlite3.Row, targets: list[str]) -> None:
     if not source.is_file():
         raise RuntimeError("media file is not available")
     if not has_audio(source):
-        with connect() as con:
-            con.execute("UPDATE subtitle_jobs SET status='no_audio',progress=100,completed_at=?,updated_at=? WHERE media_id=?", (now(), now(), media_id))
+        finish_without_subtitles(media_id, "no_audio")
         return
     duration = float(row["duration"] or 0) or probe_duration(source)
     if duration <= 0:
@@ -341,32 +394,55 @@ def process(row: sqlite3.Row, targets: list[str]) -> None:
     original_json = SUBTITLE_ROOT / media_id / "original.json"
     cache_key = {"fingerprint": fingerprint(row)}
     payload = load_transcript(original_json, cache_key)
-    if payload is None:
-        language, probability, cues = transcribe(row, source, duration)
-        save_transcript(original_json, {**cache_key, "language": language, "probability": probability, "cues": cues})
+    legacy = payload if payload and not payload.get("detectionVersion") else None
+    unreliable = legacy and (not legacy["language"] or legacy["probability"] <= DETECTION_THRESHOLD
+                             or (legacy["probability"] == 1 and duration > CHUNK_SECONDS))
+    if payload is None or (unreliable and legacy["cues"] and targets):
+        language, probability, cues = transcribe(row, source, duration, legacy)
+        if payload is None or language != payload["language"] or cues != payload["cues"]:
+            with connect() as con:
+                con.execute("DELETE FROM subtitle_tracks WHERE media_id=? AND origin='generated'", (media_id,))
+        save_transcript(original_json, {**cache_key, "language": language, "probability": probability, "detectionVersion": 2, "cues": cues})
     else:
         language, probability, cues = payload["language"], payload["probability"], payload["cues"]
+        if unreliable:
+            if not language or probability <= DETECTION_THRESHOLD:
+                language = "und"
+            probability = 0.0
+        report_progress(media_id, "transcribing", 80, language if cues else "", probability if cues else 0.0)
     work = original_json.parent / "work"
     if work.is_dir():
         shutil.rmtree(work)
     if not cues:
-        with connect() as con:
-            con.execute("UPDATE subtitle_jobs SET status='no_speech',progress=100,completed_at=?,updated_at=? WHERE media_id=?", (now(), now(), media_id))
+        finish_without_subtitles(media_id, "no_speech")
         return
-    original_label = f"Original · {LANGUAGES.get(language, (language.upper(), ''))[0]}"
+    source_label = SOURCE_LANGUAGES.get(language, ("Unknown language" if language == "und" else language.upper(), ""))[0]
+    original_label = f"Original · {source_label}"
     write_track(media_id, "original", language, original_label, "original", language, cues)
-    required = [target for target in targets if target != language]
+    required = list(dict.fromkeys(target for target in targets if target != language))
     with connect() as con:
         completed = con.execute("SELECT id FROM subtitle_tracks WHERE media_id=? AND origin='generated' AND source_language=?", (media_id, language)).fetchall()
     cached = {track["id"] for track in completed if (original_json.parent / f"{track['id']}.vtt").is_file()}
-    translate(cues, language, [target for target in required if target not in cached], media_id)
+    pending = [target for target in required if target not in cached]
+    translate(cues, language, probability, pending, media_id, len(required) - len(pending))
     with connect() as con:
         if required:
             placeholders = ",".join("?" for _ in required)
             con.execute(f"DELETE FROM subtitle_tracks WHERE media_id=? AND origin='generated' AND language NOT IN ({placeholders})", (media_id, *required))
         else:
             con.execute("DELETE FROM subtitle_tracks WHERE media_id=? AND origin='generated'", (media_id,))
-        con.execute("UPDATE subtitle_jobs SET status='complete',source_language=?,source_language_probability=?,progress=100,last_error='',completed_at=?,updated_at=? WHERE media_id=?", (language, probability, now(), now(), media_id))
+        con.execute("UPDATE subtitle_jobs SET status='complete',phase='',target_language='',source_language=?,source_language_probability=?,progress=100,last_error='',completed_at=?,updated_at=? WHERE media_id=?", (language, probability, now(), now(), media_id))
+
+
+def resume_jobs() -> None:
+    with connect() as con:
+        con.execute("UPDATE subtitle_jobs SET status='queued', phase='',target_language='',attempts=MAX(0,attempts-1), updated_at=? WHERE status='running'", (now(),))
+        # Older workers exhausted retries for valid source languages outside the target picker.
+        retryable = [f"translation from detected language '{code}' is not supported yet" for code in SOURCE_LANGUAGES.keys() - LANGUAGES.keys()]
+        if retryable:
+            placeholders = ",".join("?" for _ in retryable)
+            con.execute(f"""UPDATE subtitle_jobs SET status='queued',phase='',target_language='',attempts=0,last_error='',updated_at=?
+                        WHERE status='error' AND last_error IN ({placeholders})""", (now(), *retryable))
 
 
 def main() -> None:
@@ -374,9 +450,8 @@ def main() -> None:
         threading.Thread(target=stop_on_parent_exit, daemon=True).start()
     if not DB_PATH.is_file():
         raise RuntimeError(f"library database not found at {DB_PATH}")
-    targets = sorted(set(json.loads(os.environ.get("EASYX_SUBTITLE_LANGUAGES", "[]"))) & LANGUAGES.keys())
-    with connect() as con:
-        con.execute("UPDATE subtitle_jobs SET status='queued', attempts=MAX(0,attempts-1), updated_at=? WHERE status='running'", (now(),))
+    targets = list(dict.fromkeys(code for code in json.loads(os.environ.get("EASYX_SUBTITLE_LANGUAGES", "[]")) if code in LANGUAGES))
+    resume_jobs()
     while True:
         discover(targets)
         job = next_job()
@@ -396,7 +471,7 @@ def main() -> None:
         failure: Exception | None = None
         try:
             with connect() as con:
-                con.execute("UPDATE subtitle_jobs SET status='running',attempts=attempts+1,progress=0,last_error='',started_at=?,updated_at=? WHERE media_id=?", (now(), now(), job["id"]))
+                con.execute("UPDATE subtitle_jobs SET status='running',phase='preparing',target_language='',source_language='',source_language_probability=0,attempts=attempts+1,progress=0,last_error='',started_at=?,updated_at=? WHERE media_id=?", (now(), now(), job["id"]))
             enter_runtime()
             process(job, targets)
         except Exception as error:

@@ -43,9 +43,9 @@ The official provider has the plugin ID `org.easyx.subtitles`. Use the standard 
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/subtitles/status` | Get plugin availability, generation settings, job counts and worker status |
-| `PUT` | `/api/settings/subtitles` | Save `enabled` and an array of translation language codes in `languages` |
-| `GET` | `/api/media/:id/subtitles` | Read job status and existing track URLs, including after uninstall |
+| `GET` | `/api/subtitles/status` | Get settings, worker status, library counts (including silent videos in `skipped`) and the active `currentJob` with its title, phase, percentage, source and target language |
+| `PUT` | `/api/settings/subtitles` | Save `enabled` and ordered translation language codes in `languages`. An empty array selects original subtitles only |
+| `GET` | `/api/media/:id/subtitles` | Read job status, the detected source language, ordered `targetLanguages` and saved track URLs, including after uninstall |
 | `PUT` | `/api/media/:id/subtitles/:language` | Import SRT or WebVTT in the JSON field `content` with an optional `label` |
 | `POST` | `/api/media/:id/subtitles/retry` | Requeue a failed job when automatic generation is enabled |
 | `GET` | `/api/media/:id/subtitles/:track.vtt` | Play a registered subtitle track |

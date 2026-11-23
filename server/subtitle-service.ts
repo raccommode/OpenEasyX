@@ -44,8 +44,9 @@ export class SubtitleService {
 
   mediaStatus(mediaId: string) {
     const plugin = this.plugins.subtitleProvider();
-    const status = this.db.subtitleStatus(mediaId, this.settingsFor(plugin).enabled);
-    return status && { ...status, pluginEnabled: Boolean(plugin), languages: plugin?.manifest.subtitleLanguages ?? [] };
+    const settings = this.settingsFor(plugin);
+    const status = this.db.subtitleStatus(mediaId, settings.enabled);
+    return status && { ...status, pluginEnabled: Boolean(plugin), targetLanguages: settings.languages, languages: plugin?.manifest.subtitleLanguages ?? [] };
   }
 
   overview() {

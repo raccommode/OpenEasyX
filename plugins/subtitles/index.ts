@@ -9,7 +9,7 @@ export default definePlugin({
   manifest: {
     id: "org.easyx.subtitles",
     name: "Local Subtitles",
-    version: "1.0.0",
+    version: "1.1.0",
     author: "Open EasyX",
     description: "Transcribe library videos with Whisper and translate their subtitles locally. Models download on first use.",
     capabilities: ["subtitle-generation"],

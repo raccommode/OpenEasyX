@@ -101,9 +101,11 @@ npm run check
 
 ### Local Subtitles
 
-Open **Plugins → Not installed → Features & addons**, then install **Local Subtitles**. The plugin transcribes indexed library videos with Whisper. Open **Plugins → Installed → Local Subtitles → Config** to choose translation languages, check progress or pause automatic generation. The first video that needs transcription downloads the speech dependencies and model. Translation downloads its own dependencies and model when first needed. Audio and transcripts are processed on the server.
+Open **Plugins → Not installed → Features & addons**, then install **Local Subtitles**. Whisper detects the spoken language of each indexed video and generates the original subtitles locally. In **Plugins → Installed → Local Subtitles → Config**, choose one or more translation languages for existing and future videos. Leave the selection empty for original subtitles only. When a video is already in a selected language, its original track serves that language.
 
-By default, the player displays the original-language track as soon as it is ready. Use the **Subtitles** menu to select another track, follow generation progress or retry a failed job. The player remembers your selection, including **Off**. Uninstalling the plugin stops processing. Saved subtitle tracks remain playable, and reinstalling restores the saved language choices.
+The settings show the current video, processing stage, percentage and library totals. The first video that needs transcription or translation also downloads the corresponding dependencies and model. On long videos, the original track becomes available after transcription, followed by each translation as it finishes.
+
+The player’s **Automatic** option follows your selected language order and falls back to the original while translations are being prepared. The **Subtitles** menu also lets you choose a specific track, turn subtitles **Off** or retry a failed job. The player remembers your choice. Uninstalling the plugin stops processing. Saved tracks remain playable, and reinstalling restores your language choices.
 
 When upgrading from a version with built-in subtitles, install **Local Subtitles** to resume generation using your previous settings. The plugin reuses `/data/subtitles` and `/data/subtitle-models` and installs its Python packages under `/data/subtitle-runtime`. Outside Docker, use FFmpeg, FFprobe and Python 3.11 with virtual environment support. To use an interpreter with the plugin dependencies already installed, set `EASYX_SUBTITLE_PYTHON` to its executable path.
 
