@@ -90,13 +90,17 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   const useCompatiblePlayback = () => {
     const element = video.current;
     if (!element || (!language && compatibleId === media.id)) return false;
-    recovery.current ??= { seconds: Number.isFinite(element.currentTime) ? element.currentTime : 0, playing: true };
     element.autoplay = false;
     setPlaybackError(""); setWaiting(true); setPlaying(false);
     if (language) {
+      // If the preferred dub never loaded, the original should open with the usual resume and autoplay settings.
+      if (element.readyState >= 1 || element.currentTime > 0) {
+        recovery.current ??= { seconds: element.currentTime, playing: playing || !element.paused };
+      }
       setDub({ id: media.id, language: "", failed: true });
       setNotice("This dubbed version could not be played. Returning to original audio.");
     } else {
+      recovery.current ??= { seconds: Number.isFinite(element.currentTime) ? element.currentTime : 0, playing: true };
       setCompatibleId(media.id);
       setNotice("Preparing a browser-compatible video. This can take a while for long recordings.");
     }
