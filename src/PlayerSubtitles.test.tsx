@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { PlayerSubtitles, selectedSubtitleTrack, type SubtitleState } from "./PlayerSubtitles";
+import { PlayerSubtitles, readSubtitlePreference, selectedSubtitleTrack, type SubtitleState } from "./PlayerSubtitles";
 
 const track = { id: "manual-fr", language: "fr", label: "French", origin: "manual" as const, url: "/captions.vtt", updatedAt: "2026-01-01" };
 const state: SubtitleState = { pluginEnabled: false, status: "disabled", tracks: [], progress: 0, error: "" };
@@ -43,6 +43,19 @@ describe("optional player subtitles", () => {
     expect(selectedSubtitleTrack("fr", [original, track])).toBe(track.id);
     expect(selectedSubtitleTrack(track.id, [original, track])).toBe(track.id);
     expect(selectedSubtitleTrack("off", [original, track])).toBe("off");
+  });
+
+  it("remembers a subtitle language across videos even when original track IDs are reused", () => {
+    const preference = readSubtitlePreference(JSON.stringify({ id: "original", language: "FR" }));
+    const english = { ...track, id: "original", language: "en", origin: "original" as const };
+    const french = { ...track, id: "fr", origin: "generated" as const };
+    expect(selectedSubtitleTrack(preference, [english, track, french], ["en"])).toBe("fr");
+    expect(selectedSubtitleTrack(preference, [english], ["en"])).toBe("off");
+    expect(selectedSubtitleTrack(preference, [english, track])).toBe("manual-fr");
+    expect(selectedSubtitleTrack(readSubtitlePreference('{"id":"manual-fr","language":"fr"}'), [french, track])).toBe("manual-fr");
+    expect(readSubtitlePreference("off")).toBe("off");
+    expect(readSubtitlePreference("manual-fr")).toBe("manual-fr");
+    expect(readSubtitlePreference("{")).toBe("auto");
   });
 
   it("automatically selects the first available target as translations arrive", () => {

@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { dubbingStreamUrl, PlayerDubbing } from "./PlayerDubbing";
+import { dubbingStreamUrl, readyDub, PlayerDubbing } from "./PlayerDubbing";
 
 const controls = { selected: "", busy: false, open: true, select: vi.fn(), toggle: vi.fn() };
 
@@ -10,6 +10,16 @@ describe("library audio versions", () => {
     expect(dubbingStreamUrl("/stream?token=abc", "", true)).toBe("/stream?token=abc&compatible=1");
     expect(dubbingStreamUrl("https://nas.test/stream", "de", false)).toBe("https://nas.test/stream?dub=de");
     expect(dubbingStreamUrl("/stream", "fr", false, "rev2")).toBe("/stream?dub=fr&v=rev2");
+  });
+
+  it("restores only a ready version of the chosen language, including one being updated", () => {
+    const ready = { code: "fr", label: "French", status: "ready" as const, playbackVersion: "revision", updateStatus: "running" as const, progress: 40 };
+    const pending = { ...ready, code: "es", status: "running" as const };
+    const state = { installed: true, variants: [pending, ready] };
+    expect(readyDub(undefined, "fr")).toBeUndefined();
+    expect(readyDub(state, "es")).toBeUndefined();
+    expect(readyDub(state, "")).toBeUndefined();
+    expect(readyDub(state, "FR")).toEqual(ready);
   });
 
   it("keeps a published update playable and distinguishes detected lip movement from audio-only output", () => {

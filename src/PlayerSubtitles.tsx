@@ -7,7 +7,23 @@ export type SubtitleState = {
   pluginEnabled: boolean; status: string; progress: number; error: string; tracks: Track[]; targetLanguages?: string[];
 };
 
-export function selectedSubtitleTrack(preferred: string, tracks: Track[], targets: readonly string[] = []) {
+type SubtitlePreference = string | Pick<Track, "id" | "language">;
+
+export function readSubtitlePreference(value: string | null): SubtitlePreference {
+  if (!value) return "auto";
+  if (!value.startsWith("{")) return value; // Includes track IDs saved by earlier players.
+  try {
+    const saved = JSON.parse(value);
+    if (typeof saved.id === "string" && typeof saved.language === "string" && saved.language) return { id: saved.id, language: saved.language };
+  } catch { /* Ignore invalid saved preferences. */ }
+  return "auto";
+}
+
+export function selectedSubtitleTrack(preferred: SubtitlePreference, tracks: Track[], targets: readonly string[] = []) {
+  if (typeof preferred !== "string") {
+    const matches = tracks.filter((track) => track.language.toLowerCase() === preferred.language.toLowerCase());
+    return (matches.find((track) => track.id === preferred.id) ?? matches.find((track) => track.origin !== "manual") ?? matches[0])?.id ?? "off";
+  }
   if (preferred === "off" || tracks.some((track) => track.id === preferred)) return preferred;
   const languages = preferred === "auto" ? targets : [preferred.replace(/^manual-/, ""), ...targets];
   for (const language of languages) {

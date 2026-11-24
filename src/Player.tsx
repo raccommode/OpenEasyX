@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { AlertTriangle, ArrowLeft, Cast, ChevronsLeft, ChevronsRight, FastForward, ZoomOut, Clock3, Grid3X3, Heart, LoaderCircle, Maximize, Minimize, Pause, Play, RefreshCw, Trash2, Volume2, VolumeX } from "lucide-react";
-import { dubbingStreamUrl, PlayerDubbing, useMediaDubbing } from "./PlayerDubbing";
-import { PlayerSubtitles, selectedSubtitleTrack, useMediaSubtitles } from "./PlayerSubtitles";
+import { dubbingStreamUrl, readyDub, PlayerDubbing, useMediaDubbing } from "./PlayerDubbing";
+import { PlayerSubtitles, readSubtitlePreference, selectedSubtitleTrack, useMediaSubtitles } from "./PlayerSubtitles";
 import { api } from "./api";
 import { initialAutoplay, nextMediaId, PHOTO_AUTOPLAY_SECONDS } from "./playback";
 import { loadPlayerAudio, savePlayerAudio } from "./player-audio";
@@ -45,13 +45,16 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   const video = useRef<HTMLVideoElement>(null); const player = useRef<HTMLDivElement>(null); const surface = useRef<HTMLDivElement>(null); const lastSaved = useRef(0);
   const initialAudio = useRef(loadPlayerAudio());
   const recovery = useRef<{ seconds: number; playing: boolean } | undefined>(undefined);
-  const [dub, setDub] = useState<{ id: string; language: string; version?: string }>();
+  const [preferredDub, setPreferredDub] = useState(() => readPlayerPreference("open-easyx.dubbing-language") || "");
+  const [dub, setDub] = useState<{ id: string; language: string; version?: string; failed?: boolean }>();
   const [compatibleId, setCompatibleId] = useState("");
   const [switchingDub, setSwitchingDub] = useState(false);
   const dubRequest = useRef(0);
   const dubbing = useMediaDubbing(media.kind === "video" ? media.id : undefined);
-  const language = dub?.id === media.id ? dub.language : "";
-  const streamUrl = dubbingStreamUrl(media.streamUrl, language, compatibleId === media.id, dub?.version);
+  const currentDub = dub?.id === media.id ? dub : undefined;
+  const language = currentDub?.language ?? "";
+  const choosingInitialDub = !!preferredDub && !currentDub && media.kind === "video";
+  const streamUrl = dubbingStreamUrl(media.streamUrl, language, compatibleId === media.id, currentDub?.version);
   const mimeType = language || compatibleId === media.id ? "video/mp4" : media.mimeType;
   const [playbackError, setPlaybackError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -64,7 +67,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   const [deleting, setDeleting] = useState(false);
   const [menu, setMenu] = useState<"audio" | "subtitles" | null>(null);
   const menuOpen = useRef(false); menuOpen.current = !!menu;
-  const [preferredTrack, setPreferredTrack] = useState(() => readPlayerPreference("open-easyx.subtitle-track") || "auto");
+  const [preferredTrack, setPreferredTrack] = useState(() => readSubtitlePreference(readPlayerPreference("open-easyx.subtitle-track")));
   const { state: subtitles, update: updateSubtitles } = useMediaSubtitles(media.kind === "video" ? media.id : undefined);
   const subtitleTrack = selectedSubtitleTrack(preferredTrack, subtitles?.tracks ?? [], subtitles?.targetLanguages);
   const [zoom, setZoom] = useState<ZoomState>(NO_ZOOM); const zoomRef = useRef(zoom); zoomRef.current = zoom; const zoomStart = useRef<ZoomState | undefined>(undefined);
@@ -91,7 +94,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     element.autoplay = false;
     setPlaybackError(""); setWaiting(true); setPlaying(false);
     if (language) {
-      setDub(undefined);
+      setDub({ id: media.id, language: "", failed: true });
       setNotice("This dubbed version could not be played. Returning to original audio.");
     } else {
       setCompatibleId(media.id);
@@ -190,11 +193,25 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     return { id: event.pointerId, x: event.clientX - rect.left, y: event.clientY - rect.top, pointerType: event.pointerType || "mouse", time: event.timeStamp || performance.now() };
   };
   const toggleMute = () => { const element = video.current; if (!element) return; element.muted = !element.muted; setMuted(element.muted); savePlayerAudio({ volume: element.volume, muted: element.muted }); };
-  const selectTrack = (id: string) => { setPreferredTrack(id); writePlayerPreference("open-easyx.subtitle-track", id); setMenu(null); };
-  const selectDub = async (nextLanguage: string) => {
+  const selectTrack = (id: string) => {
+    const track = subtitles?.tracks.find((entry) => entry.id === id);
+    const choice = track ? { id: track.id, language: track.language } : id;
+    setPreferredTrack(choice);
+    writePlayerPreference("open-easyx.subtitle-track", typeof choice === "string" ? choice : JSON.stringify(choice));
+    setMenu(null);
+  };
+  const switchDub = async (nextLanguage: string, remember = false) => {
     const element = video.current;
-    const nextVersion = dubbing?.variants.find((variant) => variant.code === nextLanguage)?.playbackVersion;
-    if (!element || (nextLanguage === language && nextVersion === dub?.version)) { setMenu(null); return; }
+    if (!element) return;
+    const nextVersion = readyDub(dubbing, nextLanguage)?.playbackVersion;
+    const rememberChoice = () => {
+      if (!remember) return;
+      setPreferredDub(nextLanguage);
+      writePlayerPreference("open-easyx.dubbing-language", nextLanguage);
+    };
+    if (nextLanguage === language && nextVersion === currentDub?.version) {
+      rememberChoice(); setMenu(null); return;
+    }
     const request = ++dubRequest.current;
     const point = cast.casting ? { seconds: cast.remoteTime, playing: !cast.remotePaused } : restorePoint(element);
     if (cast.casting) {
@@ -208,8 +225,12 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
       } finally { if (request === dubRequest.current) setSwitchingDub(false); }
     }
     if (request !== dubRequest.current) return;
-    recovery.current = { seconds: point.seconds, playing: !cast.casting && point.playing };
+    // Before the first metadata event the new source should use the video's saved progress and autoplay.
+    if (cast.casting || recovery.current || element.readyState > 0) {
+      recovery.current = { seconds: point.seconds, playing: !cast.casting && point.playing };
+    }
     element.autoplay = false;
+    rememberChoice();
     setDub({ id: media.id, language: nextLanguage, version: nextVersion }); setPlaybackError(""); setWaiting(true); setMenu(null);
   };
   const toggleAutoplay = () => { const value = !autoplay; setAutoplay(value); writePlayerPreference("open-easyx.autoplay", String(value)); };
@@ -230,7 +251,8 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     lastSaved.current = 0; autoHide.current?.cancel();
     recovery.current = undefined; setDub(undefined); setCompatibleId(""); setPlaybackError(""); setSwitchingDub(false);
     if (media.kind === "video" && video.current) {
-      video.current.autoplay = autoStart; video.current.src = media.streamUrl; video.current.load();
+      video.current.autoplay = autoStart;
+      if (!video.current.hasAttribute("src")) video.current.load();
     }
     initialAudio.current = loadPlayerAudio(); setVolume(initialAudio.current.volume); setMuted(initialAudio.current.muted);
     setPlaying(false); setWaiting(false); setControls(true); setCurrentTime(media.progressSeconds || 0); setDuration(media.duration || 0); setBuffered(0);
@@ -238,11 +260,20 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     return () => { dubRequest.current++; };
   }, [media.id]);
   useEffect(() => {
-    if (!language || !dubbing) return;
-    const selected = dubbing.variants.find((variant) => variant.code === language && variant.status === "ready");
-    if (!selected) void selectDub("");
-    else if (selected.playbackVersion !== dub?.version) void selectDub(language);
-  }, [dubbing, language]);
+    if (media.kind !== "video") return;
+    const variant = readyDub(dubbing, preferredDub);
+    if (!currentDub) {
+      const initial = { id: media.id, language: variant?.code ?? "", version: variant?.playbackVersion };
+      if (preferredDub && !dubbing) {
+        // Keep playback available if looking up audio versions takes too long.
+        const timer = window.setTimeout(() => setDub(initial), 2500);
+        return () => window.clearTimeout(timer);
+      }
+      setDub(initial);
+    } else if (dubbing && !currentDub.failed && (language !== (variant?.code ?? "") || currentDub.version !== variant?.playbackVersion)) {
+      void switchDub(variant?.code ?? "");
+    }
+  }, [media.id, media.kind, currentDub, preferredDub, dubbing]);
   useEffect(() => {
     if (media.kind !== "image") return;
     setPhotoRemaining(PHOTO_AUTOPLAY_SECONDS);
@@ -294,7 +325,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     <div className="theater-stage">{media.kind === "video" ? <div ref={player} className={`custom-player ${pageFullscreen ? "page-fullscreen" : ""} ${controls || !shownPlaying ? "controls-visible" : "controls-hidden"} ${zoom.scale > 1 ? "zoomed" : ""}`} tabIndex={0} onPointerMove={(event) => { if (event.pointerType === "mouse") reveal(); }} onMouseLeave={() => shownPlaying && !menu && setControls(false)}>
       <div ref={surface} className="player-surface" onPointerDown={(event) => { if (event.button > 0) return; event.currentTarget.setPointerCapture?.(event.pointerId); recognizer.current?.down(gesturePoint(event)); }}
         onPointerMove={(event) => recognizer.current?.move(gesturePoint(event))} onPointerUp={(event) => recognizer.current?.up(gesturePoint(event))} onPointerCancel={(event) => recognizer.current?.cancel(gesturePoint(event))}
-        onContextMenu={(event) => { if (speedHold) event.preventDefault(); }}><video ref={video} style={zoom.scale > 1 ? { transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: "0 0" } : undefined} src={streamUrl} poster={media.thumbnailUrl} playsInline preload="metadata" autoPlay={autoStart}
+        onContextMenu={(event) => { if (speedHold) event.preventDefault(); }}><video ref={video} style={zoom.scale > 1 ? { transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: "0 0" } : undefined} src={choosingInitialDub ? undefined : streamUrl} poster={media.thumbnailUrl} playsInline preload="metadata" autoPlay={autoStart}
         onLoadedMetadata={(event) => {
           const element = event.currentTarget;
           const pending = recovery.current; recovery.current = undefined;
@@ -316,13 +347,13 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
       {zoom.scale > 1 && <button className="player-zoom-reset" onClick={() => setZoom(NO_ZOOM)} aria-label="Reset zoom"><ZoomOut/>{zoom.scale.toFixed(1)}×</button>}
       {cast.casting && <div className="player-cast-overlay"><Cast/><b>Casting to {cast.device}</b><button className="quiet" onClick={cast.stop}>Stop casting</button></div>}
       {playbackError && <div className="player-error" role="alert"><AlertTriangle/><b>Video playback interrupted</b><span>{playbackError}</span><button className="quiet" onClick={() => { reloadPlayback(); setRetry((value) => value + 1); }}><RefreshCw/>Try again</button></div>}
-      {waiting && !playbackError && <div className="player-buffering"><LoaderCircle className="spin"/></div>}{!shownPlaying && !(waiting && !cast.casting) && !playbackError && <button className="player-center-play" onClick={togglePlayback} aria-label="Play"><Play fill="currentColor"/></button>}
+      {(choosingInitialDub || waiting) && !playbackError && <div className="player-buffering"><LoaderCircle className="spin"/></div>}{!choosingInitialDub && !shownPlaying && !(waiting && !cast.casting) && !playbackError && <button className="player-center-play" onClick={togglePlayback} aria-label="Play"><Play fill="currentColor"/></button>}
       <div className="player-controls" onClick={(event) => event.stopPropagation()} onPointerDown={reveal}><div className="player-timeline"><span className="player-buffered" style={{ width: `${bufferedProgress}%` }}/><span className="player-elapsed" style={{ width: `${progress}%` }}/><input type="range" min="0" max={shownDuration || 0} step="0.1" value={Math.min(shownTime, shownDuration || 0)} onChange={(event) => seek(Number(event.target.value))} aria-label="Video position"/></div>
         <div className="player-control-row"><div className="player-controls-left"><button className="player-icon-button" onClick={togglePlayback} aria-label={shownPlaying ? "Pause" : "Play"}>{shownPlaying ? <Pause fill="currentColor"/> : <Play fill="currentColor"/>}</button><div className="player-volume"><button className="player-icon-button" onClick={toggleMute} aria-label={muted || volume === 0 ? "Unmute" : "Mute"}>{muted || volume === 0 ? <VolumeX/> : <Volume2/>}</button><input aria-label="Volume" type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} onChange={(event) => { const element = video.current; if (!element) return; element.volume = Number(event.target.value); element.muted = element.volume === 0; }}/></div><span className="player-time"><b>{playerTime(shownTime)}</b><i>/</i><span>{playerTime(shownDuration)}</span></span></div>
           <div className="player-controls-right"><button className={`player-autoplay ${autoplay ? "active" : ""}`} aria-label="Autoplay" aria-pressed={autoplay} onClick={toggleAutoplay}><span>Auto</span><i/></button>
-            <PlayerDubbing state={dubbing} selected={language} busy={switchingDub} open={menu === "audio"} toggle={() => { setMenu(menu === "audio" ? null : "audio"); setControls(true); autoHide.current?.cancel(); }} select={(code) => void selectDub(code)}/>
+            <PlayerDubbing state={dubbing} selected={language} busy={switchingDub} open={menu === "audio"} toggle={() => { setMenu(menu === "audio" ? null : "audio"); setControls(true); autoHide.current?.cancel(); }} select={(code) => void switchDub(code, true)}/>
             {subtitles && <PlayerSubtitles key={media.id} mediaId={media.id} state={subtitles} selected={subtitleTrack} automatic={preferredTrack === "auto"} open={menu === "subtitles"} toggle={() => { setMenu(menu === "subtitles" ? null : "subtitles"); setControls(true); autoHide.current?.cancel(); }} select={selectTrack} update={updateSubtitles} setNotice={setNotice}/>}
-            <button className={`player-icon-button player-cast-button ${cast.casting ? "active" : ""} ${cast.available ? "" : "unavailable"}`} onClick={() => cast.casting ? cast.stop() : void cast.start(shownTime)} aria-label={cast.casting ? `Stop casting to ${cast.device}` : "Cast to a TV"} title={cast.casting ? `Casting to ${cast.device}` : cast.available ? "Cast to a TV" : "Cast (see how to enable it)"}><Cast/></button>
+            <button disabled={choosingInitialDub} className={`player-icon-button player-cast-button ${cast.casting ? "active" : ""} ${cast.available ? "" : "unavailable"}`} onClick={() => cast.casting ? cast.stop() : void cast.start(shownTime)} aria-label={cast.casting ? `Stop casting to ${cast.device}` : "Cast to a TV"} title={cast.casting ? `Casting to ${cast.device}` : cast.available ? "Cast to a TV" : "Cast (see how to enable it)"}><Cast/></button>
             <button className="player-icon-button" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{fullscreen ? <Minimize/> : <Maximize/>}</button></div></div></div>
     </div> : <div ref={player} className={`image-stage ${pageFullscreen ? "page-fullscreen" : ""}`}><img src={media.streamUrl} alt={media.title} onLoad={() => setPhotoReady(true)} onError={() => setPhotoReady(true)}/><div className="photo-controls"><div className="photo-timeline"><i style={{ width: `${autoplay && photoReady ? (PHOTO_AUTOPLAY_SECONDS - photoRemaining) / PHOTO_AUTOPLAY_SECONDS * 100 : 0}%` }}/></div><div className="photo-control-row"><span>{autoplay ? photoReady ? `Next item in ${photoRemaining}s` : "Loading photo…" : "Autoplay is off"}</span><div><button className={`player-autoplay ${autoplay ? "active" : ""}`} aria-label="Autoplay" aria-pressed={autoplay} onClick={toggleAutoplay}><span>Auto</span><i/></button><button className="player-icon-button" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{fullscreen ? <Minimize/> : <Maximize/>}</button></div></div></div></div>}</div>
     <section className="watch-info">

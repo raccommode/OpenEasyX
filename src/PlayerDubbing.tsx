@@ -35,6 +35,10 @@ export function useMediaDubbing(mediaId?: string) {
   return result && result.mediaId === mediaId ? result.state : undefined;
 }
 
+export function readyDub(state: MediaDubbing | undefined, language: string) {
+  return state?.variants.find((variant) => variant.status === "ready" && variant.code.toLowerCase() === language.toLowerCase());
+}
+
 export function dubbingStreamUrl(base: string, language: string, compatible: boolean, version?: string) {
   if (!language && !compatible) return base;
   const url = new URL(base, "http://localhost");
