@@ -5,16 +5,23 @@ import type { Database } from "./database.js";
 import { LibraryDatabase, type LibraryQuery, type MediaKind } from "./library-database.js";
 import type { DubbingService } from "./dubbing-service.js";
 import type { SubtitleService } from "./subtitle-service.js";
-import { subtitleFilePath, writeManualSubtitle } from "./subtitles.js";
+import { isSubtitleLanguageCode, subtitleFilePath, writeManualSubtitle } from "./subtitles.js";
 
 function positive(value: unknown, fallback: number, maximum = Number.MAX_SAFE_INTEGER) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(maximum, Math.max(1, Math.floor(number))) : fallback;
 }
 
-function libraryQuery(value: Record<string, string | undefined>): LibraryQuery {
+function trackFilter(value?: string) {
+  if (value === "with" || value === "without") return value;
+  return isSubtitleLanguageCode(value) ? value.toLowerCase() : undefined;
+}
+
+function libraryQuery(value: Record<string, string | undefined>, subtitles: SubtitleService, dubbing?: DubbingService): LibraryQuery {
   return {
     q: value.q?.slice(0, 200),
+    subtitles: value.subtitles && value.kind !== "image" && subtitles.installed ? trackFilter(value.subtitles) : undefined,
+    dubbing: value.dubbing && value.kind !== "image" && dubbing?.installed ? trackFilter(value.dubbing) : undefined,
     kind: (["video", "image"].includes(value.kind ?? "") ? value.kind : "") as MediaKind | "",
     performer: value.performer?.slice(0, 200), source: value.source?.slice(0, 200),
     favorite: value.favorite === "true", history: value.history === "true",
@@ -73,17 +80,21 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
   app.post("/api/scan", async () => catalog.scan());
   app.get("/api/scan/status", async () => catalog.status);
   app.get<{ Querystring: Record<string, string | undefined> }>("/api/library", async (request) => {
-    const result = libraryDb.listMedia(libraryQuery(request.query));
+    const result = libraryDb.listMedia(libraryQuery(request.query, subtitles, dubbing));
     return { ...result, items: result.items.map(payload) };
   });
-  app.get<{ Querystring: Record<string, string | undefined> }>("/api/library/playlist", async (request) => ({ ids: libraryDb.playlist(libraryQuery(request.query)) }));
+  app.get<{ Querystring: Record<string, string | undefined> }>("/api/library/playlist", async (request) => ({ ids: libraryDb.playlist(libraryQuery(request.query, subtitles, dubbing)) }));
   app.get("/api/library-performers", async () => libraryDb.performers().map((performer) => {
     const cover = libraryDb.getMedia(performer.coverId);
     return { ...performer, coverUrl: cover ? payload(cover).thumbnailUrl : "" };
   }));
   app.get<{ Querystring: Record<string, string | undefined> }>("/api/facets", async (request) => {
-    const query = libraryQuery(request.query);
-    return libraryDb.facets({ performer: query.performer, watched: query.watched });
+    const query = libraryQuery(request.query, subtitles, dubbing);
+    return {
+      ...libraryDb.facets({ performer: query.performer, watched: query.watched, subtitles: query.subtitles, dubbing: query.dubbing }),
+      subtitleLanguages: subtitles.installed ? libraryDb.trackLanguages("subtitles") : undefined,
+      dubbingLanguages: dubbing?.installed ? libraryDb.trackLanguages("dubbing") : undefined,
+    };
   });
   app.get<{ Params: { id: string } }>("/api/media/:id", async (request) => payload(requiredMedia(request.params.id)));
 

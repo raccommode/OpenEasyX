@@ -1,7 +1,7 @@
 import { firstMediaDate, validMediaDate } from "../packages/media-date";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Aperture, BarChart3, ChevronLeft, ChevronRight, Clock3, Eye, Film, FolderSearch2, HardDrive, Heart, History, Image as ImageIcon,
+  Aperture, AudioLines, BarChart3, Captions, ChevronLeft, ChevronRight, Clock3, Eye, Film, FolderSearch2, HardDrive, Heart, History, Image as ImageIcon,
   Library as LibraryIcon, ListChecks, LoaderCircle, Play, Search, SlidersHorizontal, Sparkles,
   Radio, Square, CheckSquare, Trash2, UserRound, Users, X,
 } from "lucide-react";
@@ -27,8 +27,8 @@ type Dashboard = { stats: Stats; scan: Scan; featured?: Media; featuredReason: "
 type Scan = { running: boolean; indexed: number; lastScanAt: string; error: string };
 type LibraryResult = { items: Media[]; total: number; page: number; pageSize: number; pages: number };
 type Performer = { name: string; count: number; videos: number; images: number; coverId?: string; coverUrl?: string };
-type Facets = { performers: Performer[]; sources: Array<{ name: string; count: number }> };
-type LibraryPreset = { query?: string; performer?: string; source?: string; kind?: "video" | "image" | ""; watched?: "unseen" | "progress" | "unfinished" | "completed" | ""; sort?: string; page?: number };
+type Facets = { subtitleLanguages?: string[]; dubbingLanguages?: string[]; performers: Performer[]; sources: Array<{ name: string; count: number }> };
+type LibraryPreset = { query?: string; subtitles?: string; dubbing?: string; performer?: string; source?: string; kind?: "video" | "image" | ""; watched?: "unseen" | "progress" | "unfinished" | "completed" | ""; sort?: string; page?: number };
 type Page = "home" | "live-cam" | "library" | "performers" | "favorites" | "history" | "statistics";
 type OpenMedia = (media: Media, context?: PlaybackContext) => void;
 type DeletionResult = { deleted: Array<{ id: string; bytes: number; downloaderTracked: boolean }>; failed: Array<{ id: string; error: string }> };
@@ -69,6 +69,7 @@ function presetFromSearch(search: string): LibraryPreset {
     query: params.get("q") ?? "", performer: params.get("performer") ?? "", source: params.get("source") ?? "",
     kind: (["video", "image"].includes(kind) ? kind : "") as LibraryPreset["kind"],
     watched: (["unseen", "progress", "unfinished", "completed"].includes(watched) ? watched : "") as LibraryPreset["watched"],
+    subtitles: params.get("subtitles")?.toLowerCase() ?? "", dubbing: params.get("dubbing")?.toLowerCase() ?? "",
     sort: params.get("sort") ?? "", page,
   };
 }
@@ -77,6 +78,7 @@ function pageUrl(page: Page, preset: LibraryPreset = {}) {
   if (preset.query) params.set("q", preset.query); if (preset.kind) params.set("kind", preset.kind);
   if (preset.performer) params.set("performer", preset.performer); if (preset.source) params.set("source", preset.source);
   if (preset.watched) params.set("watched", preset.watched); if (preset.sort) params.set("sort", preset.sort);
+  if (preset.subtitles) params.set("subtitles", preset.subtitles); if (preset.dubbing) params.set("dubbing", preset.dubbing);
   if ((preset.page ?? 1) > 1) params.set("page", String(preset.page));
   const query = params.toString(); return `${pagePaths[page]}${query ? `?${query}` : ""}`;
 }
@@ -310,27 +312,53 @@ function Shelf({ title, subtitle, items, open, favorite, all }: { title: string;
   return <section className="shelf"><div className="section-head"><div><h2>{title}</h2><p>{subtitle}</p></div><button onClick={all}>View all</button></div><div className="media-row">{items.map((media) => <MediaCard key={media.id} media={media} open={(item) => open(item, { ids: items.map((entry) => entry.id) })} favorite={favorite}/>)}</div></section>;
 }
 
+const languageNames = new Intl.DisplayNames(["en"], { type: "language" });
+function languageLabel(code: string) {
+  try { return languageNames.of(code) ?? code; } catch { return code; }
+}
+
+function TrackFilter({ type, languages, value, onChange }: { type: "subtitles" | "dubbing"; languages: string[]; value: string; onChange: (value: string) => void }) {
+  const subtitle = type === "subtitles";
+  const languageOptions = value && value !== "with" && value !== "without" && !languages.includes(value) ? [...languages, value] : languages;
+  return <label>{subtitle ? <Captions/> : <AudioLines/>}
+    <select aria-label={`Filter by ${type}`} value={value} onChange={(event) => onChange(event.target.value)}>
+      <option value="">{subtitle ? "Any subtitle status" : "Any dubbing status"}</option>
+      <option value="with">With {type}</option><option value="without">Without {type}</option>
+      {languageOptions.length > 0 && <optgroup label={subtitle ? "Subtitle language" : "Dubbing language"}>
+        {languageOptions.map((code) => <option key={code} value={code}>{languageLabel(code)}</option>)}
+      </optgroup>}
+    </select>
+  </label>;
+}
+
 function Library({ preset = {}, favoriteOnly = false, historyOnly = false, open, favorite, remove, route }: { preset?: LibraryPreset; favoriteOnly?: boolean; historyOnly?: boolean; open: OpenMedia; favorite: (media: Media, value: boolean) => void; remove: DeleteMedia; route: (preset: LibraryPreset) => void }) {
   const [query, setQuery] = useState(preset.query ?? "");
   const [kind, setKind] = useState(preset.kind ?? "");
   const [performer, setPerformer] = useState(preset.performer ?? "");
   const [source, setSource] = useState(preset.source ?? "");
   const [watched, setWatched] = useState(preset.watched ?? "");
-  const [sort, setSort] = useState(preset.sort ?? (historyOnly ? "history" : "recent"));
+  const [subtitles, setSubtitles] = useState(preset.subtitles ?? "");
+  const [dubbing, setDubbing] = useState(preset.dubbing ?? "");
+  const [sort, setSort] = useState(preset.sort || (historyOnly ? "history" : "recent"));
   const [facets, setFacets] = useState<Facets>({ performers: [], sources: [] });
+  const [searchError, setSearchError] = useState("");
   const [result, setResult] = useState<LibraryResult | null>(null);
   const [page, setPage] = useState(preset.page ?? 1); const [loading, setLoading] = useState(true);
   const [selectionMode, setSelectionMode] = useState(false); const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set()); const [deleting, setDeleting] = useState(false);
-  const params = useMemo(() => new URLSearchParams({
-    q: query, kind, performer, source, watched, sort, page: String(page), pageSize: "48",
-    favorite: favoriteOnly ? "true" : "", history: historyOnly ? "true" : "",
-  }), [query, kind, performer, source, watched, sort, page, favoriteOnly, historyOnly]);
-  const playlistQuery = useMemo(() => new URLSearchParams({ q: query, kind, performer, source, watched, sort, favorite: favoriteOnly ? "true" : "", history: historyOnly ? "true" : "" }).toString(), [query, kind, performer, source, watched, sort, favoriteOnly, historyOnly]);
-  const facetParams = useMemo(() => new URLSearchParams({ performer, watched }).toString(), [performer, watched]);
+  const playlistQuery = useMemo(() => new URLSearchParams({
+    q: query, kind, performer, source, watched, subtitles, dubbing, sort, favorite: favoriteOnly ? "true" : "", history: historyOnly ? "true" : "",
+  }).toString(), [query, kind, performer, source, watched, subtitles, dubbing, sort, favoriteOnly, historyOnly]);
+  const params = `${playlistQuery}&page=${page}&pageSize=48`;
+  const facetParams = useMemo(() => new URLSearchParams({ performer, watched, subtitles, dubbing }).toString(), [performer, watched, subtitles, dubbing]);
   useEffect(() => {
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      void api<Facets>(`/api/facets?${facetParams}`, { signal: controller.signal }).then(setFacets).catch((error) => {
+      void api<Facets>(`/api/facets?${facetParams}`, { signal: controller.signal }).then((next) => {
+        if (controller.signal.aborted) return;
+        setFacets(next);
+        if (subtitles && !next.subtitleLanguages) { setSubtitles(""); setPage(1); }
+        if (dubbing && !next.dubbingLanguages) { setDubbing(""); setPage(1); }
+      }).catch((error) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
       });
     }, 100);
@@ -338,20 +366,29 @@ function Library({ preset = {}, favoriteOnly = false, historyOnly = false, open,
   }, [facetParams]);
   useEffect(() => {
     setQuery(preset.query ?? ""); setKind(preset.kind ?? ""); setPerformer(preset.performer ?? ""); setSource(preset.source ?? "");
+    setSubtitles(preset.kind === "image" ? "" : preset.subtitles ?? ""); setDubbing(preset.kind === "image" ? "" : preset.dubbing ?? "");
     setWatched(preset.watched ?? ""); setSort(preset.sort || (historyOnly ? "history" : "recent")); setPage(preset.page ?? 1);
-  }, [preset.query, preset.kind, preset.performer, preset.source, preset.watched, preset.sort, preset.page, historyOnly]);
-  useEffect(() => { route({ query, kind, performer, source, watched, sort, page }); }, [query, kind, performer, source, watched, sort, page]);
+  }, [preset.query, preset.kind, preset.performer, preset.source, preset.watched, preset.subtitles, preset.dubbing, preset.sort, preset.page, historyOnly]);
+  useEffect(() => { route({ query, kind, performer, source, watched, subtitles, dubbing, sort, page }); }, [query, kind, performer, source, watched, subtitles, dubbing, sort, page]);
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setLoading(true);
-      void api<LibraryResult>(`/api/library?${params}`).then(setResult).finally(() => setLoading(false));
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      setLoading(true); setSearchError("");
+      try {
+        const next = await api<LibraryResult>(`/api/library?${params}`, { signal: controller.signal });
+        if (!controller.signal.aborted) setResult(next);
+      } catch (error) {
+        if (!controller.signal.aborted) { setResult(null); setSearchError(error instanceof Error ? error.message : String(error)); }
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
     }, 180);
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); controller.abort(); };
   }, [params]);
   useEffect(() => { setSelectionMode(false); setSelectedIds(new Set()); }, [params]);
   const title = favoriteOnly ? "Favorite media" : historyOnly ? "Watch history" : performer || "Media library";
   const resetPage = <T,>(setter: (value: T) => void, value: T) => { setter(value); setPage(1); };
-  const clearFilters = () => { setQuery(""); setKind(""); setPerformer(""); setSource(""); setWatched(""); setSort(historyOnly ? "history" : "recent"); setPage(1); };
+  const clearFilters = () => { setQuery(""); setKind(""); setPerformer(""); setSource(""); setWatched(""); setSubtitles(""); setDubbing(""); setSort(historyOnly ? "history" : "recent"); setPage(1); };
   const toggleSelected = (id: string) => setSelectedIds((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const selectPage = () => setSelectedIds((current) => result?.items.every((item) => current.has(item.id)) ? new Set() : new Set(result?.items.map((item) => item.id) ?? []));
   const cancelSelection = () => { setSelectionMode(false); setSelectedIds(new Set()); };
@@ -383,16 +420,18 @@ function Library({ preset = {}, favoriteOnly = false, historyOnly = false, open,
   return <section className="library-page"><div className="library-intro"><div><p>COLLECTION</p><h2>{title}</h2><span>{result?.total ?? 0} matching items</span></div><div className="selection-actions">{selectionMode ? <><span>{selectedIds.size} selected</span><button className="quiet" onClick={selectPage}>{result?.items.every((item) => selectedIds.has(item.id)) ? "Clear page" : "Select page"}</button><button className="delete-selection" disabled={!selectedIds.size || deleting} onClick={() => void deleteSelected()}>{deleting ? <LoaderCircle className="spin"/> : <Trash2/>}Delete</button><button className="quiet" disabled={deleting} onClick={cancelSelection}><X/>Cancel</button></> : <button className="quiet" disabled={!result?.items.length} onClick={() => setSelectionMode(true)}><ListChecks/>Select</button>}</div></div>
     <div className="filters">
       <label><Search/><input value={query} onChange={(event) => resetPage(setQuery, event.target.value)} placeholder="Search titles, performers, or sources…"/></label>
-      <div className="filter-buttons"><button className={!kind ? "active" : ""} onClick={() => resetPage(setKind, "")}>All</button><button className={kind === "video" ? "active" : ""} onClick={() => resetPage(setKind, "video")}><Film/>Videos</button><button className={kind === "image" ? "active" : ""} onClick={() => resetPage(setKind, "image")}><ImageIcon/>Photos</button></div>
+      <div className="filter-buttons"><button className={!kind ? "active" : ""} onClick={() => resetPage(setKind, "")}>All</button><button className={kind === "video" ? "active" : ""} onClick={() => resetPage(setKind, "video")}><Film/>Videos</button><button className={kind === "image" ? "active" : ""} onClick={() => { resetPage(setKind, "image"); setSubtitles(""); setDubbing(""); }}><ImageIcon/>Photos</button></div>
       <label className="sort"><SlidersHorizontal/><select aria-label="Sort media" value={sort} onChange={(event) => resetPage(setSort, event.target.value)}><option value="recent">Recently added</option><option value="oldest">Oldest first</option><option value="history">Last viewed</option><option value="title">Title A–Z</option><option value="largest">Largest files</option><option value="most-viewed">Most viewed</option></select></label>
       <div className="advanced-filters">
         <label><UserRound/><select aria-label="Filter by performer" value={performer} onChange={(event) => resetPage(setPerformer, event.target.value)}><option value="">All performers</option>{facets.performers.map((item) => <option value={item.name} key={item.name}>{item.name} ({item.count})</option>)}</select></label>
         <label><HardDrive/><select aria-label="Filter by source" value={source} onChange={(event) => resetPage(setSource, event.target.value)}><option value="">All sources</option>{source && !facets.sources.some((item) => item.name === source) && <option value={source}>{source} (0)</option>}{facets.sources.map((item) => <option value={item.name} key={item.name}>{item.name} ({item.count})</option>)}</select></label>
         <label><Play/><select aria-label="Filter by watch state" value={watched} onChange={(event) => resetPage(setWatched, event.target.value as Exclude<LibraryPreset["watched"], undefined>)}><option value="">Any watch state</option><option value="unseen">Never opened</option><option value="progress">In progress</option><option value="unfinished">Not completed</option><option value="completed">Completed</option></select></label>
+        {kind !== "image" && facets.subtitleLanguages && <TrackFilter type="subtitles" languages={facets.subtitleLanguages} value={subtitles} onChange={(value) => resetPage(setSubtitles, value)}/>}
+        {kind !== "image" && facets.dubbingLanguages && <TrackFilter type="dubbing" languages={facets.dubbingLanguages} value={dubbing} onChange={(value) => resetPage(setDubbing, value)}/>}
         <button className="clear-filters" onClick={clearFilters}>Clear filters</button>
       </div>
     </div>
-    {loading ? <div className="loading"><LoaderCircle className="spin"/>Loading media…</div> : result?.items.length ? <div className={`media-grid ${selectionMode ? "selecting" : ""}`}>{result.items.map((media) => <MediaCard key={media.id} media={media} open={(item) => open(item, { query: playlistQuery })} favorite={favorite} selectionMode={selectionMode} selected={selectedIds.has(media.id)} toggleSelected={toggleSelected} remove={deleting ? undefined : deleteOne}/>)}</div> : <div className="empty-state"><FolderSearch2/><h3>No media found</h3><p>Try another filter or scan the mounted media folder.</p></div>}
+    {loading ? <div className="loading"><LoaderCircle className="spin"/>Loading media…</div> : result?.items.length ? <div className={`media-grid ${selectionMode ? "selecting" : ""}`}>{result.items.map((media) => <MediaCard key={media.id} media={media} open={(item) => open(item, { query: playlistQuery })} favorite={favorite} selectionMode={selectionMode} selected={selectedIds.has(media.id)} toggleSelected={toggleSelected} remove={deleting ? undefined : deleteOne}/>)}</div> : <div className="empty-state"><FolderSearch2/><h3>{searchError ? "Search failed" : "No media found"}</h3><p>{searchError || "Try another filter or scan the mounted media folder."}</p></div>}
     {result && result.pages > 1 && <div className="pagination"><button disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button><span>Page {page} of {result.pages}</span><button disabled={page >= result.pages} onClick={() => setPage(page + 1)}>Next</button></div>}
   </section>;
 }

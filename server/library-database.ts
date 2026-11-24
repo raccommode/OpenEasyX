@@ -29,8 +29,16 @@ export type Media = {
   lastViewedAt?: string;
 };
 
+const trackTable = { subtitles: "subtitle_tracks", dubbing: "dubbing_outputs" };
+const trackMatch = {
+  subtitles: "t.media_id=m.id",
+  dubbing: "t.media_id=m.id AND t.fingerprint=(m.size || ':' || m.modified_at)",
+};
+
 export type LibraryQuery = {
   q?: string;
+  subtitles?: string;
+  dubbing?: string;
   kind?: MediaKind | "";
   performer?: string;
   source?: string;
@@ -407,7 +415,7 @@ export class LibraryDatabase {
     return [...candidates.values()];
   }
 
-  listMedia(query: LibraryQuery = {}) {
+  private mediaQuery(query: LibraryQuery) {
     const where = ["m.missing=0", "m.playable=1"];
     const values: SQLInputValue[] = [];
     if (query.q?.trim()) {
@@ -424,14 +432,29 @@ export class LibraryDatabase {
     if (query.watched === "progress") where.push("COALESCE(p.progress_seconds,0)>0 AND COALESCE(p.completed,0)=0");
     if (query.watched === "unfinished") where.push("COALESCE(p.completed,0)=0");
     if (query.watched === "completed") where.push("COALESCE(p.completed,0)=1");
+    if (query.subtitles || query.dubbing) where.push("m.kind='video'");
+    for (const type of ["subtitles", "dubbing"] as const) {
+      const filter = query[type];
+      if (!filter) continue;
+      let match = trackMatch[type];
+      if (filter !== "with" && filter !== "without") {
+        match += " AND t.language=? COLLATE NOCASE";
+        values.push(filter);
+      }
+      where.push(`${filter === "without" ? "NOT EXISTS" : "EXISTS"} (SELECT 1 FROM ${trackTable[type]} t WHERE ${match})`);
+    }
     const order = {
       recent: "COALESCE(m.media_date,m.modified_at) DESC", oldest: "COALESCE(m.media_date,m.modified_at) ASC", title: "m.title COLLATE NOCASE ASC",
       largest: "m.size DESC", "most-viewed": "COALESCE(p.view_count,0) DESC,COALESCE(m.media_date,m.modified_at) DESC",
       history: "p.last_viewed_at DESC,COALESCE(m.media_date,m.modified_at) DESC",
     }[query.sort ?? "recent"];
+    return { clause: where.join(" AND "), values, order };
+  }
+
+  listMedia(query: LibraryQuery = {}) {
+    const { clause, values, order } = this.mediaQuery(query);
     const pageSize = Math.max(1, Math.min(100, query.pageSize ?? 48));
     const page = Math.max(1, query.page ?? 1);
-    const clause = where.join(" AND ");
     const total = Number((this.sqlite.prepare(`SELECT COUNT(*) count FROM media m LEFT JOIN playback p ON p.media_id=m.id WHERE ${clause}`).get(...values) as { count: number }).count);
     const rows = this.sqlite.prepare(`SELECT m.*,COALESCE(NULLIF(m.duration,0),p.duration,0) effective_duration,
       COALESCE(p.favorite,0) favorite,COALESCE(p.progress_seconds,0) progress_seconds,
@@ -442,29 +465,9 @@ export class LibraryDatabase {
   }
 
   playlist(query: LibraryQuery = {}) {
-    const where = ["m.missing=0", "m.playable=1"];
-    const values: SQLInputValue[] = [];
-    if (query.q?.trim()) {
-      where.push("(m.title LIKE ? ESCAPE '\\' OR m.performer LIKE ? ESCAPE '\\' OR m.source LIKE ? ESCAPE '\\')");
-      const term = `%${query.q.trim().replace(/[\\%_]/g, "\\$&")}%`;
-      values.push(term, term, term);
-    }
-    if (query.kind) { where.push("m.kind=?"); values.push(query.kind); }
-    if (query.performer) { where.push("m.performer=? COLLATE NOCASE"); values.push(query.performer); }
-    if (query.source) { where.push("m.source=? COLLATE NOCASE"); values.push(query.source); }
-    if (query.favorite) where.push("COALESCE(p.favorite,0)=1");
-    if (query.history) where.push("p.last_viewed_at IS NOT NULL");
-    if (query.watched === "unseen") where.push("p.last_viewed_at IS NULL AND COALESCE(p.progress_seconds,0)=0 AND COALESCE(p.view_count,0)=0");
-    if (query.watched === "progress") where.push("COALESCE(p.progress_seconds,0)>0 AND COALESCE(p.completed,0)=0");
-    if (query.watched === "unfinished") where.push("COALESCE(p.completed,0)=0");
-    if (query.watched === "completed") where.push("COALESCE(p.completed,0)=1");
-    const order = {
-      recent: "COALESCE(m.media_date,m.modified_at) DESC", oldest: "COALESCE(m.media_date,m.modified_at) ASC", title: "m.title COLLATE NOCASE ASC",
-      largest: "m.size DESC", "most-viewed": "COALESCE(p.view_count,0) DESC,COALESCE(m.media_date,m.modified_at) DESC",
-      history: "p.last_viewed_at DESC,COALESCE(m.media_date,m.modified_at) DESC",
-    }[query.sort ?? "recent"];
+    const { clause, values, order } = this.mediaQuery(query);
     return (this.sqlite.prepare(`SELECT m.id FROM media m LEFT JOIN playback p ON p.media_id=m.id
-      WHERE ${where.join(" AND ")} ORDER BY ${order}`).all(...values) as Array<{ id: string }>).map((row) => row.id);
+      WHERE ${clause} ORDER BY ${order}`).all(...values) as Array<{ id: string }>).map((row) => row.id);
   }
 
   setFavorite(id: string, favorite: boolean) {
@@ -540,17 +543,18 @@ export class LibraryDatabase {
     }));
   }
 
-  facets(query: Pick<LibraryQuery, "performer" | "watched"> = {}) {
+  trackLanguages(type: keyof typeof trackTable) {
+    const rows = this.sqlite.prepare(`SELECT DISTINCT lower(t.language) language FROM ${trackTable[type]} t
+      JOIN media m ON ${trackMatch[type]} WHERE m.kind='video' AND m.missing=0 AND m.playable=1
+      ORDER BY language`).all() as Array<{ language: string }>;
+    return rows.map((row) => row.language);
+  }
+
+  facets(query: Pick<LibraryQuery, "performer" | "watched" | "subtitles" | "dubbing"> = {}) {
     const performers = this.performers();
-    const where = ["m.missing=0", "m.playable=1", "m.source<>''"];
-    const values: SQLInputValue[] = [];
-    if (query.performer) { where.push("m.performer=? COLLATE NOCASE"); values.push(query.performer); }
-    if (query.watched === "unseen") where.push("p.last_viewed_at IS NULL AND COALESCE(p.progress_seconds,0)=0 AND COALESCE(p.view_count,0)=0");
-    if (query.watched === "progress") where.push("COALESCE(p.progress_seconds,0)>0 AND COALESCE(p.completed,0)=0");
-    if (query.watched === "unfinished") where.push("COALESCE(p.completed,0)=0");
-    if (query.watched === "completed") where.push("COALESCE(p.completed,0)=1");
+    const { clause, values } = this.mediaQuery(query);
     const sources = this.sqlite.prepare(`SELECT m.source name,COUNT(*) count FROM media m
-      LEFT JOIN playback p ON p.media_id=m.id WHERE ${where.join(" AND ")}
+      LEFT JOIN playback p ON p.media_id=m.id WHERE ${clause} AND m.source<>''
       GROUP BY m.source COLLATE NOCASE ORDER BY m.source COLLATE NOCASE`).all(...values);
     return { performers, sources };
   }

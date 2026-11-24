@@ -35,6 +35,8 @@ export class DubbingService {
       )`).run(command, command, "'-m', 'pip', 'install'", "'-m', 'venv',", "'-m', 'ensurepip',");
   }
 
+  get installed() { return Boolean(this.plugins.dubbingProvider()); }
+
   private directory(job: Identity) {
     const version = createHash("sha256").update(job.provider + ":" + job.fingerprint).digest("hex").slice(0, 24);
     return path.join(this.dataDir, "dubbing", job.media_id, version);

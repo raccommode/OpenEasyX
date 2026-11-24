@@ -16,6 +16,8 @@ export class SubtitleService {
     private log: LogWriter,
   ) {}
 
+  get installed() { return Boolean(this.plugins.subtitleProvider()); }
+
   requirePlugin() {
     const plugin = this.plugins.subtitleProvider();
     if (!plugin) throw Object.assign(new Error("Install a subtitle plugin first"), { statusCode: 409 });

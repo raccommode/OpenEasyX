@@ -101,6 +101,7 @@ Automatic scans follow the existing auto-download policy. To change the default 
 | `GET` | `/api/library-dashboard` | Media-library statistics and shelves |
 | `GET` | `/api/library` | Search and paginate indexed photos and videos |
 | `GET` | `/api/library/playlist` | Ordered media IDs for player autoplay |
+| `GET` | `/api/facets` | Library filter options, including subtitle and dubbing languages when their plugins are installed |
 | `GET` | `/api/library-performers` | Performer summaries derived from indexed files |
 | `POST` | `/api/scan` | Scan the shared media volume now |
 | `GET` | `/api/media/:id` | Media metadata and playback URLs |
@@ -112,6 +113,8 @@ Automatic scans follow the existing auto-download policy. To change the default 
 | `POST` | `/api/performers/:id/discover-sources` | Run enabled source-discovery plugins |
 | `POST` | `/api/performers/:id/sources` | Add a URL and optionally select a compatible scraper plugin |
 | `DELETE` | `/api/performers/:id` | Delete metadata only or metadata plus associated media files |
+
+Library search and playlist requests accept `subtitles` and `dubbing` when the corresponding plugin is installed. Each accepts `with`, `without`, or a language code. For example, `/api/library?subtitles=fr&dubbing=es` finds videos with French subtitles and a published Spanish dub. Photos ignore both filters.
 
 Grouped import body:
 
