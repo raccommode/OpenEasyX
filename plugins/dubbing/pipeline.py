@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 
 from runtime import parent_watch, progress, provision, publish
 
@@ -17,35 +18,58 @@ def release_models():
         torch.mps.empty_cache()
 
 
-def run(job, details=None):
-    data, work, source = (Path(job[key]).resolve() for key in ("dataDir", "workDir", "source"))
-    target = job["language"]
-    work.mkdir(parents=True, exist_ok=True)
-    previous = job.get("previousOutput")
-    if previous and previous["renderVersion"] == "3":
-        from delivery import optimize_published
-        progress("Optimizing the published dub for playback", 10)
-        optimize_published(Path(previous["path"]), Path(job["output"]))
-        if details is not None and previous.get("lipSyncFrames") is not None:
-            details["lipSyncFrames"] = previous["lipSyncFrames"]
-        return "rendered"
-    audio = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index",
-                            "-of", "csv=p=0", str(source)], capture_output=True, text=True, check=True)
-    if not audio.stdout.strip():
-        return "silent"
-    os.environ.setdefault("HF_HOME", str(data / "dubbing-models" / "huggingface"))
-    os.environ.setdefault("TORCH_HOME", str(data / "dubbing-models" / "torch"))
-    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+def setup_runtime(data):
     try:
         provision(data)
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         publish(errorCode="DUBBING_RUNTIME_SETUP", message=str(error))
         raise
+
+
+def run(job, details=None):
+    data, work, source = (Path(job[key]).resolve() for key in ("dataDir", "workDir", "source"))
+    target = job["language"]
+    work.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(data / "dubbing-models" / "huggingface"))
+    os.environ.setdefault("TORCH_HOME", str(data / "dubbing-models" / "torch"))
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+    previous = job.get("previousOutput")
+    lip_sync = job.get("lipSync") is True
+    output = Path(job["output"])
+    from delivery import mux_original_picture, verify_playback
+    from sync_cache import keep, move, restore
+    if not lip_sync and previous and previous["renderVersion"] == "5-lips":
+        progress("Restoring the original picture with the published dubbed audio", 75)
+        mux_original_picture(source, previous["path"], output, language=target, published_audio=True,
+                             prepare_recovery=lambda: setup_runtime(data))
+        move(job, previous["path"], output)
+        if details is not None:
+            details["lipSyncFrames"] = 0
+        return "rendered"
+    audio = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index",
+                            "-of", "csv=p=0", str(source)], capture_output=True, text=True, check=True)
+    if not audio.stdout.strip():
+        return "silent"
+    setup_runtime(data)
     import torch
     torch.set_num_threads(min(4, os.cpu_count() or 1))
+    if lip_sync and previous and previous["renderVersion"] == "5-audio":
+        with TemporaryDirectory(dir=work) as temp:
+            cues = restore(job, previous["path"], Path(temp))
+            if cues:
+                from lips import render
+                progress("Synchronizing lips to the published dubbed voices", 70)
+                changed = render(source, Path(previous["path"]), cues, Path(temp), output,
+                                 language=target, published_audio=True)
+                verify_playback(output)
+                move(job, previous["path"], output)
+                if details is not None:
+                    details["lipSyncFrames"] = changed
+                return "rendered"
     from dialogue import separate_dialogue, transcribe
-    from voices import mix_voices, speak, translate
+    from voices import mix_voices, speak
+    from speech_translation import translate_speech
     from speech_review import review_transcript
 
     progress("Separating dialogue from original soundtrack", 2)
@@ -63,7 +87,7 @@ def run(job, details=None):
     references, reference_key = prepare_references(job, data, work, cues)
     release_models()
     progress("Translating dialogue", 30)
-    texts = translate(cues, target, checkpoints/f"translation-{target}.json")
+    texts = translate_speech(cues, target, work, checkpoints/f"translation-{target}.json")
     release_models()
     wav_dir = checkpoints / (f"voice-{target}-{reference_key}" if reference_key else f"voice-{target}")
     wav_dir.mkdir(exist_ok=True)
@@ -71,14 +95,19 @@ def run(job, details=None):
     release_models()
     mixed = wav_dir / "soundtrack.wav"
     progress("Mixing voices with original music and effects", 69)
-    mix_voices(mix, dialogue, cues, wav_dir, work, mixed)
-    from lips import render
-    changed = render(source, mixed, cues, wav_dir, Path(job["output"]), language=target, source_audio=mix)
-    from delivery import verify_playback
-    verify_playback(job["output"])
+    mix_voices(mix, dialogue, cues, wav_dir, work, mixed, language=target)
+    changed = 0
+    if lip_sync:
+        from lips import render
+        changed = render(source, mixed, cues, wav_dir, output, language=target, source_audio=mix)
+        verify_playback(output)
+        progress(f"Animated visible speech in {changed} frames", 99)
+    else:
+        progress("Combining the original picture with dubbed audio", 90)
+        mux_original_picture(source, mixed, output, language=target)
+    keep(job, output, cues, wav_dir)
     if details is not None:
         details["lipSyncFrames"] = changed
-    progress(f"Animated visible speech in {changed} frames", 99)
     # Keep shared analysis for other selected languages. Per-language PCM is only needed to resume an unfinished render.
     import shutil
     shutil.rmtree(wav_dir)

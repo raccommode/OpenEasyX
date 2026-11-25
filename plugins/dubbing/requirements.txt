@@ -4,6 +4,6 @@ faster-whisper==1.2.1
 av==16.1.0
 sentencepiece==0.2.2
 opencv-python-headless==4.12.0.88
-demucs-infer @ https://github.com/openmirlab/demucs-infer/archive/a8552bb9da29a56018ae2f1828d360cc60830b54.zip
+bandit-infer @ https://github.com/openmirlab/bandit-infer/archive/96ea0ec12aeb444f379c2f5145fb8ee58b58cf19.zip
 sherpa-onnx==2.0.3
 speechbrain==1.1.2

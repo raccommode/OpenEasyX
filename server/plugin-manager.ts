@@ -74,6 +74,11 @@ export class PluginManager {
       if (!plugin.renderDub || !languages?.length || languages.some(({ code, label }) => !isSubtitleLanguageCode(code) || !label)) throw new Error("Dubbing plugins must declare a renderer and target languages");
       const revision = plugin.manifest.dubbingRenderVersion;
       if (revision !== undefined && (typeof revision !== "string" || !revision.trim())) throw new Error("Invalid dubbing render version");
+      const lipRevision = plugin.manifest.dubbingLipSyncRenderVersion;
+      if (lipRevision !== undefined && (!revision || typeof lipRevision !== "string" || !lipRevision.trim() || lipRevision === revision
+        || !plugin.manifest.settings?.some((field) => field.key === "lipSync" && field.type === "boolean"))) throw new Error("Invalid lip-sync render version");
+      const silentVersions = plugin.manifest.dubbingRecheckSilentVersions;
+      if (silentVersions !== undefined && (!Array.isArray(silentVersions) || silentVersions.some((v) => typeof v !== "string" || v === revision || v === lipRevision))) throw new Error("Invalid silent dubbing revisions");
     }
     if (plugin.manifest.fallback !== undefined && typeof plugin.manifest.fallback !== "boolean") throw new Error("Invalid plugin fallback flag");
     if (plugin.manifest.sourceUrlPatterns && (!plugin.manifest.sourceUrlPatterns.length || plugin.manifest.sourceUrlPatterns.some((pattern) => typeof pattern !== "string" || !pattern.trim()))) throw new Error("Invalid source URL patterns");

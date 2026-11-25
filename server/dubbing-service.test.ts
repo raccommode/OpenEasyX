@@ -283,6 +283,110 @@ it("publishes only finished versions, supports resuming a failed language and se
   }
 });
 
+it("publishes distinct audio and lip-sync revisions and keeps serving the last completed mode", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-modes-"));
+  const mediaDir = path.join(root, "media");
+  const db = new Database(root);
+  const library = new LibraryDatabase(root);
+  const catalog = new Catalog(library, mediaDir, root, false);
+  const manager = new PluginManager(db, []);
+  const config = { fr: true, lipSync: false };
+  const runs: { job: DubbingJob; signal: AbortSignal; finish: () => void }[] = [];
+  const plugin: EasyXPlugin = { ...localDubbing, async renderDub({ signal }, job) {
+    await new Promise<void>((finish) => {
+      runs.push({ job, signal: signal!, finish });
+      signal!.addEventListener("abort", () => finish(), { once: true });
+    });
+    fs.writeFileSync(job.output, job.lipSync ? "animated" : "original picture");
+    return { outcome: "rendered", lipSyncFrames: job.lipSync ? 17 : 0 };
+  } };
+  vi.spyOn(manager, "dubbingProvider").mockReturnValue(plugin);
+  const ctx = manager.context.bind(manager);
+  vi.spyOn(manager, "context").mockImplementation((...args) => ({ ...ctx(...args), config }));
+  const service = new DubbingService(library, manager, catalog, root);
+  try {
+    fs.writeFileSync(path.join(mediaDir, "video.mp4"), "source");
+    await catalog.scan();
+    const media = library.listMedia({}).items[0];
+    const variant = () => service.status(media).variants[0];
+    service.sync();
+    expect(service.overview().lipSync).toBe(false);
+    await vi.waitFor(() => expect(runs[0]?.job.lipSync).toBe(false));
+    runs[0].finish();
+    await vi.waitFor(() => expect(variant().lipSyncFrames).toBe(0));
+    const audio = service.file(media, "fr")!;
+    config.lipSync = true;
+    service.sync();
+    await vi.waitFor(() => expect(runs[1]?.job).toMatchObject({ lipSync: true, previousOutput: { path: audio, renderVersion: "5-audio" } }));
+    expect(service.file(media, "fr")).toBe(audio);
+    config.lipSync = false;
+    service.sync();
+    expect(runs[1].signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(variant().updateStatus).toBeUndefined());
+    expect(runs).toHaveLength(2);
+    expect(fs.readFileSync(audio, "utf8")).toBe("original picture");
+    config.lipSync = true;
+    service.sync();
+    await vi.waitFor(() => expect(runs[2]?.job.lipSync).toBe(true));
+    config.fr = false;
+    service.sync();
+    expect(runs[2].signal.aborted).toBe(true);
+    await vi.waitFor(() => expect(service.overview().current).toBeNull());
+    expect(service.file(media, "fr")).toBe(audio);
+    config.fr = true;
+    service.sync();
+    await vi.waitFor(() => expect(runs[3]?.job.lipSync).toBe(true));
+    runs[3].finish();
+    await vi.waitFor(() => expect(variant().lipSyncFrames).toBe(17));
+    const visual = service.file(media, "fr")!;
+    expect(visual).not.toBe(audio);
+    config.lipSync = false;
+    service.sync();
+    await vi.waitFor(() => expect(runs[4]?.job).toMatchObject({ lipSync: false, previousOutput: { path: visual, renderVersion: "5-lips" } }));
+    expect(fs.readFileSync(service.file(media, "fr")!, "utf8")).toBe("animated");
+    runs[4].finish();
+    await vi.waitFor(() => expect(service.file(media, "fr")).toBe(audio));
+  } finally {
+    await service.close(); library.close(); db.close(); fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("rechecks legacy silent detections once and preserves confirmed silence and original-language outcomes across mode changes", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-silent-revision-"));
+  const mediaDir = path.join(root, "media");
+  const db = new Database(root);
+  const library = new LibraryDatabase(root);
+  const catalog = new Catalog(library, mediaDir, root, false);
+  const manager = new PluginManager(db, []);
+  const config = { fr: true, es: true, lipSync: false };
+  const calls: string[] = [];
+  const plugin: EasyXPlugin = { ...localDubbing, async renderDub(_ctx, job) { calls.push(job.language); return "silent"; } };
+  vi.spyOn(manager, "dubbingProvider").mockReturnValue(plugin);
+  const ctx = manager.context.bind(manager);
+  vi.spyOn(manager, "context").mockImplementation((...args) => ({ ...ctx(...args), config }));
+  const service = new DubbingService(library, manager, catalog, root);
+  try {
+    fs.writeFileSync(path.join(mediaDir, "video.mp4"), "source");
+    await catalog.scan();
+    const media = library.listMedia({}).items[0];
+    const seed = library.sqlite.prepare("INSERT INTO video_dubs(media_id,language,fingerprint,provider,status,render_version) VALUES(?,?,?,?,?,'3')");
+    for (const [language, status] of [["fr", "silent"], ["es", "original"]]) {
+      seed.run(media.id, language, media.size + ":" + media.modifiedAt, plugin.manifest.id, status);
+    }
+    const states = () => Object.fromEntries(service.status(media).variants.map((variant) => [variant.code, variant.status]));
+    expect(states()).toEqual({ fr: "queued", es: "original" });
+    service.sync();
+    await vi.waitFor(() => expect(states()).toEqual({ fr: "silent", es: "original" }));
+    config.lipSync = true;
+    service.sync();
+    expect(service.overview().current).toBeNull();
+    expect(states()).toEqual({ fr: "silent", es: "original" });
+    expect(calls).toEqual(["fr"]);
+  } finally {
+    await service.close(); library.close(); db.close(); fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("requeues known legacy dubbing failures without resetting finished or unrelated jobs", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-recovery-"));
   const database = new Database(root);

@@ -226,6 +226,15 @@ def speaker_reference(speaker, folders, start):
     raise ValueError(f"No audible original voice reference for speaker {speaker+1} at {start:.2f}s")
 
 
+def wrong_speaker(vector, speaker, anchors):
+    """Reject clear matches to another original speaker, even when the words are right."""
+    if vector is None or anchors.get(speaker) is None:
+        return False
+    own = float(vector @ anchors[speaker])
+    return any(other != speaker and anchor is not None and float(vector @ anchor) > max(.45, own+.08)
+               for other, anchor in anchors.items())
+
+
 def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, references=None, model_cache=None):
     from omnivoice import OmniVoice
     percent = 38 + 30*indices[0]/len(cues)
@@ -236,6 +245,29 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
     model = load_voice_model(OmniVoice, model_path("voice"), accelerator, dtype, percent)
     limits = delivery_durations(cues, sf.info(work/"mix.wav").duration)
     prompts, repaired_prompts, alternate_prompts = {}, {}, {}
+    folders = [wav_dir.parent if wav_dir.parent != work else None, references, work]
+    speakers = {cue["speaker"]: cue["start"] for cue in cues}
+
+    @cache
+    def reference(speaker):
+        return speaker_reference(speaker, folders, speakers[speaker])
+
+    @cache
+    def identities():
+        import sherpa_onnx
+        from dialogue import embedding, embedding_config
+        from speech_review import at16
+        extractor = sherpa_onnx.SpeakerEmbeddingExtractor(embedding_config())
+        anchors = {}
+        for speaker in speakers:
+            try:
+                samples, rate, _ = reference(speaker)
+            except ValueError:
+                continue
+            if len(samples) >= .8 * rate:
+                anchors[speaker] = embedding(extractor, at16(samples, rate))
+        return extractor, anchors
+
     @cache
     def recognizer():
         from faster_whisper import WhisperModel
@@ -246,8 +278,7 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
         cue, text = cues[idx], texts[idx]
         speaker = cue["speaker"]
         if speaker not in prompts:
-            repaired = wav_dir.parent if wav_dir.parent != work else None
-            ref_audio, sr, ref_text = speaker_reference(speaker, [repaired, references, work], cue["start"])
+            ref_audio, sr, ref_text = reference(speaker)
             prompt = model.create_voice_clone_prompt(
                 (torch.from_numpy(ref_audio)[None, :], sr), ref_text, preprocess_prompt=False)
             prompts[speaker] = prompt, ref_audio, sr
@@ -287,16 +318,15 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
             wave = np.asarray(wave, dtype="float32").reshape(-1)[:max(1, round(limit*model.sampling_rate))]
             if not audible(wave, model.sampling_rate):
                 continue
-            seconds = len(wave)/model.sampling_rate
-            # The codec can trim a failed sentence to an audible fragment.
-            # Count letters too for languages that do not separate words with spaces.
-            check_short = (not attempt and seconds < .55*duration and
-                           (sum(any(c.isalnum() for c in word) for word in text.split()) >= 2 or
-                            sum(c.isalpha() for c in text) >= 8))
-            if not check_short and seconds < min(.35*duration, .10*len(text.split())):
+            if not verifies_words(recognizer(), wave, model.sampling_rate, language, text):
                 continue
-            if (attempt or check_short) and not verifies_words(recognizer(), wave, model.sampling_rate, language, text):
-                continue
+            if len(speakers) > 1 and len(wave) >= .8 * model.sampling_rate:
+                from dialogue import embedding
+                from speech_review import at16
+                extractor, anchors = identities()
+                vector = embedding(extractor, at16(wave, model.sampling_rate))
+                if wrong_speaker(vector, speaker, anchors):
+                    continue
             if attempt:
                 prompts[speaker] = prompt, ref_audio, sr
             break
@@ -349,9 +379,9 @@ def residual_overlaps(mix, dialogue, cues, work):
         for start, end, active in intervals:
             if end-start < rate//10 or not any(i in in_overlap for i in active):
                 continue
-            for left in range(start, end, rate*30):
-                right = min(end, left+rate*30)
-                path = work / f"overlap-{left}-{right}.wav"
+            for left in range(start, end, rate*4):
+                right = min(end, left+rate*4)
+                path = work / f"overlap-bandit-v2-{left}-{right}.wav"
                 if not path.is_file():
                     # The residual contains the quieter speaker and background.
                     # Isolate its speech, keeping its original channel placement.
@@ -360,15 +390,18 @@ def residual_overlaps(mix, dialogue, cues, work):
                     speech.seek(first)
                     original = src.read(last-first, dtype="float32", always_2d=True)
                     first_pass = speech.read(last-first, dtype="float32", always_2d=True)
+                    region = slice(left-first, right-first)
+                    residual = original-first_pass
+                    if np.mean(residual[region]**2) <= .05*np.mean(original[region]**2):
+                        continue
                     if len(active) == 1:
                         # A quieter speaker may still be missing after the other
                         # turn ends. Recheck only flanks with a weak speech stem.
-                        region = slice(left-first, right-first)
                         if np.mean(first_pass[region]**2) >= .15*np.mean(original[region]**2):
                             continue
                     if session is None:
                         session = cinematic_separator()
-                    extra = isolate_dialogue(session, original - first_pass)
+                    extra = isolate_dialogue(session, residual)
                     directions = [cues[i].get("direction") for i in active]
                     extra = position_overlap(original, first_pass + extra, directions) - first_pass
                     part = path.with_suffix(".partial.wav")
@@ -523,12 +556,12 @@ def add_leveled_dialogue(dry_path, output):
             raise RuntimeError("Could not level the synthesized speech")
 
 
-def mix_voices(mix, dialogue, cues, wav_dir, work, output):
-    """Replace recognized dialogue while retaining the original ambience and channel layout."""
+def mix_voices(mix, dialogue, cues, wav_dir, work, output, *, language=None):
+    """Mix translated and already-target-language voices over a continuous effects/music bed."""
     regions, targets = soundtrack_regions(mix, dialogue, cues, work)
     dry_path = wav_dir / "translated-bus.wav"
     try:
-        render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, regions, targets)
+        render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, regions, targets, language=language)
         add_leveled_dialogue(dry_path, output)
     finally:
         dry_path.unlink(missing_ok=True)
@@ -538,7 +571,7 @@ def turn_fade(at, length, rate):
     return np.clip(np.minimum(at, length-1-at)/(rate*.01), 0, 1)
 
 
-def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, regions, targets):
+def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, regions, targets, *, language=None):
     region = next(regions, None)
     with sf.SoundFile(mix) as src, sf.SoundFile(dialogue) as speech, sf.SoundFile(output, "w", samplerate=src.samplerate,
             channels=src.channels, format="RF64", subtype="FLOAT") as dst, sf.SoundFile(
@@ -572,16 +605,17 @@ def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, reg
                 left = round(cue["start"]*rate)
                 right = round(cue["end"]*rate)
                 dub = wav_dir / f"{cursor}.wav"
-                sample, sr = sf.read(dub if dub.exists() else work/cue["clip"], dtype="float32")
+                translated = cue["language"] != language if language else dub.is_file()
+                if translated and not dub.is_file():
+                    raise ValueError(f"Missing translated voice at {cue['start']:.2f}s")
+                sample, sr = sf.read(dub if translated else work/cue["clip"], dtype="float32")
                 div = math.gcd(sr, rate)
                 resampled = resample_poly(sample, rate//div, sr//div).astype("float32")
-                translated = dub.is_file()
                 audio = resampled if translated else resampled[:right-left]
                 if translated and cursor in targets:
                     audio *= min(128., targets[cursor]/max(active_level(audio), 1e-8))
                 active.append((left, right, audio, translated, cue.get("direction")))
                 cursor += 1
-            mask = np.zeros(len(block), np.float32)
             voices = np.zeros_like(block)
             retained = np.zeros_like(block)
             count = np.zeros(len(block), dtype=np.int16)
@@ -596,11 +630,7 @@ def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, reg
                     count[window] += 1
                     if direction is not None:
                         solo_pan[window] = direction
-                    if translated:
-                        fade = turn_fade(np.arange(a-left, source_right-left), source_end-left, rate)
-                        mask[window] = np.maximum(mask[window], fade)
-                # A translation may finish naturally in the gap after the source
-                # turn. Its timing is independent of the subtraction mask above.
+                # A translation can finish naturally in the gap after the source turn.
                 delivery_right = min(end, left+len(audio))
                 if delivery_right > a:
                     at = np.arange(a-left, delivery_right-left)
@@ -611,9 +641,15 @@ def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, reg
             # Film separators often return centered dialogue even for a panned
             # speaker. Restore its measured placement before subtraction.
             solo = (count == 1) & ~positioned & np.any(solo_pan, axis=1)
-            vocal[solo] = vocal[solo].mean(axis=1, keepdims=True) * solo_pan[solo]
-            # Keep original samples outside translated intervals, including untranscribed sounds.
-            dst.write(block + mask[:, None]*(retained - vocal))
+            if np.any(solo):
+                estimate = vocal[solo]
+                center = estimate.mean(axis=1, keepdims=True)
+                panned = center*solo_pan[solo]
+                if np.sum((estimate-center)**2) < .25*np.sum((panned-center)**2):
+                    vocal[solo] = panned
+            # Keep the native channels and phase of music and effects at every
+            # sample. ASR gaps and translated pauses must not reopen the source voice.
+            dst.write(block - vocal + retained)
             dry.write(voices)
 
 

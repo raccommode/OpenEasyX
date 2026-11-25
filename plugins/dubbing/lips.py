@@ -1,9 +1,7 @@
 """Associate visible speaking faces with diarized voices, then animate each mouth from its own dub."""
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from fractions import Fraction
 from functools import cached_property, lru_cache
-import json
 from math import gcd
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,11 +15,11 @@ from scipy.optimize import linear_sum_assignment
 from scipy.signal import get_window, lfilter, resample_poly
 from scipy.spatial import Delaunay, QhullError
 
-from picture import output_picture
+from picture import PictureWriter, orientation, oriented, output_picture, timestamp, video_frames
 from mouth_geometry import fit_speaker_mouth
 from mouth_texture import MouthTextures
-from delivery import video_options
-from runtime import ffmpeg, model_path, progress
+from delivery import mux_dubbed_audio
+from runtime import model_path, progress
 
 
 class Timeline:
@@ -255,80 +253,12 @@ def speaker_mapping(observations, quiet=None):
     return result
 
 
-def orientation(frame):
-    for side in frame.side_data:
-        if side.type.name == "DISPLAYMATRIX":
-            matrix = np.frombuffer(bytes(side), dtype=np.int32).reshape(3, 3)[:2, :2]
-            angle = np.degrees(np.arctan2(-float(matrix[0, 1]), float(matrix[0, 0])))
-            return angle, np.linalg.det(matrix.astype("float64")) < 0
-    return 0., False
-
-
-def oriented(frame, transform):
-    image = frame.to_ndarray(format="bgr24")
-    angle, flip = transform
-    if flip:
-        image = image[::-1, :]
-    quadrant = round(angle / 90)
-    if abs(angle - quadrant * 90) < .01:
-        image = np.rot90(image, quadrant)
-    elif angle:
-        h, w = image.shape[:2]
-        mat = cv2.getRotationMatrix2D((w/2, h/2), angle, 1)
-        image = cv2.warpAffine(image, mat, (w, h))
-    return np.ascontiguousarray(image)
-
-
 def video_clock(container):
     video = container.streams.video[0]
     audio = container.streams.audio[0] if container.streams.audio else video
     origin = float(audio.start_time * audio.time_base) if audio.start_time is not None else float(container.start_time or 0) / av.time_base
     duration = float(video.duration * video.time_base) if video.duration else float(container.duration or 0) / av.time_base
     return video, origin, duration
-
-
-def video_frames(container, stream):
-    """Keep healthy pictures on their original clock even when packets are damaged."""
-    previous = None
-    damaged = False
-    for packet in container.demux(stream):
-        try:
-            frames = packet.decode()
-        except av.error.InvalidDataError:
-            damaged = True
-            continue
-        for frame in frames:
-            if frame.is_corrupt:
-                damaged = True
-                continue
-            if previous is not None:
-                yield previous
-            previous = frame
-    if previous is not None:
-        if damaged and stream.duration is not None and stream.start_time is not None and previous.pts is not None:
-            # A lost tail has no next picture to establish the last healthy frame's
-            # duration. Hold it through the declared video end without shifting audio.
-            end = (stream.start_time + stream.duration) * stream.time_base
-            ticks = round(end / (previous.time_base or stream.time_base)) - previous.pts
-            if ticks > 0:
-                previous.duration = ticks
-        yield previous
-
-
-def timestamp(frame, stream):
-    if frame.pts is None:
-        raise ValueError("Video frames require presentation timestamps for synchronized dubbing")
-    return float(frame.pts * (frame.time_base or stream.time_base))
-
-
-def mux_frames(output, encoder, durations, frame=None):
-    for packet in encoder.encode(frame):
-        # The decoder supplies a duration for the last VFR frame too. Encoders
-        # otherwise infer a nominal last-frame duration from the average rate.
-        duration = durations.pop(packet.pts, 0)
-        if duration:
-            packet.duration = duration
-        output.mux(packet)
 
 
 class SpeakerAnchors(defaultdict):
@@ -956,12 +886,7 @@ def voice_timeline(cues, files, tails=None):
     return Timeline(turns)
 
 
-def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, output: Path, *, language=None, source_audio=None) -> int:
-    metadata = []
-    if language:
-        catalog = Path(__file__).resolve().parents[2] / "packages" / "translation-languages.json"
-        iso_codes = {entry["code"]: entry["nllb"].split("_")[0] for entry in json.loads(catalog.read_text())}
-        metadata = ["-metadata:s:a:0", f"language={iso_codes[language]}"]
+def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, output: Path, *, language=None, source_audio=None, published_audio=False) -> int:
     files = {i: wav_dir/f"{i}.wav" for i in range(len(cues)) if (wav_dir/f"{i}.wav").is_file()}
     models = FaceModels() if files else None
     lip_model = LipModel() if models else None
@@ -975,10 +900,8 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
     changed = 0
     with TemporaryDirectory(dir=output.parent) as temp, av.open(str(source)) as src:
         stream, audio_origin, duration = video_clock(src)
-        rate = stream.guessed_rate or stream.average_rate or Fraction(25, 1)
         silent = Path(temp)/"picture.mp4"
         transform, video_origin, encoder, last_report = None, None, None, -1
-        frame_durations = {}
         with av.open(str(silent), "w") as dst:
             for frame in video_frames(src, stream):
                 at = timestamp(frame, stream)
@@ -1051,37 +974,19 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
                     visible_turn.clear()
                     previous_boxes.clear()
                     continuity.gray, continuity.observed = None, {}
-                h, w = image.shape[:2]
-                if encoder is None:
-                    encoder = dst.add_stream("libx264", rate=rate, options=video_options(w, h, rate))
-                    encoder.width, encoder.height = w+w%2, h+h%2
-                    encoder.pix_fmt = "yuv420p"
-                    for field in ("color_range", "colorspace", "color_trc", "color_primaries"):
-                        setattr(encoder.codec_context, field, getattr(stream.codec_context, field))
-                    encoder.codec_context.time_base = Fraction(1, 90000)
-                    # Preserve VFR sample durations in MP4's decode-time table.
-                    encoder.codec_context.max_b_frames = 0
-                    aspect = stream.sample_aspect_ratio
-                    if aspect:
-                        encoder.codec_context.sample_aspect_ratio = 1/aspect if round(transform[0]/90) % 2 else aspect
                 out_frame = output_picture(frame, transform, image, original)
-                out_frame.time_base = encoder.codec_context.time_base
-                out_frame.pts = round((at-video_origin) / float(out_frame.time_base))
-                if frame.duration:
-                    frame_durations[out_frame.pts] = round(frame.duration * frame.time_base / out_frame.time_base)
-                mux_frames(dst, encoder, frame_durations, out_frame)
+                if encoder is None:
+                    encoder = PictureWriter(dst, stream, out_frame, transform)
+                encoder.write(out_frame, frame, at-video_origin)
                 done = int(80 + 18 * np.clip((at-video_origin) / max(duration, .01), 0, 1))
                 if done > last_report:
                     progress("Synchronizing translated lips", done)
                     last_report = done
             if encoder is None:
                 raise ValueError("No decodable video frames")
-            mux_frames(dst, encoder, frame_durations)
+            encoder.finish()
         # Cues and the mixed WAV are measured from the first input audio sample.
         # Preserve the original stream offset even when video and audio did not start together.
-        ffmpeg("-itsoffset", max(0, video_origin-audio_origin), "-i", silent,
-               "-itsoffset", max(0, audio_origin-video_origin), "-i", mixed_audio,
-               "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-               "-disposition:a:0", "default+dub", "-metadata:s:a:0", "handler_name=Open EasyX Dubbed Audio",
-               *metadata, "-movie_timescale", "90000", "-movflags", "+faststart", output)
+        mux_dubbed_audio(silent, mixed_audio, output, video_offset=max(0, video_origin-audio_origin),
+                         audio_offset=max(0, audio_origin-video_origin), language=language, published_audio=published_audio)
     return changed

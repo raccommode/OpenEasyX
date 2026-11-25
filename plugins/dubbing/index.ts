@@ -9,24 +9,37 @@ import subtitleLanguages from "../../packages/translation-languages.json" with {
 
 const supported = new Set(["en", "fr", "es", "de", "it", "pt", "ru", "ja", "ko", "zh"]);
 const languages = subtitleLanguages.filter(({ code }) => supported.has(code)).map(({ code, label }) => ({ code, label }));
+const audioGeneration = "5";
+const audioRevision = audioGeneration + "-audio";
+const lipRevision = audioGeneration + "-lips";
+const compatibleRevisions = [audioRevision, lipRevision];
 
 export default definePlugin({
   manifest: {
-    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.3.0", author: "Open EasyX",
-    capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: "4", dubbingPreviousRenderVersions: ["3"],
-    description: "Clone each speaker’s voice, translate the dialogue and synchronize visible lips locally.",
+    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.4.0", author: "Open EasyX",
+    capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: audioRevision,
+    dubbingLipSyncRenderVersion: lipRevision, dubbingPreviousRenderVersions: compatibleRevisions,
+    dubbingRecheckSilentVersions: ["", "1", "2", "3", "4"],
+    description: "Translate dialogue locally using each speaker’s voice. Enable lip sync to animate visible speakers.",
     settings: [
       ...languages.map(({ code, label }) => ({ key: code, label, type: "boolean" as const, default: false })),
+      { key: "lipSync", label: "Lip sync", type: "boolean", default: false },
       { key: "oldestFirst", label: "Process oldest videos first", type: "boolean", default: false },
     ],
   },
-  async renderDub({ signal, log }, job, report) {
+  async renderDub({ signal, log, config }, job, report) {
     signal?.throwIfAborted();
     await mkdir(job.workDir, { recursive: true, mode: 0o700 });
     const jobFile = path.join(job.workDir, `.render-${randomUUID()}.json`);
     try {
       // A library with many long source paths can exceed the OS limit for a single argument.
-      await writeFile(jobFile, JSON.stringify(job), { flag: "wx", mode: 0o600 });
+      // Both modes share the same speech analysis. Older audio checkpoints use a different separation pipeline.
+      const cache = "audio-" + audioGeneration;
+      const previous = job.previousOutput;
+      const workerJob = { ...job, lipSync: job.lipSync ?? (config.lipSync === true),
+        workDir: path.join(job.workDir, cache), speechCacheDir: path.join(path.dirname(job.workDir), cache),
+        previousOutput: previous && compatibleRevisions.includes(previous.renderVersion) ? previous : undefined };
+      await writeFile(jobFile, JSON.stringify(workerJob), { flag: "wx", mode: 0o600 });
       signal?.throwIfAborted();
       const grouped = process.platform !== "win32";
       const child = spawn(process.env.EASYX_DUBBING_PYTHON || "python3", [fileURLToPath(new URL("./pipeline.py", import.meta.url)), jobFile], {

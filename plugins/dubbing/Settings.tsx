@@ -7,6 +7,7 @@ type Overview = {
   languages: { code: string; label: string }[];
   selected: string[];
   oldestFirst: boolean;
+  lipSync: boolean;
   current: { title: string; language: string; phase: string; progress: number } | null;
   runtimeRetryAt?: string | null;
   errors: { id: string; title: string; language: string; error: string; runtimeSetup?: boolean }[];
@@ -14,7 +15,7 @@ type Overview = {
 
 export default function DubbingSettings({ name, close, uninstall }: { name: string; close: () => void; uninstall: () => Promise<void> }) {
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [draft, setDraft] = useState<Pick<Overview, "selected" | "oldestFirst"> | null>(null);
+  const [draft, setDraft] = useState<Pick<Overview, "selected" | "oldestFirst" | "lipSync"> | null>(null);
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const [loadError, setLoadError] = useState("");
@@ -37,12 +38,13 @@ export default function DubbingSettings({ name, close, uninstall }: { name: stri
   }, [revision]);
   const selected = draft?.selected ?? overview?.selected ?? [];
   const oldestFirst = draft?.oldestFirst ?? overview?.oldestFirst ?? false;
+  const lipSync = draft?.lipSync ?? overview?.lipSync ?? false;
   const languageLabel = (code: string) => overview?.languages.find((item) => item.code === code)?.label ?? code;
   const save = async () => {
     if (!draft || !overview) return;
     setBusy(true); setError("");
     try {
-      const config = { ...Object.fromEntries(overview.languages.map(({ code }) => [code, draft.selected.includes(code)])), oldestFirst: draft.oldestFirst };
+      const config = { ...Object.fromEntries(overview.languages.map(({ code }) => [code, draft.selected.includes(code)])), oldestFirst: draft.oldestFirst, lipSync: draft.lipSync };
       await api("/api/plugins/org.easyx.dubbing/config", { method: "PUT", body: JSON.stringify(config) });
       close();
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -76,12 +78,16 @@ export default function DubbingSettings({ name, close, uninstall }: { name: stri
             <div className="language-grid" role="group" aria-labelledby="dubbing-languages" aria-describedby="dubbing-hint">
               {overview.languages.map(({code,label}) => {
                 const on = selected.includes(code);
-                return <button key={code} className={on ? "selected" : ""} aria-pressed={on} disabled={busy} onClick={() => setDraft({ selected: on ? selected.filter((item) => item !== code) : [...selected, code], oldestFirst })}><span>{label}</span>{on && <Check aria-hidden="true"/>}</button>;
+                return <button key={code} className={on ? "selected" : ""} aria-pressed={on} disabled={busy} onClick={() => setDraft({ selected: on ? selected.filter((item) => item !== code) : [...selected, code], oldestFirst, lipSync })}><span>{label}</span>{on && <Check aria-hidden="true"/>}</button>;
               })}
             </div>
           </section>
+          <section className="settings-card settings-hero">
+            <div><h3 id="dubbing-lips">Lip sync</h3><p id="dubbing-lips-hint">Animate visible speakers to match the dubbed audio. This takes longer and updates existing dubs in the selected languages.</p></div>
+            <button className={`settings-switch ${lipSync ? "active" : ""}`} role="switch" aria-labelledby="dubbing-lips" aria-describedby="dubbing-lips-hint" aria-checked={lipSync} disabled={busy} onClick={() => setDraft({ selected, oldestFirst, lipSync: !lipSync })}><i/></button>
+          </section>
           <section className="settings-card">
-            <ProcessingOrderField oldestFirst={oldestFirst} onChange={(order) => setDraft({ selected, oldestFirst: order })} disabled={busy}/>
+            <ProcessingOrderField oldestFirst={oldestFirst} onChange={(order) => setDraft({ selected, oldestFirst: order, lipSync })} disabled={busy}/>
           </section>
           <section className="settings-card"><h3>Local processing</h3>
             {job ? <div className="subtitle-job-progress"><p className="subtitle-current-title">{job.title} · {languageLabel(job.language)}</p><div><span role="status">{job.phase}</span><strong aria-hidden="true">{Math.round(job.progress)}%</strong></div><progress aria-label={`Dubbing ${job.title} in ${languageLabel(job.language)}`} max={100} value={job.progress}/></div>

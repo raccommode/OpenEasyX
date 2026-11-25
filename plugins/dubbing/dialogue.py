@@ -9,67 +9,51 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from scipy.signal import resample_poly
 
+from cinematic import cinematic_separator, isolate_dialogue
 from runtime import device, ffmpeg, model_path, progress, save_json, whisper_device
 
 
-def dialogue_to_replace(stems):
-    # Suppress leakage into the speech estimate in frequency bins where
-    # the cinematic model finds stronger evidence for music or effects.
-    speech = stems["speech"].detach().float().cpu()
-    window = torch.hann_window(2048)
-    spectrum = torch.stft(speech, 2048, hop_length=512, window=window, pad_mode="constant", return_complex=True)
-    power = spectrum.abs().square()
-    background = torch.zeros_like(power)
-    for stem in ("music", "sfx"):
-        bins = torch.stft(stems[stem].detach().float().cpu(), 2048, hop_length=512, window=window, pad_mode="constant", return_complex=True)
-        background += bins.abs().square()
-    confidence = power / (power + background + 1e-10)
-    return torch.istft(spectrum * confidence, 2048, hop_length=512, window=window, length=speech.shape[-1]).numpy().T
-
-
-def cinematic_separator():
-    from demucs_infer import DemucsSeparator
-    # The cinematic checkpoint supports CUDA and CPU. Other stages also use Metal.
-    return DemucsSeparator(model="cdx23_dnr", device="cuda" if device() == "cuda" else "cpu", shifts=0,
-                           cache_dir=Path(os.environ["HF_HOME"]).parent / "demucs")
-
-
-def isolate_dialogue(session, samples):
-    separated = np.zeros_like(samples)
-    for ch in range(0, samples.shape[1], 2):
-        pair = samples[:, ch:ch+2]
-        if np.max(np.abs(pair)) < 1e-6:
-            continue
-        stereo = np.repeat(pair, 2, axis=1) if pair.shape[1] == 1 else pair
-        with torch.inference_mode():
-            _, stems = session(torch.from_numpy(stereo.T.copy()), sample_rate=44100)
-        separated[:, ch:ch+2] = dialogue_to_replace(stems)[:, :pair.shape[1]]
-    return separated
-
-
 def separate_dialogue(source, work):
-    mix, dialogue = work / "mix.wav", work / "dialogue.wav"
+    mix, dialogue = work / "mix.wav", work / "dialogue-bandit-v2.wav"
     if dialogue.is_file() and mix.is_file():
         return mix, dialogue
-    ffmpeg("-i", source, "-map", "0:a:0", "-vn", "-ar", 44100, "-c:a", "pcm_f32le", "-rf64", "auto", mix)
-    partial = work / "dialogue.partial.wav"
-    session = cinematic_separator()
-    with sf.SoundFile(mix) as src, sf.SoundFile(partial, "w", samplerate=44100, channels=src.channels, subtype="FLOAT", format="RF64") as dst:
-        # Give both sides context and discard edge predictions at block seams.
-        for start in range(0, len(src), 44100 * 30):
-            end = min(len(src), start + 44100 * 30)
-            left = max(0, start - 44100)
-            src.seek(left)
-            data = src.read(min(len(src), end + 44100) - left, dtype="float32", always_2d=True)
-            dst.write(isolate_dialogue(session, data)[start-left:end-left])
-            progress("Separating dialogue from music and effects", 2 + 13 * end / len(src))
+    pending = work / "mix.partial.wav"
+    ffmpeg("-i", source, "-map", "0:a:0", "-vn", "-ar", 44100, "-c:a", "pcm_f32le", "-rf64", "auto", pending)
+    pending.replace(mix)
+    partial = dialogue.with_suffix(".partial.wav")
+    model = cinematic_separator()
+    with sf.SoundFile(mix) as src, sf.SoundFile(partial, "w", samplerate=src.samplerate,
+            channels=src.channels, subtype="FLOAT", format="RF64") as dst:
+        hop, overlap = 6*src.samplerate, 2*src.samplerate
+        tail = None
+        for start in range(0, len(src), hop):
+            src.seek(start)
+            original = src.read(hop+overlap, dtype="float32", always_2d=True)
+            speech = isolate_dialogue(model, original)
+            if tail is not None:
+                n = min(len(tail), len(speech))
+                fade = (.5-.5*np.cos(np.pi*(np.arange(n)+.5)/n)).astype("float32")[:, None]
+                speech[:n] = tail[:n]*(1-fade) + speech[:n]*fade
+            final = start+len(original) == len(src)
+            count = len(speech) if final else hop
+            dst.write(speech[:count])
+            progress("Separating dialogue from music and effects", 2 + 13*(start+count)/len(src))
+            if final:
+                break
+            tail = speech[count:].copy()
     partial.replace(dialogue)
     return mix, dialogue
 
 
+def embedding_config():
+    import sherpa_onnx as so
+    return so.SpeakerEmbeddingExtractorConfig(
+        model=model_path("embedding", "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"), num_threads=2)
+
+
 def diarizer():
     import sherpa_onnx as so
-    embedding = so.SpeakerEmbeddingExtractorConfig(model=model_path("embedding", "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"), num_threads=2)
+    embedding = embedding_config()
     segmentation = so.OfflineSpeakerSegmentationModelConfig(pyannote=so.OfflineSpeakerSegmentationPyannoteModelConfig(
         model=model_path("segmentation", "model.onnx")), num_threads=2)
     cfg = so.OfflineSpeakerDiarizationConfig(segmentation=segmentation, embedding=embedding,

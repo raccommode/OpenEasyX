@@ -106,7 +106,7 @@ export function registerLibraryRoutes(app: FastifyInstance<any, any, any, any>, 
     if (oldestFirst !== undefined && typeof oldestFirst !== "boolean") throw Object.assign(new Error("oldestFirst must be a boolean"), { statusCode: 400 });
     return subtitles.configure({ enabled: request.body.enabled, languages, oldestFirst });
   });
-  app.get("/api/dubbing/status", async () => dubbing?.overview() ?? { languages: [], selected: [], oldestFirst: false, current: null, errors: [] });
+  app.get("/api/dubbing/status", async () => dubbing?.overview() ?? { languages: [], selected: [], oldestFirst: false, lipSync: false, current: null, errors: [] });
   app.get<{ Params: { id: string } }>("/api/media/:id/dubbing", async ({ params }) => dubbing?.status(requiredMedia(params.id)) ?? { installed: false, variants: [] });
   app.post<{ Params: { id: string; language: string } }>("/api/media/:id/dubbing/:language/retry", async ({ params }) => {
     if (!dubbing) throw Object.assign(new Error("Dubbing is unavailable"), { statusCode: 409 });

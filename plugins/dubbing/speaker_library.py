@@ -18,7 +18,7 @@ from voice_samples import RATE, VoiceSampler, decode, original_audio
 
 MAX_CATALOG_VIDEOS = 32
 MAX_BANK_BYTES = 64*1024*1024
-VERSION = 2
+VERSION = 3  # Speaker numbers and clean reference clips are derived from this generation's separator.
 
 
 def signature(item):

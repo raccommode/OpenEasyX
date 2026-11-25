@@ -1,6 +1,7 @@
 """Lazy environment and model files shared by dubbing jobs on this server."""
 from collections import deque
 import hashlib
+from importlib import metadata
 import json
 import os
 import platform
@@ -58,7 +59,16 @@ def install_dependencies(requirements, cuda):
         return
     # Choose only the two platform wheels at PyTorch. Its CUDA and CPU indexes
     # are not complete package indexes for dependencies or isolated builds.
-    index = "https://download.pytorch.org/whl/" + ("cu128" if cuda else "cpu")
+    variant = "cu128" if cuda else "cpu"
+    try:
+        already_installed = all(metadata.version(name) == f"2.9.1+{variant}" for name in ("torch", "torchaudio"))
+    except metadata.PackageNotFoundError:
+        already_installed = False
+    if already_installed:
+        # A model or plugin dependency changed while the platform wheels stayed pinned.
+        run_installer("Installing dubbing dependencies", [*install, *packages, "-r", str(requirements)])
+        return
+    index = "https://download.pytorch.org/whl/" + variant
     with tempfile.TemporaryDirectory(prefix="easyx-torch-") as folder:
         run_installer("Downloading PyTorch wheels", [*pip, "download", "--progress-bar", "off",
             "--index-url", index, "--only-binary=:all:", "--no-deps", "--dest", folder, *packages])
@@ -146,6 +156,7 @@ def whisper_device():
 
 
 MODELS = {
+    "speech_translation": ("facebook/seamless-m4t-v2-large", "5f8cc790b19fc3f67a61c105133b20b34e3dcb76"),
     "voice": ("k2-fsa/OmniVoice", "3fc979d1cd72492cd679c5ac2611e0d7ac047ba1"),
     "translation": ("facebook/nllb-200-distilled-600M", "f8d333a098d19b4fd9a8b18f94170487ad3f821d"),
     "segmentation": ("csukuangfj/sherpa-onnx-pyannote-segmentation-3-0", "9403a6902bb58e3d5ae8c7e77c3422de279db2e0"),
@@ -167,10 +178,22 @@ def model_path(key, filename=None):
             local /= filename
         if local.exists():
             return str(local)
+    offline = os.environ.get("HF_HUB_OFFLINE", "").upper() in {"1", "YES", "ON", "TRUE"}
     if filename:
-        return hf_hub_download(repo, filename, revision=revision)
-    patterns = ["*.json", "*.jinja", "*.safetensors"] if key == "voice" else ["*.json", "*.model", "pytorch_model.bin"]
-    return snapshot_download(repo, revision=revision, allow_patterns=patterns)
+        return hf_hub_download(repo, filename, revision=revision, local_files_only=offline)
+    if key == "speech_translation":
+        from huggingface_hub import try_to_load_from_cache
+        # The immutable release has exactly two weight shards. A partially downloaded
+        # snapshot already has a directory but cannot service another job offline.
+        patterns = ["config.json", "generation_config.json", "preprocessor_config.json", "tokenizer_config.json",
+                    "special_tokens_map.json", "added_tokens.json", "tokenizer.model", "sentencepiece.bpe.model",
+                    "model.safetensors.index.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+        files = [try_to_load_from_cache(repo, name, revision=revision) for name in patterns]
+        if all(isinstance(file, str) for file in files):
+            return str(Path(files[0]).parent)
+    else:
+        patterns = ["*.json", "*.jinja", "*.safetensors"] if key == "voice" else ["*.json", "*.model", "pytorch_model.bin"]
+    return snapshot_download(repo, revision=revision, allow_patterns=patterns, local_files_only=offline)
 
 
 def ffmpeg(*args):

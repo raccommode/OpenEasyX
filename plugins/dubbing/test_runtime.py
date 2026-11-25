@@ -28,7 +28,7 @@ class DubbingRuntimeTests(unittest.TestCase):
                         (directory/f"torch-2.9.1+{variant}-cp311-cp311-linux_aarch64.whl").touch()
                         (directory/"torchaudio-2.9.1-cp311-cp311-linux_aarch64.whl").touch()
 
-                with patch.object(runtime, "run_installer", side_effect=pip):
+                with patch.object(runtime.metadata, "version", side_effect=runtime.metadata.PackageNotFoundError), patch.object(runtime, "run_installer", side_effect=pip):
                     runtime.install_dependencies(Path("requirements.txt"), cuda)
                 upgrade, download, install = commands
                 self.assertIn("install", upgrade)
@@ -44,6 +44,14 @@ class DubbingRuntimeTests(unittest.TestCase):
                 wheels = [Path(arg).name for arg in install if arg.endswith(".whl")]
                 self.assertEqual(len(wheels), 2)
                 self.assertTrue(any(wheel.startswith("torchaudio-") for wheel in wheels))
+
+    def test_linux_reuses_already_installed_matching_platform_wheels(self):
+        with patch.object(runtime.sys, "platform", "linux"), patch.object(runtime.metadata, "version", return_value="2.9.1+cu128"), patch.object(runtime, "run_installer") as run:
+            runtime.install_dependencies(Path("requirements.txt"), True)
+        self.assertEqual(run.call_count, 2)
+        install = run.call_args.args[1]
+        self.assertIn("torch==2.9.1", install)
+        self.assertEqual(install[-2:], ["-r", "requirements.txt"])
 
     def test_macos_uses_platform_wheels_from_the_normal_package_index(self):
         with patch.object(runtime.sys, "platform", "darwin"), patch.object(runtime, "run_installer") as run:

@@ -1,5 +1,6 @@
 """Speaker assignment and soundtrack regressions for the optional dubbing runtime."""
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 import tempfile
@@ -17,6 +18,26 @@ if RUNTIME:
 
 @unittest.skipUnless(RUNTIME, "requires the optional dubbing Python environment")
 class SpeakerTests(unittest.TestCase):
+    def test_cinematic_stem_has_its_own_cache_and_reconstructs_overlapped_blocks_on_the_source_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            rate = 44100
+            t = np.arange(14*rate+77)/rate
+            samples = (.25*np.sin(2*np.pi*440*t))[:, None]*[1., -.6]
+            source = work/"source.wav"
+            sf.write(source, samples, rate, subtype="FLOAT")
+            sf.write(work/"dialogue.wav", np.zeros_like(samples), rate)
+            sf.write(work/"mix.wav", np.zeros_like(samples), rate)
+            with patch.object(dialogue, "ffmpeg", side_effect=lambda *args: shutil.copyfile(source, args[-1])), \
+                 patch.object(dialogue, "cinematic_separator") as load, \
+                 patch.object(dialogue, "isolate_dialogue", side_effect=lambda _model, audio: audio*.5) as separate:
+                mix, stem = dialogue.separate_dialogue(source, work)
+                self.assertEqual(dialogue.separate_dialogue(source, work), (mix, stem))
+            self.assertNotEqual(stem, work/"dialogue.wav")
+            self.assertFalse(stem.with_suffix(".partial.wav").exists())
+            np.testing.assert_allclose(sf.read(stem)[0], samples*.5, atol=3e-8)
+            self.assertEqual(load.call_count, 1)
+            self.assertEqual(separate.call_count, 3)
     def test_small_cuda_budget_or_a_real_allocation_failure_moves_only_the_voice_backbone(self):
         for tight in (True, False):
             model_class, backbone, codec = Mock(), Mock(), object()
@@ -196,17 +217,16 @@ class SpeakerTests(unittest.TestCase):
             self.assertAlmostEqual(voices.dialogue_loudness(work/"out.wav"), -18., delta=1.)
             self.assertLess(float(np.abs(out).max()), .94)
 
-    def test_translation_tail_plays_over_the_original_gap_without_subtracting_it(self):
+    def test_source_speech_outside_the_transcript_is_removed_while_translation_plays_across_the_gap(self):
         rate = 44100
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             t = np.arange(rate*3)/rate
             bg = (.04*np.cos(2*np.pi*130*t))[:, None]
-            original = (.1*np.sin(2*np.pi*350*t)*((t>=.25)&(t<.9)))[:, None]
+            original = (.1*np.sin(2*np.pi*350*t)*(((t>=.2)&(t<1.2)) | ((t>=2)&(t<2.5))))[:, None]
             sf.write(work/"mix.wav", bg+original, rate, subtype="FLOAT")
-            # A film model might classify part of the ambient sound as speech.
-            # Its estimate outside the original line must be completely ignored.
-            sf.write(work/"dialogue.wav", original + bg*(t>.9)[:, None], rate, subtype="FLOAT")
+            # Source dialogue starts early, ends late, and an entire line was missed by ASR.
+            sf.write(work/"dialogue.wav", original, rate, subtype="FLOAT")
             tail = .02*np.sin(2*np.pi*870*np.arange(round(1.35*rate))/rate)
             sf.write(work/"0.wav", tail, rate, subtype="FLOAT")
             cues = [dict(start=.25, end=.9, speaker=0, direction=[1.])]
@@ -215,9 +235,35 @@ class SpeakerTests(unittest.TestCase):
             bed = sf.read(work/"bed.wav")[0]
             dry = sf.read(work/"dry.wav")[0]
             gap = (t>1.01)&(t<1.55)
-            np.testing.assert_allclose(bed[gap], bg[gap, 0], atol=1e-7)
+            np.testing.assert_allclose(bed, bg[:, 0], atol=1e-7)
             np.testing.assert_allclose(dry[gap], tail[np.where(gap)[0]-round(.25*rate)], atol=1e-7)
             np.testing.assert_array_equal(dry[t>1.62], 0.)
+
+    def test_only_the_target_language_speaker_is_restored_during_overlap(self):
+        rate = 44100
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            t = np.arange(rate)/rate
+            a = .1*np.sin(2*np.pi*220*t)
+            b = .1*np.sin(2*np.pi*580*t)
+            pan_a, pan_b = [1.4, .6], [.5, 1.5]
+            speech = a[:, None]*pan_a + b[:, None]*pan_b
+            bg = (.03*np.sin(2*np.pi*112*t))[:, None]*[1., -1.]
+            for name, samples in (("mix.wav", bg+speech), ("dialogue.wav", speech),
+                                  ("native.wav", a), ("1.wav", np.zeros(rate))):
+                sf.write(work/name, samples, rate, subtype="FLOAT")
+            cues = [dict(start=0., end=1., speaker=0, language="fr", direction=pan_a, clip="native.wav"),
+                    dict(start=0., end=1., speaker=1, language="en", direction=pan_b)]
+            def render():
+                voices.render_voice_buses(work/"mix.wav", work/"dialogue.wav", cues, work, work,
+                                          work/"bed.wav", work/"dry.wav", iter([]), {}, language="fr")
+            render()
+            bed = sf.read(work/"bed.wav")[0]
+            inner = slice(600, -600)
+            np.testing.assert_allclose(bed[inner], (bg+a[:, None]*pan_a)[inner], atol=1e-6)
+            (work/"1.wav").unlink()
+            with self.assertRaisesRegex(ValueError, "Missing translated voice"):
+                render()
 
     def test_overlapping_tones_regain_their_independent_pans(self):
         rate = 44100

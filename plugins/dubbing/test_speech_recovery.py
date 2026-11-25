@@ -169,15 +169,16 @@ class SpeechRecoveryTests(unittest.TestCase):
                                  [prompt, fixed, fixed])
                 self.assertTrue(all(c.kwargs["text"] == "Bonjour" for c in model.generate.call_args_list))
 
-    def test_an_abnormally_short_first_take_is_kept_only_when_its_words_are_corroborated(self):
+    def test_every_take_requires_its_target_words_including_short_and_unspaced_phrases(self):
         french = "Bonsoir les amis !"
         chinese = "我今天要去图书馆"
         cases = [
             ("fr", french, .64, ["Tout est fini", french], 2),
             ("fr", french, .64, [french], 1),
             ("zh", chinese, .64, ["再见", chinese], 2),
-            ("fr", french, 1.2, [], 1),
-            ("fr", "Oui !", .64, [], 1),
+            ("fr", french, 1.2, [french], 1),
+            ("fr", french, 1.2, ["Tout est fini", french], 2),
+            ("fr", "Oui !", .64, ["Oui"], 1),
         ]
         for language, target, first_duration, heard, takes in cases:
             with self.subTest(target=target, heard=heard), TemporaryDirectory() as root:
@@ -208,6 +209,13 @@ class SpeechRecoveryTests(unittest.TestCase):
                 self.assertEqual(transcribe.call_count, len(heard))
                 self.assertEqual(whisper.WhisperModel.call_count, int(bool(heard)))
                 self.assertEqual(sf.info(out/"0.wav").frames, round((first_duration if takes == 1 else 1.6)*rate))
+
+    def test_an_intelligible_take_in_the_other_original_speakers_voice_is_rejected(self):
+        first, second = np.array([1., 0.]), np.array([0., 1.])
+        anchors = {0: first, 1: second}
+        self.assertTrue(voices.wrong_speaker(second, 0, anchors))
+        self.assertFalse(voices.wrong_speaker(first, 0, anchors))
+        self.assertFalse(voices.wrong_speaker(np.array([.69, .71]), 0, anchors))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,11 @@
 """Composite mouth edits into the source picture before encoding the dubbed video."""
+from fractions import Fraction
+
 import av
 import cv2
 import numpy as np
+
+from delivery import video_options
 
 
 def plane_view(plane):
@@ -52,3 +56,100 @@ def output_picture(frame, transform, image, original):
         delta = plane_view(new.planes[i]).astype(np.int16) - plane_view(old.planes[i])
         section[:] = np.clip(section + delta, 0, 255)
     return output
+
+
+def orientation(frame):
+    for side in frame.side_data:
+        if side.type.name == "DISPLAYMATRIX":
+            matrix = np.frombuffer(bytes(side), dtype=np.int32).reshape(3, 3)[:2, :2]
+            angle = np.degrees(np.arctan2(-float(matrix[0, 1]), float(matrix[0, 0])))
+            return angle, np.linalg.det(matrix.astype("float64")) < 0
+    return 0., False
+
+
+def oriented(frame, transform):
+    image = frame.to_ndarray(format="bgr24")
+    angle, flip = transform
+    if flip:
+        image = image[::-1, :]
+    quadrant = round(angle / 90)
+    if abs(angle - quadrant * 90) < .01:
+        image = np.rot90(image, quadrant)
+    elif angle:
+        h, w = image.shape[:2]
+        mat = cv2.getRotationMatrix2D((w/2, h/2), angle, 1)
+        image = cv2.warpAffine(image, mat, (w, h))
+    return np.ascontiguousarray(image)
+
+
+def video_frames(container, stream):
+    """Keep healthy pictures on their original clock even when packets are damaged."""
+    previous = None
+    damaged = False
+    for packet in container.demux(stream):
+        try:
+            frames = packet.decode()
+        except av.error.InvalidDataError:
+            damaged = True
+            continue
+        for frame in frames:
+            if frame.is_corrupt:
+                damaged = True
+                continue
+            if previous is not None:
+                yield previous
+            previous = frame
+    if previous is not None:
+        if damaged and stream.duration is not None and stream.start_time is not None and previous.pts is not None:
+            # A lost tail has no next picture to establish the last healthy frame's
+            # duration. Hold it through the declared video end without shifting audio.
+            end = (stream.start_time + stream.duration) * stream.time_base
+            ticks = round(end / (previous.time_base or stream.time_base)) - previous.pts
+            if ticks > 0:
+                previous.duration = ticks
+        yield previous
+
+
+def timestamp(frame, stream):
+    if frame.pts is None:
+        raise ValueError("Video frames require presentation timestamps for synchronized dubbing")
+    return float(frame.pts * (frame.time_base or stream.time_base))
+
+
+class PictureWriter:
+    """Write H.264 pictures with the source colour, display aspect and VFR sample durations."""
+    def __init__(self, output, source, picture, transform):
+        width, height = picture.width, picture.height
+        rate = source.guessed_rate or source.average_rate or Fraction(25, 1)
+        self.output = output
+        self.durations = {}
+        self.stream = output.add_stream("libx264", rate=rate, options=video_options(width, height, rate))
+        self.stream.width, self.stream.height = width, height
+        self.stream.pix_fmt = "yuv420p"
+        codec = self.stream.codec_context
+        for field in ("color_range", "colorspace", "color_trc", "color_primaries"):
+            setattr(codec, field, getattr(source.codec_context, field))
+        codec.time_base = Fraction(1, 90000)
+        codec.max_b_frames = 0
+        aspect = source.sample_aspect_ratio
+        if aspect:
+            codec.sample_aspect_ratio = 1/aspect if round(transform[0]/90) % 2 else aspect
+
+    def write(self, picture, source_frame, elapsed):
+        base = self.stream.codec_context.time_base
+        pts = round(elapsed / float(base))
+        if source_frame.duration:
+            self.durations[pts] = round(source_frame.duration * source_frame.time_base / base)
+        picture.time_base = base
+        picture.pts = pts
+        self._mux(self.stream.encode(picture))
+
+    def finish(self):
+        self._mux(self.stream.encode())
+
+    def _mux(self, packets):
+        for packet in packets:
+            duration = self.durations.pop(packet.pts, 0)
+            if duration:
+                packet.duration = duration
+            self.output.mux(packet)
