@@ -5,6 +5,7 @@ import math
 import os
 import subprocess
 import sys
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -235,7 +236,12 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
     model = load_voice_model(OmniVoice, model_path("voice"), accelerator, dtype, percent)
     limits = delivery_durations(cues, sf.info(work/"mix.wav").duration)
     prompts, repaired_prompts, alternate_prompts = {}, {}, {}
-    recognizer = None
+    @cache
+    def recognizer():
+        from faster_whisper import WhisperModel
+        return WhisperModel(os.getenv("EASYX_WHISPER_MODEL", "small"), device="cpu",
+                            compute_type="int8", cpu_threads=2, download_root=model_cache)
+
     for idx in indices:
         cue, text = cues[idx], texts[idx]
         speaker = cue["speaker"]
@@ -250,13 +256,9 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
         limit = limits[idx]
         for attempt in range(3):
             if attempt:
-                if recognizer is None:
-                    from faster_whisper import WhisperModel
-                    recognizer = WhisperModel(os.getenv("EASYX_WHISPER_MODEL", "small"), device="cpu",
-                                              compute_type="int8", cpu_threads=2, download_root=model_cache)
                 if speaker not in repaired_prompts:
                     from voice_samples import align_clone_reference
-                    aligned = align_clone_reference(recognizer, ref_audio, sr, cue["language"])
+                    aligned = align_clone_reference(recognizer(), ref_audio, sr, cue["language"])
                     if aligned is not None:
                         ref, ref_text = aligned
                         prompt = model.create_voice_clone_prompt((torch.from_numpy(ref)[None, :], sr), ref_text,
@@ -266,7 +268,7 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
                 if attempt == 2:
                     if speaker not in alternate_prompts:
                         from voice_samples import alternate_clone_reference
-                        alternative = alternate_clone_reference(recognizer, cues, work, speaker)
+                        alternative = alternate_clone_reference(recognizer(), cues, work, speaker)
                         if alternative is not None:
                             ref, rate, ref_text = alternative
                             prompt = model.create_voice_clone_prompt((torch.from_numpy(ref)[None, :], rate), ref_text,
@@ -283,12 +285,21 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
             wave = model.generate(text=text, language=language, voice_clone_prompt=prompt, duration=duration,
                                   num_step=48, pad_duration=0., preprocess_prompt=False)[0]
             wave = np.asarray(wave, dtype="float32").reshape(-1)[:max(1, round(limit*model.sampling_rate))]
-            if not audible(wave, model.sampling_rate) or len(wave) < model.sampling_rate*min(.35*duration, .10*len(text.split())):
+            if not audible(wave, model.sampling_rate):
                 continue
-            if not attempt or verifies_words(recognizer, wave, model.sampling_rate, language, text):
-                if attempt:
-                    prompts[speaker] = prompt, ref_audio, sr
-                break
+            seconds = len(wave)/model.sampling_rate
+            # The codec can trim a failed sentence to an audible fragment.
+            # Count letters too for languages that do not separate words with spaces.
+            check_short = (not attempt and seconds < .55*duration and
+                           (sum(any(c.isalnum() for c in word) for word in text.split()) >= 2 or
+                            sum(c.isalpha() for c in text) >= 8))
+            if not check_short and seconds < min(.35*duration, .10*len(text.split())):
+                continue
+            if (attempt or check_short) and not verifies_words(recognizer(), wave, model.sampling_rate, language, text):
+                continue
+            if attempt:
+                prompts[speaker] = prompt, ref_audio, sr
+            break
         else:
             raise ValueError(f"The cloned voice could not produce intelligible {language} speech for speaker "
                              f"{speaker+1} at {cue['start']:.2f}–{cue['end']:.2f}s after 3 attempts")

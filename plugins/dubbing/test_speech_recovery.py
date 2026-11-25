@@ -169,6 +169,46 @@ class SpeechRecoveryTests(unittest.TestCase):
                                  [prompt, fixed, fixed])
                 self.assertTrue(all(c.kwargs["text"] == "Bonjour" for c in model.generate.call_args_list))
 
+    def test_an_abnormally_short_first_take_is_kept_only_when_its_words_are_corroborated(self):
+        french = "Bonsoir les amis !"
+        chinese = "我今天要去图书馆"
+        cases = [
+            ("fr", french, .64, ["Tout est fini", french], 2),
+            ("fr", french, .64, [french], 1),
+            ("zh", chinese, .64, ["再见", chinese], 2),
+            ("fr", french, 1.2, [], 1),
+            ("fr", "Oui !", .64, [], 1),
+        ]
+        for language, target, first_duration, heard, takes in cases:
+            with self.subTest(target=target, heard=heard), TemporaryDirectory() as root:
+                work = Path(root)
+                out = work/"voices"
+                out.mkdir()
+                rate = 16000
+                audio = np.full(2*rate, .1, dtype="float32")
+                sf.write(work/"mix.wav", audio, rate)
+                sf.write(work/"speaker-0.wav", audio, rate)
+                (work/"speaker-0.txt").write_text("Good evening")
+                model = Mock(sampling_rate=rate)
+                model.create_voice_clone_prompt.return_value = SimpleNamespace(
+                    ref_text="Good evening", ref_audio_tokens=Mock(shape=(1, 25)))
+                model.duration_estimator.estimate_duration.return_value = 45
+                model.audio_tokenizer.config.frame_rate = 25
+                model.generate.side_effect = [[audio[:round(first_duration*rate)]], [audio[:round(1.6*rate)]]]
+                whisper = Mock()
+                transcribe = whisper.WhisperModel.return_value.transcribe
+                transcribe.side_effect = [([SimpleNamespace(text=text, avg_logprob=-.3, no_speech_prob=.1)], None)
+                                          for text in heard]
+                cue = dict(text="Good evening", language="en", start=0., end=1.8, speaker=0)
+                with patch.dict(sys.modules, {"omnivoice": Mock(), "faster_whisper": whisper}), \
+                     patch.object(voices, "model_path"), patch.object(voices, "load_voice_model", return_value=model), \
+                     patch.object(voice_samples, "align_clone_reference", return_value=None):
+                    voices.synthesize([cue], [target], language, work, out, [0], "cpu")
+                self.assertEqual(model.generate.call_count, takes)
+                self.assertEqual(transcribe.call_count, len(heard))
+                self.assertEqual(whisper.WhisperModel.call_count, int(bool(heard)))
+                self.assertEqual(sf.info(out/"0.wav").frames, round((first_duration if takes == 1 else 1.6)*rate))
+
 
 if __name__ == "__main__":
     unittest.main()
