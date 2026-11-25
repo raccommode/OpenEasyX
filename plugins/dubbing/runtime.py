@@ -167,9 +167,21 @@ MODELS = {
     "mouth": ("facefusion/models-3.0.0", "728b9659bd9691bf32cbf7f61af478d94b7ba81e"),
 }
 
+# Exact inference files in each pinned snapshot. An interrupted download can
+# leave a valid snapshot directory containing only a tokenizer or one shard.
+SNAPSHOT_FILES = {
+    "speech_translation": ["config.json", "generation_config.json", "preprocessor_config.json", "tokenizer_config.json",
+        "special_tokens_map.json", "added_tokens.json", "tokenizer.model", "sentencepiece.bpe.model",
+        "model.safetensors.index.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],
+    "translation": ["config.json", "generation_config.json", "pytorch_model.bin", "sentencepiece.bpe.model",
+        "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"],
+    "voice": ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
+        "audio_tokenizer/config.json", "audio_tokenizer/model.safetensors", "audio_tokenizer/preprocessor_config.json"],
+}
+
 
 def model_path(key, filename=None):
-    from huggingface_hub import hf_hub_download, snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download, try_to_load_from_cache
     repo, revision = MODELS[key]
     root = os.environ.get("EASYX_DUBBING_MODELS")
     if root:
@@ -179,21 +191,13 @@ def model_path(key, filename=None):
         if local.exists():
             return str(local)
     offline = os.environ.get("HF_HUB_OFFLINE", "").upper() in {"1", "YES", "ON", "TRUE"}
+    files = [filename] if filename else SNAPSHOT_FILES[key]
+    cached = [try_to_load_from_cache(repo, name, revision=revision) for name in files]
+    if all(isinstance(path, str) for path in cached):
+        return cached[0] if filename else str(Path(cached[0]).parent)
     if filename:
         return hf_hub_download(repo, filename, revision=revision, local_files_only=offline)
-    if key == "speech_translation":
-        from huggingface_hub import try_to_load_from_cache
-        # The immutable release has exactly two weight shards. A partially downloaded
-        # snapshot already has a directory but cannot service another job offline.
-        patterns = ["config.json", "generation_config.json", "preprocessor_config.json", "tokenizer_config.json",
-                    "special_tokens_map.json", "added_tokens.json", "tokenizer.model", "sentencepiece.bpe.model",
-                    "model.safetensors.index.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
-        files = [try_to_load_from_cache(repo, name, revision=revision) for name in patterns]
-        if all(isinstance(file, str) for file in files):
-            return str(Path(files[0]).parent)
-    else:
-        patterns = ["*.json", "*.jinja", "*.safetensors"] if key == "voice" else ["*.json", "*.model", "pytorch_model.bin"]
-    return snapshot_download(repo, revision=revision, allow_patterns=patterns, local_files_only=offline)
+    return snapshot_download(repo, revision=revision, allow_patterns=files, local_files_only=offline)
 
 
 def ffmpeg(*args):

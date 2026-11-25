@@ -155,6 +155,7 @@ class SpeechRecoveryTests(unittest.TestCase):
                 model.generate.side_effect = [[np.zeros(0)], [wave], [wave]]
                 cue = dict(text="Hello", start=0., end=.75, language="en", speaker=2)
                 with patch.dict(sys.modules, {"omnivoice": Mock(), "faster_whisper": Mock()}), \
+                     patch.object(voices, "model_directory", return_value="whisper"), \
                      patch.object(voices, "load_voice_model", return_value=model), patch.object(voices, "model_path"), \
                      patch("voice_samples.align_clone_reference", return_value=(wave, "Aligned")), \
                      patch.object(voices, "verifies_words", side_effect=[False, successful]):
@@ -202,6 +203,7 @@ class SpeechRecoveryTests(unittest.TestCase):
                                           for text in heard]
                 cue = dict(text="Good evening", language="en", start=0., end=1.8, speaker=0)
                 with patch.dict(sys.modules, {"omnivoice": Mock(), "faster_whisper": whisper}), \
+                     patch.object(voices, "model_directory", return_value="whisper"), \
                      patch.object(voices, "model_path"), patch.object(voices, "load_voice_model", return_value=model), \
                      patch.object(voice_samples, "align_clone_reference", return_value=None):
                     voices.synthesize([cue], [target], language, work, out, [0], "cpu")

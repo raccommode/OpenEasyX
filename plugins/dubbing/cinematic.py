@@ -29,19 +29,63 @@ def cinematic_separator():
     return V2Runtime(path, torch.device("cpu")).model
 
 
-def _speech(model, audio, accelerator):
+def _bounded_backbone(backbone, features, positions):
+    # In this pinned Bandit v2 graph each bidirectional GRU is followed by a
+    # transpose. Its second axis contains independent sequences. Split only
+    # that axis, keeping the full time or frequency context in each direction.
+    stages = backbone.seqband
+    for i in range(0, len(stages), 2):
+        rows = max(1, positions//features.shape[2])
+        for group in features.split(rows, dim=1):
+            group.copy_(stages[i](group))
+        features = stages[i+1](features)
+    return features
+
+
+def _speech(model, audio, accelerator, positions=None):
     # The trained model processes mono signals. Keep film channels independent,
     # including opposite-phase stereo, with at most two channels per forward.
     wave = torch.from_numpy(np.ascontiguousarray(audio.T))[:, None, :].to(accelerator)
     with torch.inference_mode():
-        stems = model({"mixture": {"audio": wave}})["estimates"]
-        speech = stems["speech"]["spectrogram"]
+        if positions is None:
+            stems = model({"mixture": {"audio": wave}})["estimates"]
+            speech = stems["speech"]["spectrogram"]
+            background = stems["music"]["spectrogram"].abs().square() + stems["sfx"]["spectrogram"].abs().square()
+        else:
+            spectrum = model.stft(wave)
+            features = _bounded_backbone(model.tf_model, model.band_split(spectrum), positions)
+            speech = model.mask_estim["speech"](features)*spectrum
+            background = torch.zeros_like(speech.real)
+            for name in ("music", "sfx"):
+                background.add_((model.mask_estim[name](features)*spectrum).abs().square())
         power = speech.abs().square()
-        background = stems["music"]["spectrogram"].abs().square() + stems["sfx"]["spectrogram"].abs().square()
         # Preserve background-dominant bins without aggressively suppressing a
         # quieter second voice. Work with the model's complex phase estimates.
         confidence = power / (power + .05*background + 1e-12)
         return model.istft(speech * confidence, wave.shape[-1])[:, 0, :].cpu().numpy().T
+
+
+def _cuda_speech(model, audio, accelerator):
+    # Keep the working shape for the rest of this resident model's film.
+    # None selects the upstream graph, the numbers bound its GRU workspace.
+    modes = ((2, None), (1, None), (1, 4096), (1, 1024))
+    previous = getattr(model, "_easyx_cuda_mode", 0)
+    for i in range(previous, len(modes)):
+        channels, positions = modes[i]
+        if i == 0 and audio.shape[1] == 1:
+            continue
+        try:
+            estimates = [_speech(model, audio[:, ch:ch+channels], accelerator, positions)
+                         for ch in range(0, audio.shape[1], channels)]
+        except torch.cuda.OutOfMemoryError:
+            pass
+        else:
+            if i != 1 or audio.shape[1] > 1:
+                model._easyx_cuda_mode = i
+            return np.concatenate(estimates, axis=1) if len(estimates) > 1 else estimates[0]
+        # Inside the except block the traceback still owns the failed forward's tensors.
+        torch.cuda.empty_cache()
+    return None
 
 
 def isolate_dialogue(model, samples):
@@ -56,16 +100,14 @@ def isolate_dialogue(model, samples):
         if len(native) < 2048:
             native = np.pad(native, ((0, 2048-len(native)), (0, 0)))
         accelerator = next(model.parameters()).device
-        try:
+        if accelerator.type == "cuda":
+            estimate = _cuda_speech(model, native, accelerator)
+            if estimate is None:
+                model.cpu()
+                torch.cuda.empty_cache()
+                progress("Separating dialogue on CPU while GPU memory is busy", 2)
+                estimate = _speech(model, native, torch.device("cpu"))
+        else:
             estimate = _speech(model, native, accelerator)
-        except torch.cuda.OutOfMemoryError:
-            if accelerator.type != "cuda":
-                raise
-            estimate = None
-        if estimate is None:
-            model.cpu()
-            torch.cuda.empty_cache()
-            progress("Separating dialogue on CPU while GPU memory is busy", 2)
-            estimate = _speech(model, native, torch.device("cpu"))
         speech[:, ch:ch+2] = resample_poly(estimate, 147, 160, axis=0)[:len(samples)]
     return speech

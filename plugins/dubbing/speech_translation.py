@@ -9,6 +9,7 @@ import soundfile as sf
 import torch
 
 from runtime import device, model_path, progress, save_json
+from inference_memory import compact_cpu, cuda_allocation_failed, free_cuda_bytes
 from speech_review import at16
 from voices import LANGUAGES, translate
 
@@ -79,12 +80,16 @@ def translate_speech(cues, target, work, cache):
     if pending:
         model_dir = model_path("speech_translation")
         processor = SeamlessM4TProcessor.from_pretrained(model_dir)
-        if backend == "cuda" and torch.cuda.mem_get_info()[0] < 4 * 1024**3:
+        compact = backend == "cpu" and compact_cpu()
+        if backend == "cuda" and free_cuda_bytes() < 4 * 1024**3:
             backend = "cpu"
+            compact = True
+            progress("Translating speech on CPU while GPU memory is busy", 30)
         model = None
         done = 0
         while done < len(pending):
-            dtype = torch.float32 if backend == "cpu" else torch.float16
+            # This speech-only model has 1.50B parameters (5.59 GiB in FP32).
+            dtype = (torch.bfloat16 if compact else torch.float32) if backend == "cpu" else torch.float16
             try:
                 if model is None:
                     model = SeamlessM4Tv2ForSpeechToText.from_pretrained(model_dir, dtype=dtype).eval().to(backend)
@@ -95,8 +100,8 @@ def translate_speech(cues, target, work, cache):
                     save_json(cache, texts)
                     done += 1
             except RuntimeError as error:
-                memory_error = isinstance(error, torch.OutOfMemoryError) or (
-                    backend == "mps" and "mps backend out of memory" in str(error).lower())
+                memory_error = cuda_allocation_failed(error) if backend == "cuda" else (
+                    isinstance(error, torch.OutOfMemoryError) or "mps backend out of memory" in str(error).lower())
                 if backend == "cpu" or not memory_error:
                     raise
             else:
@@ -108,6 +113,8 @@ def translate_speech(cues, target, work, cache):
             elif backend == "mps":
                 torch.mps.empty_cache()
             backend = "cpu"
+            compact = True
+            progress("Continuing speech translation on CPU after an allocation failure", 30+7*done/len(cues))
         del model, processor
         gc.collect()
         if backend == "mps":

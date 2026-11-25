@@ -82,11 +82,13 @@ def save_record(db, key, stamp, voices, complete):
                 db.execute("DELETE FROM recordings WHERE media_id=?", (media,))
 
 
-def cached(db, key, stamp, require_complete=False):
+def cached(db, key, stamp, require_complete=False, prior_sample_stamp=None):
     row = db.execute("SELECT stamp,complete,voices,used FROM recordings WHERE media_id=?", (key,)).fetchone()
     if row is None:
         return None
-    if row[0] != stamp:
+    # The v2/v3 cinematic separator changed complete anchors, but related
+    # recordings sampled directly from their original audio are equivalent.
+    if row[0] != stamp and not (row[1] == 0 and row[0] == prior_sample_stamp):
         with db:
             db.execute("DELETE FROM recordings WHERE media_id=?", (key,))
         return None
@@ -163,7 +165,8 @@ def prepare(db, job, data, work, cues):
     for position, (row, sig) in enumerate(candidates if anchors else [], 1):
         media = sig[0]
         fingerprint = token((VERSION, sig))
-        bank = cached(db, media, fingerprint)
+        prior_sample_stamp = token((2, sig)) if VERSION == 3 else None
+        bank = cached(db, media, fingerprint, prior_sample_stamp=prior_sample_stamp)
         if bank is None:
             progress(f"Checking original voices in related videos ({position}/{len(candidates)})",
                      27 + 3 * (position-1)/len(candidates))

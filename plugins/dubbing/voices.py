@@ -14,6 +14,8 @@ import torch
 from scipy.signal import resample_poly
 
 from runtime import device, model_path, progress, save_json
+from inference_memory import compact_cpu, cuda_allocation_failed, free_cuda_bytes
+from whisper_recognizer import model_directory
 
 CATALOG = Path(__file__).resolve().parents[2] / "packages"
 LANGUAGES = {lang["code"]: lang for file in ("translation-languages.json", "other-speech-languages.json")
@@ -61,6 +63,13 @@ def translate(cues, target, cache):
     accelerator = device()
     model = None
     batch_size = 8
+    compact = accelerator == "cpu" and compact_cpu()
+    if accelerator == "cuda" and free_cuda_bytes() < 1536*1024**2:
+        # The tied half-precision weights alone require more than 1.1 GiB.
+        accelerator, compact = "cpu", True
+        progress("Translating on CPU while GPU memory is busy", 30)
+    if compact:
+        batch_size = 1
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     target_token = tokenizer.convert_tokens_to_ids(LANGUAGES[target]["nllb"])
     total = texts.count(None)
@@ -77,7 +86,11 @@ def translate(cues, target, cache):
             selected = positions[offset:offset+batch_size]
             try:
                 if model is None:
-                    model = load_translation_model(AutoModelForSeq2SeqLM, model_dir, accelerator)
+                    if compact:
+                        # Tie vocabulary weights from the mapped archive before allocating the smaller CPU tensors.
+                        model = AutoModelForSeq2SeqLM.from_pretrained(model_dir).eval().to(dtype=torch.bfloat16)
+                    else:
+                        model = load_translation_model(AutoModelForSeq2SeqLM, model_dir, accelerator)
                 generated = translate_batch(model, tokenizer, [cues[idx]["text"] for idx in selected], target_token, accelerator)
                 for pos, text in enumerate(generated):
                     if not text.strip():
@@ -90,8 +103,8 @@ def translate(cues, target, cache):
                                                     num_beams=4, no_repeat_ngram_size=3,
                                                     suppress_tokens=[tokenizer.unk_token_id], max_new_tokens=256)
                         generated[pos] = tokenizer.batch_decode(result, skip_special_tokens=True)[0]
-            except torch.cuda.OutOfMemoryError:
-                if accelerator != "cuda":
+            except RuntimeError as error:
+                if accelerator != "cuda" or not cuda_allocation_failed(error):
                     raise
             else:
                 for idx, text in zip(selected, generated, strict=True):
@@ -108,11 +121,8 @@ def translate(cues, target, cache):
             model = None
             gc.collect()
             torch.cuda.empty_cache()
-            accelerator, batch_size = "cpu", 1
-            progress("GPU memory is busy; translating on CPU", 30 + 7 * translated/total)
-            # The FP32 archive maps into memory without copying. Let Transformers
-            # tie its four vocabulary weights before allocating the smaller CPU tensors.
-            model = AutoModelForSeq2SeqLM.from_pretrained(model_dir).eval().to(dtype=torch.bfloat16)
+            accelerator, batch_size, compact = "cpu", 1, True
+            progress("Translating on CPU while GPU memory is busy", 30 + 7 * translated/total)
     return texts
 
 
@@ -150,6 +160,22 @@ def speak(cues, texts, language, work, wav_dir, references=None, model_cache=Non
     if not pending:
         return
     accelerator = device()
+    if accelerator == "cuda":
+        if free_cuda_bytes() >= 1536*1024**2:
+            try:
+                synthesize(cues, texts, language, work, wav_dir, pending, accelerator, references, model_cache)
+                return
+            except RuntimeError as error:
+                if not cuda_allocation_failed(error):
+                    raise
+            # Dropping the traceback first releases the failed clone prompts, codec and generation buffers.
+            gc.collect()
+            torch.cuda.empty_cache()
+            pending = [i for i in pending if not cached_voice(wav_dir/f"{i}.wav")]
+        if pending:
+            progress("Cloning voices on CPU while GPU memory is busy", 38 + 30*pending[0]/len(cues))
+            synthesize(cues, texts, language, work, wav_dir, pending, "cpu", references, model_cache)
+        return
     if accelerator != "mps":
         synthesize(cues, texts, language, work, wav_dir, pending, accelerator, references, model_cache)
         return
@@ -171,11 +197,12 @@ def load_voice_model(model_class, directory, accelerator, dtype, percent):
         return model_class.from_pretrained(directory, device_map=accelerator, dtype=dtype)
     # The BF16 backbone uses 1,168 MiB and the FP32 audio codec another 764 MiB.
     # Leave space for the CUDA context and decoding on a busy or shared card.
-    if torch.cuda.mem_get_info()[0] >= 3*1024**3:
+    if free_cuda_bytes() >= 3*1024**3:
         try:
             return model_class.from_pretrained(directory, device_map="cuda", dtype=dtype)
-        except torch.cuda.OutOfMemoryError:
-            pass
+        except RuntimeError as error:
+            if not cuda_allocation_failed(error):
+                raise
         # Another application can allocate VRAM between the check and the load.
         # Release the failed model and traceback before retrying once.
         gc.collect()
@@ -239,9 +266,12 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
     from omnivoice import OmniVoice
     percent = 38 + 30*indices[0]/len(cues)
     progress("Loading local voice model", percent)
+    # The native FP32 checkpoint maps directly into CPU memory. The codec and word verification also run on CPU there.
     dtype = torch.float32
-    if (accelerator == "mps" and torch.backends.mps.is_macos_or_newer(14, 0)) or (accelerator == "cuda" and torch.cuda.is_bf16_supported()):
+    if accelerator == "mps" and torch.backends.mps.is_macos_or_newer(14, 0):
         dtype = torch.bfloat16
+    elif accelerator == "cuda":
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported(including_emulation=False) else torch.float16
     model = load_voice_model(OmniVoice, model_path("voice"), accelerator, dtype, percent)
     limits = delivery_durations(cues, sf.info(work/"mix.wav").duration)
     prompts, repaired_prompts, alternate_prompts = {}, {}, {}
@@ -271,8 +301,7 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
     @cache
     def recognizer():
         from faster_whisper import WhisperModel
-        return WhisperModel(os.getenv("EASYX_WHISPER_MODEL", "small"), device="cpu",
-                            compute_type="int8", cpu_threads=2, download_root=model_cache)
+        return WhisperModel(str(model_directory(model_cache)), device="cpu", compute_type="int8", cpu_threads=2)
 
     for idx in indices:
         cue, text = cues[idx], texts[idx]

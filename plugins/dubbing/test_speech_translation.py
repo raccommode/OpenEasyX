@@ -9,6 +9,30 @@ from unittest.mock import Mock, patch
 
 @unittest.skipUnless(all(importlib.util.find_spec(k) for k in ("soundfile", "torch", "transformers")), "requires the dubbing runtime")
 class TranslationTests(unittest.TestCase):
+    def test_tight_cuda_uses_compact_cpu_and_real_oom_preserves_completed_translations(self):
+        import speech_translation as st
+        import torch
+        import transformers
+        for tight in (True, False):
+            with self.subTest(tight=tight), TemporaryDirectory() as folder:
+                cues = [dict(language="en", speaker=0, text=str(i)) for i in range(3)]
+                runs = []
+                def generate(_model, _processor, cue, _work, _target, backend, dtype):
+                    runs.append((cue["text"], backend, dtype))
+                    if backend == "cuda" and cue["text"] == "1":
+                        raise torch.cuda.OutOfMemoryError("GPU allocation failed")
+                    return "fr-"+cue["text"]
+                with patch.object(st, "device", return_value="cuda"), patch.object(st, "model_path", return_value="weights"), \
+                     patch.object(torch.cuda, "mem_get_info", return_value=(int((.8 if tight else 8)*1024**3), 12*1024**3)), \
+                     patch.object(torch.cuda, "empty_cache") as clear, patch.object(st, "translate_line", side_effect=generate), \
+                     patch.object(transformers.SeamlessM4TProcessor, "from_pretrained"), \
+                     patch.object(transformers.SeamlessM4Tv2ForSpeechToText, "from_pretrained") as load:
+                    self.assertEqual(st.translate_speech(cues, "fr", Path(folder), Path(folder)/"fr.json"), ["fr-0","fr-1","fr-2"])
+                self.assertEqual(runs, ([] if tight else [("0","cuda",torch.float16),("1","cuda",torch.float16)])
+                                + [(str(i),"cpu",torch.bfloat16) for i in range(0 if tight else 1,3)])
+                self.assertEqual(load.call_args.kwargs["dtype"], torch.bfloat16)
+                self.assertEqual(clear.call_count, int(not tight))
+
     def test_separate_clips_and_transcript_fallback_preserve_overlapping_speaker_positions(self):
         import speech_translation as st
         import transformers

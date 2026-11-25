@@ -1,4 +1,5 @@
 """Isolate film dialogue and transcribe each speaker on the original timeline."""
+import gc
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,9 @@ from scipy.optimize import linear_sum_assignment
 from scipy.signal import resample_poly
 
 from cinematic import cinematic_separator, isolate_dialogue
-from runtime import device, ffmpeg, model_path, progress, save_json, whisper_device
+from inference_memory import cuda_allocation_failed, free_cuda_bytes
+from runtime import device, ffmpeg, model_path, progress, save_json
+from whisper_recognizer import WhisperRecognizer
 
 
 def separate_dialogue(source, work):
@@ -97,16 +100,32 @@ def separate_overlap(audio, count, cache):
     from speechbrain.utils.fetching import FetchConfig
     if count not in (2, 3):
         raise ValueError(f"Detected {count} simultaneous speakers; local separation supports up to three at once")
-    if count not in cache:
-        name = f"speechbrain/sepformer-wsj0{count}mix"
-        revision = "3a2826343a10e2d2e8a75f79aeab5ff3a2473531" if count == 2 else "21e78b44a378092c34fff32ba8e788a73584f474"
-        local = Path(os.environ.get("EASYX_DUBBING_MODELS", "")) / name.split("/")[-1]
-        source = str(local.resolve()) if (local/"hyperparams.yaml").is_file() else name
-        cache[count] = SepformerSeparation.from_hparams(source=source, fetch_config=FetchConfig(revision=revision),
-                savedir=str(Path(os.environ["HF_HOME"]) / f"sepformer-{count}-{revision[:8]}"), run_opts={"device": device()})
     original = resample_poly(audio, 1, 2).astype("float32")
-    with torch.inference_mode():
-        signals = cache[count].separate_batch(torch.from_numpy(original).unsqueeze(0).to(device()))[0].cpu().numpy()
+    def separate(backend):
+        if count not in cache:
+            name = f"speechbrain/sepformer-wsj0{count}mix"
+            revision = "3a2826343a10e2d2e8a75f79aeab5ff3a2473531" if count == 2 else "21e78b44a378092c34fff32ba8e788a73584f474"
+            local = Path(os.environ.get("EASYX_DUBBING_MODELS", "")) / name.split("/")[-1]
+            source = str(local.resolve()) if (local/"hyperparams.yaml").is_file() else name
+            cache[count] = SepformerSeparation.from_hparams(source=source, fetch_config=FetchConfig(revision=revision),
+                    savedir=str(Path(os.environ["HF_HOME"]) / f"sepformer-{count}-{revision[:8]}"), run_opts={"device": backend})
+        with torch.inference_mode():
+            return cache[count].separate_batch(torch.from_numpy(original).unsqueeze(0).to(backend))[0].cpu().numpy()
+
+    backend = str(cache[count].device) if count in cache else device()
+    if count not in cache and backend == "cuda" and free_cuda_bytes() < 1536*1024**2:
+        backend = "cpu"
+    try:
+        signals = separate(backend)
+    except RuntimeError as error:
+        if not backend.startswith("cuda") or not cuda_allocation_failed(error):
+            raise
+        signals = None
+    if signals is None:
+        cache.pop(count, None)
+        gc.collect()
+        torch.cuda.empty_cache()
+        signals = separate("cpu")
     # SepFormer is trained with a scale-invariant loss. Restore the original
     # relative levels and polarity before splicing its output into each turn.
     gains = np.linalg.lstsq(signals, original[:len(signals)], rcond=1e-4)[0]
@@ -311,7 +330,6 @@ def resolve_short_languages(cues, work, whisper):
 
 
 def transcribe(dialogue, work, model_cache):
-    from faster_whisper import WhisperModel
     index = work / "speakers.json"
     cached = None
     if index.exists():
@@ -320,9 +338,7 @@ def transcribe(dialogue, work, model_cache):
             if all("languageProbability" in c for c in result):
                 return result
             cached = result
-    backend = whisper_device()
-    whisper = WhisperModel(os.getenv("EASYX_WHISPER_MODEL", "small"), device=backend,
-                           compute_type="float16" if backend == "cuda" else "int8", cpu_threads=2, download_root=str(model_cache))
+    whisper = WhisperRecognizer(model_cache)
     if cached is not None:
         resolve_short_languages(cached, work, whisper)
         for cue in cached:

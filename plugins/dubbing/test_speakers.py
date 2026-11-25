@@ -106,6 +106,7 @@ class SpeakerTests(unittest.TestCase):
                 return ["fr "+text for text in lines]
             with self.subTest(on_load=on_load), tempfile.TemporaryDirectory() as folder, \
                  patch.dict(sys.modules, {"transformers": transformers}), patch.object(voices, "device", return_value="cuda"), \
+                 patch.object(voices.torch.cuda, "mem_get_info", return_value=(4*1024**3, 12*1024**3)), \
                  patch.object(voices, "model_path", return_value="checkpoint"), patch.object(voices, "progress"), \
                  patch.object(voices, "load_translation_model", side_effect=[oom if on_load else gpu]), \
                  patch.object(voices, "translate_batch", side_effect=batch), patch.object(voices.torch.cuda, "empty_cache") as empty:
@@ -116,6 +117,65 @@ class SpeakerTests(unittest.TestCase):
             empty.assert_called_once()
             load_cpu.assert_called_once_with("checkpoint")
             load_cpu.return_value.eval.return_value.to.assert_called_once_with(dtype=voices.torch.bfloat16)
+
+    def test_a_shared_card_can_translate_without_attempting_to_load_nllb_into_cuda(self):
+        transformers = Mock()
+        with tempfile.TemporaryDirectory() as folder, patch.dict(sys.modules, {"transformers": transformers}), \
+             patch.object(voices, "device", return_value="cuda"), \
+             patch.object(voices.torch.cuda, "mem_get_info", return_value=(800*1024**2, 12*1024**3)), \
+             patch.object(voices, "model_path", return_value="checkpoint"), patch.object(voices, "load_translation_model") as cuda, \
+             patch.object(voices, "translate_batch", return_value=["Bonjour"]) as generate:
+            self.assertEqual(voices.translate([dict(text="Hello", language="en")], "fr", Path(folder)/"fr.json"), ["Bonjour"])
+            cuda.assert_not_called()
+            self.assertEqual(generate.call_args.args[-1], "cpu")
+            transformers.AutoModelForSeq2SeqLM.from_pretrained.return_value.eval.return_value.to.assert_called_once_with(dtype=voices.torch.bfloat16)
+
+    def test_cuda_context_allocation_failure_reports_no_budget_and_other_driver_errors_propagate(self):
+        from inference_memory import free_cuda_bytes
+        with patch.object(voices.torch.cuda, "mem_get_info", side_effect=RuntimeError("CUDA error: out of memory")):
+            self.assertEqual(free_cuda_bytes(), 0)
+        with patch.object(voices.torch.cuda, "mem_get_info", side_effect=RuntimeError("device lost")):
+            with self.assertRaisesRegex(RuntimeError, "device lost"):
+                free_cuda_bytes()
+
+    def test_tight_cuda_synthesizes_on_cpu_and_a_late_oom_resumes_only_unfinished_voices(self):
+        cues = [dict(language="en"), dict(language="en"), dict(language="fr")]
+        for gpu_attempt in (False, True):
+            calls = []
+            with self.subTest(gpu_attempt=gpu_attempt), tempfile.TemporaryDirectory() as folder:
+                work = Path(folder)
+                def synth(_cues, _texts, _lang, _work, wav_dir, pending, device, refs, model_cache):
+                    calls.append((pending, device))
+                    self.assertEqual((refs, model_cache), (work/"refs", work/"whisper"))
+                    if device == "cuda":
+                        sf.write(wav_dir/"0.wav", np.full(2400, .1), 24000)
+                        raise RuntimeError("CUDNN_STATUS_ALLOC_FAILED while generating the second line")
+                free = (4*1024 if gpu_attempt else 800)*1024**2
+                with patch.object(voices, "device", return_value="cuda"), patch.object(voices, "synthesize", side_effect=synth), \
+                     patch.object(voices.torch.cuda, "mem_get_info", return_value=(free, 12*1024**3)), \
+                     patch.object(voices.torch.cuda, "empty_cache") as clear:
+                    voices.speak(cues, ["Un", "Deux", "Trois"], "fr", work, work, work/"refs", work/"whisper")
+            want = [([0, 1], "cuda"), ([1], "cpu")] if gpu_attempt else [([0, 1], "cpu")]
+            self.assertEqual(calls, want)
+            self.assertEqual(clear.call_count, int(gpu_attempt))
+
+    @unittest.skipUnless(importlib.util.find_spec("speechbrain"), "requires the speaker separation model runtime")
+    def test_sepformer_retries_on_cpu_and_keeps_the_cpu_separator_for_later_overlaps(self):
+        from speechbrain.inference.separation import SepformerSeparation
+        audio = np.ones(1600, dtype=np.float32)
+        cpu = Mock(device="cpu")
+        cpu.separate_batch.side_effect = lambda x: voices.torch.stack([x, x], dim=-1)
+        for low in (True, False):
+            with self.subTest(low=low), patch.dict(dialogue.os.environ, {"HF_HOME": "/tmp"}), \
+                 patch.object(dialogue, "device", return_value="cuda"), \
+                 patch.object(voices.torch.cuda, "mem_get_info", return_value=(int((.8 if low else 4)*1024**3), 12*1024**3)), \
+                 patch.object(voices.torch.cuda, "empty_cache") as clear, \
+                 patch.object(SepformerSeparation, "from_hparams", side_effect=[cpu] if low else [voices.torch.cuda.OutOfMemoryError("busy"), cpu]) as load:
+                cache = {}
+                for _ in range(2):
+                    self.assertEqual(len(dialogue.separate_overlap(audio, 2, cache)), 2)
+                self.assertEqual([c.kwargs["run_opts"]["device"] for c in load.call_args_list], ["cpu"] if low else ["cuda", "cpu"])
+                self.assertEqual(clear.call_count, int(not low))
 
     def test_natural_delivery_only_uses_free_time_between_lines(self):
         cues = [dict(start=0., end=1.), dict(start=3., end=5.), dict(start=4., end=6.),

@@ -2,14 +2,14 @@
 import hashlib
 import json
 import math
-import os
 import unicodedata
 
 import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly
 
-from runtime import progress, save_json, whisper_device
+from runtime import progress, save_json
+from whisper_recognizer import WhisperRecognizer as whisper_model
 
 
 def suspect_text(cue):
@@ -39,14 +39,6 @@ def speech_spans(samples, start, end, *, normalize=True):
                                      min_silence_duration_ms=150, speech_pad_ms=0)
     return [(max(span["start"], start), min(span["end"], end)) for span in detected
             if min(span["end"], end) - max(span["start"], start) >= min(1280, (end-start)*.5)]
-
-
-def whisper_model(model_cache):
-    from faster_whisper import WhisperModel
-    backend = whisper_device()
-    return WhisperModel(os.getenv("EASYX_WHISPER_MODEL", "small"), device=backend,
-                        compute_type="float16" if backend == "cuda" else "int8",
-                        cpu_threads=2, download_root=str(model_cache))
 
 
 def review_transcript(cues, work, model_cache):

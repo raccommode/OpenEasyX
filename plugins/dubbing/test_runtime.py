@@ -8,13 +8,28 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import runtime
 from model_assets import verified_asset
 
 
 class DubbingRuntimeTests(unittest.TestCase):
+    def test_pinned_models_use_the_complete_local_cache_without_an_online_lookup(self):
+        hub = Mock()
+        with patch.dict(sys.modules, {"huggingface_hub": hub}), patch.dict(os.environ, {"EASYX_DUBBING_MODELS": ""}):
+            hub.try_to_load_from_cache.side_effect = lambda repo, name, revision: "/cache/snapshot/" + name
+            self.assertEqual(runtime.model_path("segmentation", "model.onnx"), "/cache/snapshot/model.onnx")
+            for key in runtime.SNAPSHOT_FILES:
+                self.assertEqual(runtime.model_path(key), "/cache/snapshot")
+            hub.hf_hub_download.assert_not_called()
+            hub.snapshot_download.assert_not_called()
+            def missing_codec(repo, name, revision):
+                return None if name == "audio_tokenizer/model.safetensors" else "/cache/snapshot/" + name
+            hub.try_to_load_from_cache.side_effect = missing_codec
+            runtime.model_path("voice")
+            self.assertIn("audio_tokenizer/model.safetensors", hub.snapshot_download.call_args.kwargs["allow_patterns"])
+
     def test_linux_uses_matching_official_wheels_and_resolves_other_dependencies_normally(self):
         for cuda, variant in [(False, "cpu"), (True, "cu128")]:
             with self.subTest(variant=variant), patch.object(runtime.sys, "platform", "linux"):

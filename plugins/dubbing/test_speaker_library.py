@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -22,6 +23,16 @@ def sample(direction, text="phrase", seconds=3., quality=.82):
 
 
 class References(unittest.TestCase):
+    def test_old_raw_reference_samples_survive_a_separator_change_but_old_anchors_do_not(self):
+        db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
+        db.execute("CREATE TABLE recordings (media_id TEXT PRIMARY KEY,stamp TEXT,complete INTEGER,used REAL,voices BLOB)")
+        for key, complete in (("sample", False), ("anchor", True), ("changed", False)):
+            bank.save_record(db, key, "old-source", {"speaker": 3}, complete)
+        self.assertEqual(bank.cached(db, "sample", "new", prior_sample_stamp="old-source"), {"speaker": 3})
+        self.assertIsNone(bank.cached(db, "anchor", "new", prior_sample_stamp="old-source"))
+        self.assertIsNone(bank.cached(db, "changed", "new", prior_sample_stamp="unrelated-source"))
+
     def test_assignment_requires_distinct_voices_and_independent_temporal_evidence(self):
         a, b = sample([1, 0]), sample([0, 1])
         self.assertEqual(set(bank.match_recording({"A": a, "B": b}, {"9": b, "3": a})), {"A", "B"})

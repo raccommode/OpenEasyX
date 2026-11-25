@@ -2,7 +2,6 @@
 import base64
 import io
 import json
-import os
 import subprocess
 from functools import cached_property
 
@@ -12,7 +11,7 @@ from scipy.signal import resample_poly
 
 from dialogue import diarizer, embedding, spans
 from enhance import enhance_speech, speech_enhancer
-from runtime import whisper_device
+from whisper_recognizer import WhisperRecognizer
 
 
 RATE = 24000
@@ -135,11 +134,7 @@ class VoiceSampler:
 
     @cached_property
     def recognizer(self):
-        from faster_whisper import WhisperModel
-        device = whisper_device()
-        return WhisperModel(os.environ.get("EASYX_WHISPER_MODEL", "small"), device=device,
-                            compute_type="float16" if device == "cuda" else "int8", cpu_threads=2,
-                            download_root=str(self.model_cache))
+        return WhisperRecognizer(self.model_cache)
 
     def from_work(self, work, cues):
         """Use complete solo turns. The existing per-clip prompt stays available as fallback."""
