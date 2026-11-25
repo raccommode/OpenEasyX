@@ -239,3 +239,52 @@ class VoiceSampler:
                 if candidate and (current is None or candidate["quality"] > current["quality"]):
                     result[str(speaker)] = candidate
         return result
+
+
+def align_clone_reference(recognizer, samples, rate, language):
+    """Align the clone prompt to words the recognizer finds in that same voice."""
+    from speech_review import at16
+    audio = at16(samples, rate)
+    segments, _ = recognizer.transcribe(audio, language=language, beam_size=3, condition_on_previous_text=False,
+                                        word_timestamps=True, max_new_tokens=128)
+    candidates = []
+    for segment in segments:
+        words = segment.words or []
+        if not words or segment.avg_logprob < -1.1 or segment.no_speech_prob > .75:
+            continue
+        start = max(0, round((words[0].start-.08)*rate))
+        stop = min(len(samples), round((words[-1].end+.12)*rate))
+        if stop-start < .5*rate:
+            continue
+        # A long pause inside a reference adds no conditioning information.
+        # Prefer the phrase with the most confidently aligned spoken words.
+        evidence = sum(word.probability for word in words)
+        candidates.append((evidence, start, stop, segment.text.strip()))
+    if not candidates:
+        return None
+    _, start, stop, text = max(candidates)
+    sample = samples[start:stop]
+    peak = np.max(abs(sample))
+    if not text or peak < 1e-6:
+        return None
+    return sample * (.7/peak), text
+
+
+def alternate_clone_reference(recognizer, cues, work, speaker):
+    """Find an independent, solo recording of the same diarized speaker."""
+    from speech_review import at16, speech_spans
+    solo = [c for c in cues if c["speaker"] == speaker and not c.get("overlapping") and c.get("clip")
+            and 1.2 <= c["end"]-c["start"] <= 12]
+    for cue in sorted(solo, key=lambda c: abs(5-(c["end"]-c["start"])))[:3]:
+        try:
+            samples, rate = sf.read(work/cue["clip"], dtype="float32")
+        except (OSError, RuntimeError):
+            continue
+        signal = at16(samples, rate)
+        if sum(b-a for a, b in speech_spans(signal, 0, len(signal))) < 9600:
+            continue
+        aligned = align_clone_reference(recognizer, samples, rate, cue["language"])
+        if aligned:
+            audio, words = aligned
+            return audio, rate, words
+    return None

@@ -20,6 +20,7 @@ from scipy.spatial import Delaunay, QhullError
 from picture import output_picture
 from mouth_geometry import fit_speaker_mouth
 from mouth_texture import MouthTextures
+from delivery import video_options
 from runtime import ffmpeg, model_path, progress
 
 
@@ -286,6 +287,34 @@ def video_clock(container):
     return video, origin, duration
 
 
+def video_frames(container, stream):
+    """Keep healthy pictures on their original clock even when packets are damaged."""
+    previous = None
+    damaged = False
+    for packet in container.demux(stream):
+        try:
+            frames = packet.decode()
+        except av.error.InvalidDataError:
+            damaged = True
+            continue
+        for frame in frames:
+            if frame.is_corrupt:
+                damaged = True
+                continue
+            if previous is not None:
+                yield previous
+            previous = frame
+    if previous is not None:
+        if damaged and stream.duration is not None and stream.start_time is not None and previous.pts is not None:
+            # A lost tail has no next picture to establish the last healthy frame's
+            # duration. Hold it through the declared video end without shifting audio.
+            end = (stream.start_time + stream.duration) * stream.time_base
+            ticks = round(end / (previous.time_base or stream.time_base)) - previous.pts
+            if ticks > 0:
+                previous.duration = ticks
+        yield previous
+
+
 def timestamp(frame, stream):
     if frame.pts is None:
         raise ValueError("Video frames require presentation timestamps for synchronized dubbing")
@@ -378,7 +407,7 @@ def learn_speakers(source, cues, models, lip_model=None, anchors=None, source_au
     with av.open(str(source)) as src:
         stream, origin, duration = video_clock(src)
         transform = None
-        for frame in src.decode(stream):
+        for frame in video_frames(src, stream):
             t = timestamp(frame, stream) - origin
             if t >= last_turn + CONTEXT_SECONDS:
                 break
@@ -951,7 +980,7 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
         transform, video_origin, encoder, last_report = None, None, None, -1
         frame_durations = {}
         with av.open(str(silent), "w") as dst:
-            for frame in src.decode(stream):
+            for frame in video_frames(src, stream):
                 at = timestamp(frame, stream)
                 if transform is None:
                     video_origin, transform = at, orientation(frame)
@@ -1024,7 +1053,7 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
                     continuity.gray, continuity.observed = None, {}
                 h, w = image.shape[:2]
                 if encoder is None:
-                    encoder = dst.add_stream("libx264", rate=rate, options={"crf": "14", "preset": "medium"})
+                    encoder = dst.add_stream("libx264", rate=rate, options=video_options(w, h, rate))
                     encoder.width, encoder.height = w+w%2, h+h%2
                     encoder.pix_fmt = "yuv420p"
                     for field in ("color_range", "colorspace", "color_trc", "color_primaries"):

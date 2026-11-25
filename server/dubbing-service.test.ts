@@ -12,7 +12,7 @@ import { PluginManager } from "./plugin-manager.js";
 import { SubtitleService } from "./subtitle-service.js";
 import { DubbingService } from "./dubbing-service.js";
 import { registerLibraryRoutes } from "./library-routes.js";
-import type { EasyXPlugin } from "../packages/plugin-sdk/index.js";
+import type { DubbingJob, EasyXPlugin } from "../packages/plugin-sdk/index.js";
 
 it("keeps a migrated dub playable during a revision, interruption and failure, then publishes and revalidates the replacement", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-revision-"));
@@ -104,6 +104,127 @@ it("keeps a migrated dub playable during a revision, interruption and failure, t
   }
 });
 
+it("offers only verified publications from supported revisions and reuses the same publication on retry", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-upgrade-"));
+  const mediaDir = path.join(root, "media");
+  const db = new Database(root);
+  const library = new LibraryDatabase(root);
+  const catalog = new Catalog(library, mediaDir, root, false);
+  const manager = new PluginManager(db, []);
+  const jobs: DubbingJob[] = [];
+  let finish = false;
+  const plugin: EasyXPlugin = { ...localDubbing, manifest: {
+    ...localDubbing.manifest, dubbingRenderVersion: "v3", dubbingPreviousRenderVersions: ["v1", "v2"],
+  }, async renderDub(_ctx, job) {
+    jobs.push(job);
+    fs.writeFileSync(job.output, finish ? "updated" : "incomplete");
+    if (!finish) throw new Error("Interrupted upgrade");
+    return { outcome: "rendered", lipSyncFrames: job.previousOutput?.lipSyncFrames };
+  } };
+  vi.spyOn(manager, "dubbingProvider").mockReturnValue(plugin);
+  const ctx = manager.context.bind(manager);
+  vi.spyOn(manager, "context").mockImplementation((...args) => ({ ...ctx(...args), config: { fr: true } }));
+  const service = new DubbingService(library, manager, catalog, root);
+  try {
+    const kinds = ["eligible", "foreign", "stale", "unsupported", "legacy", "missing", "empty"];
+    for (const kind of kinds) fs.writeFileSync(path.join(mediaDir, kind + ".mp4"), "source");
+    await catalog.scan();
+    const media = library.listMedia({}).items;
+    const expected = new Map<string, DubbingJob["previousOutput"]>();
+    const publish = library.sqlite.prepare("INSERT INTO dubbing_outputs(media_id,language,fingerprint,provider,file_key,lip_sync_frames) VALUES(?,'fr',?,?,?,0)");
+    for (const item of media) {
+      const kind = path.parse(item.relativePath).name;
+      const fingerprint = item.size + ":" + item.modifiedAt;
+      const provider = kind === "foreign" ? "another.dubbing" : plugin.manifest.id;
+      const source = kind === "stale" ? "previous-source" : fingerprint;
+      const revision = kind === "unsupported" ? "v0" : "v2";
+      // Even an otherwise matching key cannot authorize a foreign provider or a stale source.
+      const key = kind === "legacy" ? "" : createHash("sha256").update(JSON.stringify([plugin.manifest.id, fingerprint, revision])).digest("hex").slice(0, 24);
+      const directory = createHash("sha256").update(provider + ":" + source).digest("hex").slice(0, 24);
+      const dir = path.join(root, "dubbing", item.id, directory);
+      const file = path.join(dir, key ? "fr." + key + ".mp4" : "fr.mp4");
+      fs.mkdirSync(dir, { recursive: true });
+      if (kind !== "missing") fs.writeFileSync(file, kind === "empty" ? "" : "published");
+      publish.run(item.id, source, provider, key);
+      expected.set(item.id, kind === "eligible" ? { path: file, renderVersion: revision, lipSyncFrames: 0 } : undefined);
+    }
+    service.sync();
+    await vi.waitFor(() => expect(service.overview().errors).toHaveLength(kinds.length));
+    expect(jobs).toHaveLength(kinds.length);
+    for (const job of jobs) expect(job.previousOutput).toEqual(expected.get(job.mediaId));
+    const item = media.find((item) => expected.get(item.id))!;
+    const previous = expected.get(item.id)!;
+    expect(service.file(item, "fr")).toBe(previous.path);
+    expect(fs.readFileSync(previous.path, "utf8")).toBe("published");
+    finish = true;
+    service.retry(item, "fr");
+    await vi.waitFor(() => expect(service.status(item).variants[0].updateStatus).toBeUndefined());
+    expect(jobs.at(-1)?.previousOutput).toEqual(previous);
+    expect(service.file(item, "fr")).not.toBe(previous.path);
+    expect(fs.readFileSync(service.file(item, "fr")!, "utf8")).toBe("updated");
+    expect(service.status(item).variants[0].lipSyncFrames).toBe(0);
+  } finally {
+    await service.close(); library.close(); db.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("reconciles a staged ready revision without rendering and still renders incomplete jobs or files", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-staged-"));
+  const mediaDir = path.join(root, "media");
+  const db = new Database(root);
+  const library = new LibraryDatabase(root);
+  const catalog = new Catalog(library, mediaDir, root, false);
+  const manager = new PluginManager(db, []);
+  let renders = 0;
+  const plugin: EasyXPlugin = { ...localDubbing, manifest: { ...localDubbing.manifest, dubbingRenderVersion: "4" },
+    async renderDub(_ctx, job) {
+      fs.writeFileSync(job.output, "render " + ++renders);
+      return { outcome: "rendered", lipSyncFrames: 1040 };
+    } };
+  vi.spyOn(manager, "dubbingProvider").mockReturnValue(plugin);
+  const ctx = manager.context.bind(manager);
+  vi.spyOn(manager, "context").mockImplementation((...args) => ({ ...ctx(...args), config: { fr: true } }));
+  const service = new DubbingService(library, manager, catalog, root);
+  try {
+    fs.writeFileSync(path.join(mediaDir, "video.mp4"), "source");
+    await catalog.scan();
+    const media = library.listMedia({}).items[0];
+    const stage = library.sqlite.prepare("UPDATE video_dubs SET status=?,render_version='3' WHERE media_id=? AND language='fr'");
+    const job = () => library.sqlite.prepare("SELECT * FROM video_dubs WHERE media_id=? AND language='fr'").get(media.id);
+    service.sync();
+    await vi.waitFor(() => expect(job()?.status).toBe("ready"));
+    const ready = job();
+    const published = service.status(media).variants[0];
+    const file = service.file(media, "fr")!;
+    stage.run("ready", media.id);
+    service.sync();
+    service.sync();
+    expect(job()).toEqual(ready);
+    expect(service.status(media).variants[0]).toEqual(published);
+    expect(renders).toBe(1);
+    expect(fs.readFileSync(file, "utf8")).toBe("render 1");
+
+    for (const scenario of ["queued", "error", "missing", "empty", "symlink"]) {
+      stage.run(scenario === "queued" || scenario === "error" ? scenario : "ready", media.id);
+      if (scenario === "missing") fs.unlinkSync(file);
+      if (scenario === "empty") fs.truncateSync(file, 0);
+      if (scenario === "symlink") {
+        fs.unlinkSync(file);
+        fs.symlinkSync(path.join(mediaDir, "video.mp4"), file);
+      }
+      const before = renders;
+      service.sync();
+      await vi.waitFor(() => expect(job()).toMatchObject({ status: "ready", render_version: "4" }));
+      expect(renders).toBe(before + 1);
+      expect(fs.readFileSync(file, "utf8")).toBe("render " + renders);
+    }
+  } finally {
+    await service.close(); library.close(); db.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("publishes only finished versions, supports resuming a failed language and serves seekable video", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-lifecycle-"));
   const mediaDir = path.join(root, "media");
@@ -162,7 +283,7 @@ it("publishes only finished versions, supports resuming a failed language and se
   }
 });
 
-it("recovers legacy pip and venv errors from the managed dubbing runtime without changing finished or individual jobs", async () => {
+it("requeues known legacy dubbing failures without resetting finished or unrelated jobs", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-recovery-"));
   const database = new Database(root);
   const library = new LibraryDatabase(root);
@@ -179,7 +300,13 @@ it("recovers legacy pip and venv errors from the managed dubbing runtime without
     const pip = "subprocess.CalledProcessError: Command '['/data/dubbing-runtime/linux-x86_64-3.11-cpu/bin/python', '-m', 'pip', 'install', '--index-url', 'https://download.pytorch.org/whl/cpu', 'torch==2.9.1', 'torchaudio==2.9.1']' returned non-zero exit status 1.";
     const venv = "subprocess.CalledProcessError: Command '['/usr/bin/python3', '-m', 'venv', '/data/dubbing-runtime/linux-x86_64-3.11-cpu']' returned non-zero exit status 1.";
     const renderFailed = "subprocess.CalledProcessError: Command '['ffmpeg', '-i', '/data/dubbing-runtime/demo.mp4']' returned non-zero exit status 1.";
+    const packets = 'File "/app/plugins/dubbing/lips.py", line 954, in render\nav.error.InvalidDataError: Invalid data: avcodec_send_packet()';
+    const silentVoice = "ValueError: The voice model did not generate audible speech";
     const cases = [
+      ["ko", id, "error", packets, "queued"], ["fa", id, "error", silentVoice, "queued"],
+      ["sv", id, "error", "ValueError: Translation produced an empty phrase", "queued"],
+      ["nn", id, "error", packets.replace("/lips.py", "/dialogue.py"), "error"],
+      ["pl", "other.provider", "error", silentVoice, "error"],
       ["fr", id, "error", pip, "queued"], ["en", id, "error", venv, "queued"],
       ["es", id, "error", renderFailed, "error"],
       ["zh", id, "error", pip.replace("/data/dubbing-runtime/", "/other/"), "error"],
@@ -197,6 +324,10 @@ it("recovers legacy pip and venv errors from the managed dubbing runtime without
       });
     }
     await service.close();
+    library.sqlite.prepare("UPDATE video_dubs SET status='error',error=? WHERE language='fa'").run(silentVoice);
+    const restarted = new DubbingService(library, manager, catalog, root);
+    expect(select.get(media.id, "fa")).toMatchObject({ status: "error", error: silentVoice });
+    await restarted.close();
   } finally {
     library.close(); database.close(); fs.rmSync(root, { recursive: true, force: true });
   }

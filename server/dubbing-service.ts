@@ -10,6 +10,9 @@ type Identity = { media_id: string; language: string; fingerprint: string; provi
 type Job = Identity & { status: string; phase: string; progress: number; error: string; render_version: string };
 type Output = Identity & { file_key: string; lip_sync_frames: number | null };
 function fingerprint(media: Media) { return `${media.size}:${media.modifiedAt}`; }
+function publicationKey(job: Identity, revision: string) {
+  return createHash("sha256").update(JSON.stringify([job.provider, job.fingerprint, revision])).digest("hex").slice(0, 24);
+}
 const runtimeFailurePhase = "Waiting to retry runtime setup";
 
 export class DubbingService {
@@ -33,6 +36,24 @@ export class DubbingService {
         SELECT media_id,language FROM failures WHERE instr(replace(command,char(92),'/'),'/dubbing-runtime/')>0
         AND (instr(command,?)>0 OR instr(command,?)>0 OR instr(command,?)>0)
       )`).run(command, command, "'-m', 'pip', 'install'", "'-m', 'venv',", "'-m', 'ensurepip',");
+    // These legacy tracebacks identify three fixed worker failures. Retry them once
+    // using their existing checkpoints, without scheduling another render of published videos.
+    this.db.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      const marker = this.db.sqlite.prepare("INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?, 'true', ?)").run(
+        "requeued_dubbing_packet_voice_translation_errors_v1", new Date().toISOString(),
+      );
+      if (marker.changes) this.db.sqlite.exec(`UPDATE video_dubs SET status='queued',phase='',progress=0,error=''
+        WHERE provider='org.easyx.dubbing' AND status='error' AND (
+          instr(error,'ValueError: The voice model did not generate audible speech')>0
+          OR instr(error,'ValueError: Translation produced an empty phrase')>0
+          OR (instr(error,'/lips.py')>0 AND instr(error,'av.error.InvalidDataError:')>0 AND instr(error,'avcodec_send_packet()')>0)
+        )`);
+      this.db.sqlite.exec("COMMIT");
+    } catch (error) {
+      this.db.sqlite.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   get installed() { return Boolean(this.plugins.dubbingProvider()); }
@@ -47,9 +68,43 @@ export class DubbingService {
     return path.join(this.directory(output), output.language + suffix + ".mp4");
   }
 
+  private existingOutputPath(output: Output) {
+    const file = this.outputPath(output);
+    try {
+      const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+      if (stat?.isFile() && stat.size > 0) return file;
+    } catch { /* Let the render job handle an inaccessible mount. */ }
+  }
+
   private publication(media: Media, language: string) {
     return this.db.sqlite.prepare("SELECT * FROM dubbing_outputs WHERE media_id=? AND language=? AND fingerprint=?")
       .get(media.id, language, fingerprint(media)) as Output | undefined;
+  }
+
+  private previousOutput(media: Media, job: Job, revisions?: string[]) {
+    if (!job.render_version || !Array.isArray(revisions) || !revisions.length) return;
+    const published = this.publication(media, job.language);
+    if (!published?.file_key || published.provider !== job.provider || published.fingerprint !== job.fingerprint) return;
+    // A retry already carries the new job revision. The publication key still identifies the file on disk.
+    const renderVersion = revisions.find((revision) => typeof revision === "string" && revision.length > 0
+      && revision !== job.render_version && publicationKey(job, revision) === published.file_key);
+    if (!renderVersion) return;
+    const file = this.existingOutputPath(published);
+    if (!file) return;
+    return { path: file, renderVersion, lipSyncFrames: published.lip_sync_frames ?? undefined };
+  }
+
+  private reconcileReadyRevision(media: Media, job: Job) {
+    const published = this.publication(media, job.language);
+    if (published?.provider !== job.provider || published.file_key !== publicationKey(job, job.render_version)
+      || !this.existingOutputPath(published)) return false;
+    // A publication can be staged while its previous renderer is still serving. Recheck the row and key together.
+    this.db.sqlite.prepare(`UPDATE video_dubs SET render_version=? WHERE media_id=? AND language=?
+      AND fingerprint=? AND provider=? AND status='ready' AND render_version<>?
+      AND EXISTS (SELECT 1 FROM dubbing_outputs o WHERE (o.media_id,o.language,o.fingerprint,o.provider)
+        = (video_dubs.media_id,video_dubs.language,video_dubs.fingerprint,video_dubs.provider) AND o.file_key=?)`)
+      .run(job.render_version, media.id, job.language, job.fingerprint, job.provider, job.render_version, published.file_key);
+    return true;
   }
 
   private targets(plugin = this.plugins.dubbingProvider()) {
@@ -137,17 +192,21 @@ export class DubbingService {
     const direction = this.plugins.context(plugin.manifest.id).config.oldestFirst === true ? "ASC" : "DESC";
     const revision = plugin.manifest.dubbingRenderVersion ?? "";
     const values = targets.map(() => "(?)").join(",");
-    const row = this.db.sqlite.prepare(`WITH targets(code) AS (VALUES ${values}) SELECT m.id,t.code FROM media m CROSS JOIN targets t
+    const row = this.db.sqlite.prepare(`WITH targets(code) AS (VALUES ${values}) SELECT m.id,t.code,d.status FROM media m CROSS JOIN targets t
       LEFT JOIN video_dubs d ON d.media_id=m.id AND d.language=t.code AND d.fingerprint=(m.size||':'||m.modified_at) AND d.provider=?
       LEFT JOIN dubbing_outputs o ON o.media_id=m.id AND o.language=t.code AND o.fingerprint=(m.size||':'||m.modified_at)
       WHERE m.missing=0 AND m.playable=1 AND m.kind='video' AND (d.status IS NULL OR d.status='queued' OR (d.status='error' AND d.phase=?)
         OR (o.media_id IS NOT NULL AND ?<>'' AND d.render_version<>?))
       ORDER BY CASE WHEN d.phase=? THEN 0 WHEN o.media_id IS NOT NULL THEN 1 ELSE 2 END,m.added_at ${direction},m.id LIMIT 1`)
-      .get(...targets, plugin.manifest.id, runtimeFailurePhase, revision, revision, runtimeFailurePhase) as { id: string; code: string } | undefined;
+      .get(...targets, plugin.manifest.id, runtimeFailurePhase, revision, revision, runtimeFailurePhase) as { id: string; code: string; status: string | null } | undefined;
     if (!row) return;
     const media = this.db.getMedia(row.id)!;
     const job: Job = { media_id: media.id, fingerprint: fingerprint(media), provider: plugin.manifest.id, language: row.code,
       status: "running", phase: "Preparing models", progress: 0, error: "", render_version: revision };
+    if (row.status === "ready" && this.reconcileReadyRevision(media, job)) {
+      setImmediate(() => this.sync());
+      return;
+    }
     this.db.sqlite.prepare(`INSERT INTO video_dubs(media_id,language,fingerprint,provider,status,phase,render_version,progress,error) VALUES(?,?,?,?,?,?,?,0,'')
       ON CONFLICT(media_id,language) DO UPDATE SET fingerprint=excluded.fingerprint,provider=excluded.provider,status='running',phase=excluded.phase,render_version=excluded.render_version,progress=0,error=''`)
       .run(media.id, row.code, job.fingerprint, job.provider, job.status, job.phase, revision);
@@ -171,6 +230,7 @@ export class DubbingService {
       const result = await plugin.renderDub!(this.plugins.context(job.provider, signal), {
         mediaId: media.id, fingerprint: job.fingerprint, language: job.language, source: this.catalog.absolutePath(media),
         dataDir: this.dataDir, workDir, output, referenceVideos,
+        previousOutput: this.previousOutput(media, job, plugin.manifest.dubbingPreviousRenderVersions),
       }, (phase, progress) => {
         if (!signal.aborted) update.run("running", phase, Math.max(0, Math.min(progress, 99)), "", media.id, job.language, job.fingerprint);
       });
@@ -185,7 +245,7 @@ export class DubbingService {
       if (outcome === "rendered") {
         if (!fs.statSync(output).size) throw new Error("The rendered video is empty");
         const frames = typeof result === "object" ? result.lipSyncFrames : undefined;
-        published = { ...job, file_key: createHash("sha256").update(JSON.stringify([job.provider, job.fingerprint, job.render_version])).digest("hex").slice(0, 24),
+        published = { ...job, file_key: publicationKey(job, job.render_version),
           lip_sync_frames: frames !== undefined && Number.isSafeInteger(frames) && frames >= 0 ? frames : null };
         fs.renameSync(output, this.outputPath(published));
       }

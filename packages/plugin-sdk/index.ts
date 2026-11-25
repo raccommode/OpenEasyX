@@ -33,6 +33,8 @@ export type PluginManifest = {
   dubbingLanguages?: Array<{ code: string; label: string }>;
   /** Change when existing rendered videos should be regenerated. */
   dubbingRenderVersion?: string;
+  /** Published revisions of this plugin that renderDub can upgrade directly. */
+  dubbingPreviousRenderVersions?: string[];
   settings?: SettingField[];
   browserAuth?: {
     loginUrl: string;
@@ -206,6 +208,8 @@ export type DubbingJob = {
   workDir: string;
   output: string;
   language: string;
+  /** Read-only publication for this source, provider and language. Write the replacement to output. */
+  previousOutput?: { path: string; renderVersion: string; lipSyncFrames?: number };
   /** Other local videos credited to the same performers. Confirm speaker identity from the audio. */
   referenceVideos?: DubbingReferenceVideo[];
 };

@@ -118,7 +118,7 @@ def track_windows(observations):
 
 
 def _score_window(media, source_audio, model, observations):
-    from lips import compressed_audio_window, orientation, oriented, timestamp, video_clock
+    from lips import compressed_audio_window, orientation, oriented, timestamp, video_clock, video_frames
     stream, origin, _ = video_clock(media)
     times = np.array([t for t, _ in observations])
     boxes = np.array([box[:4] for _, box in observations])
@@ -127,7 +127,7 @@ def _score_window(media, source_audio, model, observations):
     media.seek(int((origin+left) / stream.time_base), stream=stream)
     pictures = []
     transform = None
-    for frame in media.decode(stream):
+    for frame in video_frames(media, stream):
         t = timestamp(frame, stream)-origin
         if t+.02 < sample_times[len(pictures)]:
             continue

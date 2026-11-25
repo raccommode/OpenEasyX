@@ -43,18 +43,26 @@ def translate_batch(model, tokenizer, lines, target_token, accelerator):
 
 def translate(cues, target, cache):
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+    cached = None
     if cache.is_file():
-        texts = json.loads(cache.read_text())
-        if len(texts) == len(cues):
-            return texts
+        try:
+            candidate = json.loads(cache.read_text())
+        except (ValueError, UnicodeError):
+            candidate = None
+        if isinstance(candidate, list) and len(candidate) == len(cues):
+            cached = candidate
+    texts = [cue["text"] if cue["language"] == target else
+             (cached[i] if cached and isinstance(cached[i], str) and cached[i].strip() else None)
+             for i, cue in enumerate(cues)]
+    if all(text is not None for text in texts):
+        return texts
     model_dir = model_path("translation")
     accelerator = device()
     model = None
     batch_size = 8
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     target_token = tokenizer.convert_tokens_to_ids(LANGUAGES[target]["nllb"])
-    texts = [cue["text"] for cue in cues]
-    total = sum(cue["language"] != target for cue in cues)
+    total = texts.count(None)
     translated = 0
     for source in dict.fromkeys(cue["language"] for cue in cues):
         if source == target:
@@ -62,7 +70,7 @@ def translate(cues, target, cache):
         if source not in LANGUAGES:
             raise ValueError(f"Translation from detected language {source} is unavailable")
         tokenizer.src_lang = LANGUAGES[source]["nllb"]
-        positions = [idx for idx, cue in enumerate(cues) if cue["language"] == source]
+        positions = [idx for idx, cue in enumerate(cues) if cue["language"] == source and texts[idx] is None]
         offset = 0
         while offset < len(positions):
             selected = positions[offset:offset+batch_size]
@@ -70,14 +78,26 @@ def translate(cues, target, cache):
                 if model is None:
                     model = load_translation_model(AutoModelForSeq2SeqLM, model_dir, accelerator)
                 generated = translate_batch(model, tokenizer, [cues[idx]["text"] for idx in selected], target_token, accelerator)
+                for pos, text in enumerate(generated):
+                    if not text.strip():
+                        # Retry only this sentence without padded neighbours or an
+                        # unknown-token loop. Never invent a token to force speech.
+                        idx = selected[pos]
+                        encoded = tokenizer([cues[idx]["text"]], return_tensors="pt").to(accelerator)
+                        with torch.inference_mode():
+                            result = model.generate(**encoded, forced_bos_token_id=target_token,
+                                                    num_beams=4, no_repeat_ngram_size=3,
+                                                    suppress_tokens=[tokenizer.unk_token_id], max_new_tokens=256)
+                        generated[pos] = tokenizer.batch_decode(result, skip_special_tokens=True)[0]
             except torch.cuda.OutOfMemoryError:
                 if accelerator != "cuda":
                     raise
             else:
                 for idx, text in zip(selected, generated, strict=True):
                     if not text.strip():
-                        raise ValueError("Translation produced an empty phrase")
+                        raise ValueError(f"Translation from {source} to {target} produced no text at {cues[idx].get('start', 0):.2f}s")
                     texts[idx] = text.strip()
+                save_json(cache, texts)
                 offset += len(selected)
                 translated += len(selected)
                 progress(f"Translating {source} to {target}", 30 + 7 * translated/total)
@@ -92,7 +112,6 @@ def translate(cues, target, cache):
             # The FP32 archive maps into memory without copying. Let Transformers
             # tie its four vocabulary weights before allocating the smaller CPU tensors.
             model = AutoModelForSeq2SeqLM.from_pretrained(model_dir).eval().to(dtype=torch.bfloat16)
-    save_json(cache, texts)
     return texts
 
 
@@ -110,13 +129,28 @@ def delivery_durations(cues, media_duration):
     return durations
 
 
-def speak(cues, texts, language, work, wav_dir, references=None):
-    pending = [i for i, cue in enumerate(cues) if cue["language"] != language and not (wav_dir/f"{i}.wav").is_file()]
+def audible(wave, rate):
+    return (wave.ndim == 1 and len(wave) >= .04*rate and np.isfinite(wave).all()
+            and np.max(abs(wave)) >= 1e-5 and np.sqrt(np.mean(wave**2)) >= 1e-6)
+
+
+def cached_voice(path):
+    if not path.is_file():
+        return False
+    try:
+        wave, rate = sf.read(path, dtype="float32")
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return audible(wave, rate)
+
+
+def speak(cues, texts, language, work, wav_dir, references=None, model_cache=None):
+    pending = [i for i, cue in enumerate(cues) if cue["language"] != language and not cached_voice(wav_dir/f"{i}.wav")]
     if not pending:
         return
     accelerator = device()
     if accelerator != "mps":
-        synthesize(cues, texts, language, work, wav_dir, pending, accelerator, references)
+        synthesize(cues, texts, language, work, wav_dir, pending, accelerator, references, model_cache)
         return
     # Metal retains compiled decoder graphs for varying utterance lengths. A
     # fresh process releases those allocations on Macs with shared GPU memory.
@@ -124,7 +158,8 @@ def speak(cues, texts, language, work, wav_dir, references=None):
         batch = pending[start:start+6]
         result = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(work), str(wav_dir),
                                  language, *map(str, batch)], stdin=subprocess.DEVNULL,
-                                env={**os.environ, "EASYX_DUBBING_VOICE_REFS": str(references or work)})
+                                env={**os.environ, "EASYX_DUBBING_VOICE_REFS": str(references or work),
+                                     "EASYX_DUBBING_VERIFY_MODEL_CACHE": str(model_cache or "")})
         if result.returncode:
             # The child already wrote the model's diagnostic to the shared stderr.
             raise SystemExit(f"Voice synthesis stopped with status {result.returncode}")
@@ -155,7 +190,42 @@ def load_voice_model(model_class, directory, accelerator, dtype, percent):
     return model
 
 
-def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, references=None):
+def verifies_words(recognizer, wave, rate, language, expected):
+    from difflib import SequenceMatcher
+    import unicodedata
+    from speech_review import at16
+    audio = at16(wave, rate)
+    audio = audio * (.65 / max(float(np.max(abs(audio))), 1e-6))
+    segments, _ = recognizer.transcribe(audio, language=language, beam_size=3, max_new_tokens=192,
+                                        condition_on_previous_text=False)
+    words = " ".join(s.text for s in segments if s.avg_logprob > -1.4 and s.no_speech_prob < .8)
+    def normalize(text):
+        return "".join(c for c in unicodedata.normalize("NFKD", text.casefold()) if c.isalnum())
+    wanted, heard = normalize(expected), normalize(words)
+    return bool(wanted and heard) and SequenceMatcher(None, wanted, heard, autojunk=False).ratio() >= .65
+
+
+def speaker_reference(speaker, folders, start):
+    # Prefer a repaired reference when available, keeping the waveform and
+    # transcript of a single original speaker together on every attempt.
+    for folder in dict.fromkeys(folders):
+        if not folder:
+            continue
+        path = folder/f"speaker-{speaker}.wav"
+        words_path = path.with_suffix(".txt")
+        if not path.is_file() or not words_path.is_file():
+            continue
+        try:
+            audio, rate = sf.read(path, dtype="float32")
+            text = words_path.read_text().strip()
+        except (OSError, RuntimeError, UnicodeError):
+            continue
+        if text and audible(audio, rate):
+            return audio, rate, text
+    raise ValueError(f"No audible original voice reference for speaker {speaker+1} at {start:.2f}s")
+
+
+def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, references=None, model_cache=None):
     from omnivoice import OmniVoice
     percent = 38 + 30*indices[0]/len(cues)
     progress("Loading local voice model", percent)
@@ -164,26 +234,64 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
         dtype = torch.bfloat16
     model = load_voice_model(OmniVoice, model_path("voice"), accelerator, dtype, percent)
     limits = delivery_durations(cues, sf.info(work/"mix.wav").duration)
-    prompts = {}
+    prompts, repaired_prompts, alternate_prompts = {}, {}, {}
+    recognizer = None
     for idx in indices:
         cue, text = cues[idx], texts[idx]
         speaker = cue["speaker"]
         if speaker not in prompts:
-            folder = references if references and (references/f"speaker-{speaker}.wav").is_file() else work
-            ref_audio, sr = sf.read(folder/f"speaker-{speaker}.wav", dtype="float32")
-            ref_text = (folder/f"speaker-{speaker}.txt").read_text().strip()
-            prompts[speaker] = model.create_voice_clone_prompt(
+            repaired = wav_dir.parent if wav_dir.parent != work else None
+            ref_audio, sr, ref_text = speaker_reference(speaker, [repaired, references, work], cue["start"])
+            prompt = model.create_voice_clone_prompt(
                 (torch.from_numpy(ref_audio)[None, :], sr), ref_text, preprocess_prompt=False)
-        prompt = prompts[speaker]
-        frames = model.duration_estimator.estimate_duration(text, prompt.ref_text, prompt.ref_audio_tokens.shape[-1])
-        natural = frames/model.audio_tokenizer.config.frame_rate
-        duration = min(limits[idx], max(natural, .8*(cue["end"]-cue["start"]), len(text.split())/3.5))
-        # Request the timing from the model itself so syllables keep their prosody.
-        wave = model.generate(text=text, language=language, voice_clone_prompt=prompt, duration=duration,
-                              num_step=48, pad_duration=0., preprocess_prompt=False)[0]
-        wave = np.asarray(wave, dtype="float32").reshape(-1)[:max(1, round(limits[idx]*model.sampling_rate))]
-        if not len(wave) or not np.isfinite(wave).all() or np.max(np.abs(wave)) < 1e-6:
-            raise ValueError("The voice model did not generate audible speech")
+            prompts[speaker] = prompt, ref_audio, sr
+        prompt, ref_audio, sr = prompts[speaker]
+        original_duration = cue["end"]-cue["start"]
+        limit = limits[idx]
+        for attempt in range(3):
+            if attempt:
+                if recognizer is None:
+                    from faster_whisper import WhisperModel
+                    recognizer = WhisperModel(os.getenv("EASYX_WHISPER_MODEL", "small"), device="cpu",
+                                              compute_type="int8", cpu_threads=2, download_root=model_cache)
+                if speaker not in repaired_prompts:
+                    from voice_samples import align_clone_reference
+                    aligned = align_clone_reference(recognizer, ref_audio, sr, cue["language"])
+                    if aligned is not None:
+                        ref, ref_text = aligned
+                        prompt = model.create_voice_clone_prompt((torch.from_numpy(ref)[None, :], sr), ref_text,
+                                                                 preprocess_prompt=False)
+                    repaired_prompts[speaker] = prompt
+                prompt = repaired_prompts[speaker]
+                if attempt == 2:
+                    if speaker not in alternate_prompts:
+                        from voice_samples import alternate_clone_reference
+                        alternative = alternate_clone_reference(recognizer, cues, work, speaker)
+                        if alternative is not None:
+                            ref, rate, ref_text = alternative
+                            prompt = model.create_voice_clone_prompt((torch.from_numpy(ref)[None, :], rate), ref_text,
+                                                                     preprocess_prompt=False)
+                        alternate_prompts[speaker] = prompt
+                    prompt = alternate_prompts[speaker]
+            frames = model.duration_estimator.estimate_duration(text, prompt.ref_text, prompt.ref_audio_tokens.shape[-1])
+            natural = frames/model.audio_tokenizer.config.frame_rate
+            duration = min(limit, max(natural, .8*original_duration, len(text.split())/(2.7 if attempt else 3.5)))
+            if attempt == 2:
+                # On a final retry let the same voice finish in the available
+                # pause rather than repeatedly requesting a clipped delivery.
+                duration = min(limit, max(1.1, duration*1.2+.12))
+            wave = model.generate(text=text, language=language, voice_clone_prompt=prompt, duration=duration,
+                                  num_step=48, pad_duration=0., preprocess_prompt=False)[0]
+            wave = np.asarray(wave, dtype="float32").reshape(-1)[:max(1, round(limit*model.sampling_rate))]
+            if not audible(wave, model.sampling_rate) or len(wave) < model.sampling_rate*min(.35*duration, .10*len(text.split())):
+                continue
+            if not attempt or verifies_words(recognizer, wave, model.sampling_rate, language, text):
+                if attempt:
+                    prompts[speaker] = prompt, ref_audio, sr
+                break
+        else:
+            raise ValueError(f"The cloned voice could not produce intelligible {language} speech for speaker "
+                             f"{speaker+1} at {cue['start']:.2f}–{cue['end']:.2f}s after 3 attempts")
         output = wav_dir/f"{idx}.wav"
         temporary = output.with_suffix(".partial.wav")
         sf.write(temporary, wave, model.sampling_rate, subtype="FLOAT")
@@ -502,7 +610,13 @@ if __name__ == "__main__":
     torch.set_num_threads(min(4, os.cpu_count() or 1))
     work, wav_dir = map(Path, sys.argv[1:3])
     language = sys.argv[3]
-    synthesize(json.loads((work/"speakers.json").read_text()),
-               json.loads((work/f"translation-{language}.json").read_text()),
-               language, work, wav_dir, list(map(int, sys.argv[4:])), device(),
-               Path(os.environ.get("EASYX_DUBBING_VOICE_REFS", work)))
+    try:
+        synthesize(json.loads((wav_dir.parent/"speakers.json").read_text()),
+                   json.loads((wav_dir.parent/f"translation-{language}.json").read_text()),
+                   language, work, wav_dir, list(map(int, sys.argv[4:])), device(),
+                   Path(os.environ.get("EASYX_DUBBING_VOICE_REFS", work)),
+                   os.environ.get("EASYX_DUBBING_VERIFY_MODEL_CACHE") or None)
+    except Exception as error:
+        from runtime import publish
+        publish(errorCode="DUBBING_RENDER_FAILED", message=str(error) or type(error).__name__)
+        raise

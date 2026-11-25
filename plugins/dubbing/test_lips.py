@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 RUNTIME = all(importlib.util.find_spec(name) for name in (
     "av", "cv2", "numpy", "onnxruntime", "scipy", "soundfile", "librosa", "faster_whisper",
@@ -325,6 +325,68 @@ class LipSyncTests(unittest.TestCase):
             self.assertEqual([s.codec_context.name for s in reader.streams], ["h264", "aac"])
             self.assertEqual(reader.streams.audio[0].metadata["language"], "fra")
             self.assertEqual(reader.streams.audio[0].metadata["handler_name"], "Open EasyX Dubbed Audio")
+
+    def damaged_video(self, damaged_frames):
+        source = self.tmp/"damaged.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=s=96x64:r=10",
+                        "-frames:v", "20", "-c:v", "libx264", "-g", "6", "-bf", "2", "-threads", "1",
+                        str(source)], check=True)
+        data = bytearray(source.read_bytes())
+        with av.open(source) as reader:
+            for packet in reader.demux(video=0):
+                if packet.size and packet.pts*packet.time_base*10 in damaged_frames:
+                    # Damage the H.264 NAL length, preserving MP4's index and all other samples.
+                    data[packet.pos:packet.pos+4] = b"\xff"*4
+        source.write_bytes(data)
+        return source
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires ffmpeg")
+    def test_render_and_speaker_passes_recover_after_a_damaged_video_packet(self):
+        import active_speaker
+        source = self.damaged_video({5})
+        with av.open(source) as reader, self.assertRaises(av.error.InvalidDataError):
+            list(reader.decode(video=0))
+
+        voice, output = self.tmp/"0.wav", self.tmp/"dub.mp4"
+        sf.write(voice, .1*np.sin(np.arange(32000)*.1), 16000)
+        with patch.object(lips, "FaceModels") as faces, patch.object(lips, "LipModel"), patch.object(lips, "progress"):
+            faces.return_value.detect.return_value = []
+            lips.render(source, voice, [{"start": 0, "end": 2, "speaker": 0}], self.tmp, output)
+            faces.return_value.detect.assert_called()
+        with av.open(output) as reader:
+            frames = list(reader.decode(video=0))
+            self.assertEqual([f.pts*f.time_base*10 for f in frames], [i for i in range(20) if i != 5])
+            self.assertEqual(frames[4].duration*frames[4].time_base*10, 2)
+            self.assertEqual(reader.streams.audio[0].duration*reader.streams.audio[0].time_base, 2)
+
+        box = np.float32([12, 20, 30, 30])
+        observations = [(i/10, box) for i in range(2, 19) if i != 5]
+        model = Mock()
+        model.scores.side_effect = lambda pictures, wave: np.ones(len(pictures))
+        with av.open(source) as reader, sf.SoundFile(voice) as audio:
+            scores = active_speaker.track_scores(reader, audio, model, observations)
+        self.assertAlmostEqual(scores[-1][0], 1.8)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires ffmpeg")
+    def test_damaged_tail_holds_last_healthy_picture_to_the_original_video_end(self):
+        source = self.damaged_video(range(12, 20))
+        voice, output = self.tmp/"mix.wav", self.tmp/"dub.mp4"
+        sf.write(voice, np.zeros(32000), 16000)
+        with patch.object(lips, "progress"):
+            lips.render(source, voice, [], self.tmp, output)
+        with av.open(output) as reader:
+            frames = list(reader.decode(video=0))
+            self.assertEqual([f.pts*f.time_base*10 for f in frames], list(range(12)))
+            self.assertEqual((frames[-1].pts+frames[-1].duration)*frames[-1].time_base, 2)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires ffmpeg")
+    def test_render_rejects_a_video_with_no_decodable_frames(self):
+        source = self.damaged_video(range(20))
+        voice, output = self.tmp/"mix.wav", self.tmp/"dub.mp4"
+        sf.write(voice, np.zeros(32000), 16000)
+        with self.assertRaisesRegex(ValueError, "No decodable video frames"):
+            lips.render(source, voice, [], self.tmp, output)
+        self.assertFalse(output.exists())
 
     def test_only_aperture_is_synthesized_and_native_skin_is_warped(self):
         x, y = np.meshgrid(np.arange(160), np.arange(120))

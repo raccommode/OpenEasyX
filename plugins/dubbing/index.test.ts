@@ -71,3 +71,28 @@ finally:
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+it("upgrades a published dub without inference, preserving frame timestamps and compressed audio", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-delivery-"));
+  try {
+    const source = path.join(root, "revision3.mp4"), output = path.join(root, "revision4.mp4");
+    execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=24:d=5",
+      "-itsoffset", "0.2", "-f", "lavfi", "-i", "sine=d=4.8", "-vf", "select='not(eq(mod(n,9),2))'",
+      "-fps_mode", "vfr", "-c:v", "libx264", "-bf", "0", "-c:a", "aac", "-movie_timescale", "90000", source]);
+    const result = await plugin.renderDub!(
+      { config: {}, signal: new AbortController().signal, fetch, runCommand: vi.fn(), log: vi.fn() },
+      { mediaId: "sample", fingerprint: "sample", language: "fr", source: path.join(root, "unused-original"),
+        dataDir: root, workDir: root, output, previousOutput: { path: source, renderVersion: "3", lipSyncFrames: 12 } }, vi.fn(),
+    );
+    expect(result).toEqual({ outcome: "rendered", lipSyncFrames: 12 });
+    function packets(file: string, stream: string, fields: string) {
+      return JSON.parse(execFileSync("ffprobe", ["-v", "error", "-select_streams", stream, "-show_packets",
+        "-show_data_hash", "sha256", "-show_entries", "packet="+fields, "-of", "json", file], { encoding: "utf8" })).packets;
+    }
+    expect(packets(output, "v:0", "pts_time")).toEqual(packets(source, "v:0", "pts_time"));
+    expect(packets(output, "a:0", "pts_time,data_hash")).toEqual(packets(source, "a:0", "pts_time,data_hash"));
+    const bytes = fs.readFileSync(output);
+    expect(bytes.indexOf("moov")).toBeGreaterThan(0);
+    expect(bytes.indexOf("moov")).toBeLessThan(bytes.indexOf("mdat"));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

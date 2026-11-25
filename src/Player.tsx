@@ -329,14 +329,15 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
     <div className="theater-stage">{media.kind === "video" ? <div ref={player} className={`custom-player ${pageFullscreen ? "page-fullscreen" : ""} ${controls || !shownPlaying ? "controls-visible" : "controls-hidden"} ${zoom.scale > 1 ? "zoomed" : ""}`} tabIndex={0} onPointerMove={(event) => { if (event.pointerType === "mouse") reveal(); }} onMouseLeave={() => shownPlaying && !menu && setControls(false)}>
       <div ref={surface} className="player-surface" onPointerDown={(event) => { if (event.button > 0) return; event.currentTarget.setPointerCapture?.(event.pointerId); recognizer.current?.down(gesturePoint(event)); }}
         onPointerMove={(event) => recognizer.current?.move(gesturePoint(event))} onPointerUp={(event) => recognizer.current?.up(gesturePoint(event))} onPointerCancel={(event) => recognizer.current?.cancel(gesturePoint(event))}
-        onContextMenu={(event) => { if (speedHold) event.preventDefault(); }}><video ref={video} style={zoom.scale > 1 ? { transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: "0 0" } : undefined} src={choosingInitialDub ? undefined : streamUrl} poster={media.thumbnailUrl} playsInline preload="metadata" autoPlay={autoStart}
+        onContextMenu={(event) => { if (speedHold) event.preventDefault(); }}><video ref={video} style={zoom.scale > 1 ? { transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`, transformOrigin: "0 0" } : undefined} src={choosingInitialDub ? undefined : streamUrl} poster={media.thumbnailUrl} playsInline preload={language ? "auto" : "metadata"} autoPlay={autoStart}
         onLoadedMetadata={(event) => {
           const element = event.currentTarget;
           const pending = recovery.current; recovery.current = undefined;
           setDuration(element.duration || media.duration || 0);
           element.volume = initialAudio.current.volume; element.muted = initialAudio.current.muted;
-          if (pending) element.currentTime = Math.min(pending.seconds, Number.isFinite(element.duration) ? Math.max(0, element.duration - 0.1) : pending.seconds);
-          else element.currentTime = !media.completed && media.progressSeconds > 0 && media.progressSeconds < element.duration - 5 ? media.progressSeconds : 0;
+          const resumeAt = pending ? Math.min(pending.seconds, Number.isFinite(element.duration) ? Math.max(0, element.duration - 0.1) : pending.seconds)
+            : !media.completed && media.progressSeconds > 0 && media.progressSeconds < element.duration - 5 ? media.progressSeconds : 0;
+          if (Math.abs(element.currentTime - resumeAt) > 0.01) element.currentTime = resumeAt;
           if ((pending ? pending.playing : autoStart) && element.paused) safePlay(element);
           else if (pending && !pending.playing) { element.pause(); setWaiting(false); }
         }}

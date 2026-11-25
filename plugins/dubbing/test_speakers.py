@@ -106,7 +106,8 @@ class SpeakerTests(unittest.TestCase):
         cues[2]["language"] = "fr"
         with tempfile.TemporaryDirectory() as tmp, patch.object(voices, "device", return_value="mps"), patch.object(voices.subprocess, "run") as run:
             work = Path(tmp)
-            (work/"0.wav").touch()
+            sf.write(work/"0.wav", np.ones(2400, dtype="float32")*.1, 24000)
+            (work/"1.wav").touch()
             run.return_value.returncode = 0
             voices.speak(cues, [], "fr", work, work)
             self.assertEqual([call.args[0][5:] for call in run.call_args_list], [

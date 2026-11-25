@@ -244,7 +244,7 @@ def speaker_audio(samples, original, turns, extractor, global_vectors, separator
             for idx, ((a, _, s), audio) in enumerate(zip(turns, output))]
 
 
-def speaker_references(cues, work):
+def speaker_references(cues, work, output=None):
     from enhance import enhance_speech, speech_enhancer
     rate = 24000
     enhancer = None
@@ -289,8 +289,8 @@ def speaker_references(cues, work):
             peak = np.max(np.abs(reference))
             if peak > 1e-6:
                 reference *= .8 / peak
-            sf.write(work/f"speaker-{speaker}.wav", reference, rate)
-            (work/f"speaker-{speaker}.txt").write_text(" ".join(texts))
+            sf.write((output or work)/f"speaker-{speaker}.wav", reference, rate)
+            ((output or work)/f"speaker-{speaker}.txt").write_text(" ".join(texts))
 
 
 def resolve_short_languages(cues, work, whisper):

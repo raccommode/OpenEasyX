@@ -12,15 +12,15 @@ const languages = subtitleLanguages.filter(({ code }) => supported.has(code)).ma
 
 export default definePlugin({
   manifest: {
-    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.2.1", author: "Open EasyX",
-    capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: "3",
+    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.3.0", author: "Open EasyX",
+    capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: "4", dubbingPreviousRenderVersions: ["3"],
     description: "Clone each speaker’s voice, translate the dialogue and synchronize visible lips locally.",
     settings: [
       ...languages.map(({ code, label }) => ({ key: code, label, type: "boolean" as const, default: false })),
       { key: "oldestFirst", label: "Process oldest videos first", type: "boolean", default: false },
     ],
   },
-  async renderDub({ signal }, job, report) {
+  async renderDub({ signal, log }, job, report) {
     signal?.throwIfAborted();
     await mkdir(job.workDir, { recursive: true, mode: 0o700 });
     const jobFile = path.join(job.workDir, `.render-${randomUUID()}.json`);
@@ -34,7 +34,8 @@ export default definePlugin({
         env: { ...process.env, EASYX_DUBBING_PARENT: "1", PYTHONUNBUFFERED: "1", HF_HUB_DISABLE_TELEMETRY: "1", TOKENIZERS_PARALLELISM: "false" },
       });
       let error = "";
-      let setupError: Error | undefined;
+      let workerError: Error | undefined;
+      let phase = "";
       let outcome: DubbingResult | undefined;
       const lines = createInterface({ input: child.stdout });
       lines.on("line", (line) => {
@@ -42,9 +43,14 @@ export default definePlugin({
         try {
           const event = JSON.parse(line.slice(6));
           if (event.errorCode === "DUBBING_RUNTIME_SETUP" && typeof event.message === "string") {
-            setupError = Object.assign(new Error(event.message), { code: event.errorCode });
+            workerError = Object.assign(new Error(event.message), { code: event.errorCode });
+          } else if (event.errorCode === "DUBBING_RENDER_FAILED" && typeof event.message === "string" && !workerError) {
+            workerError = new Error(phase ? `${phase}: ${event.message}` : event.message);
           }
-          if (typeof event.phase === "string" && Number.isFinite(event.progress)) report(event.phase, event.progress);
+          if (typeof event.phase === "string" && Number.isFinite(event.progress)) {
+            phase = event.phase;
+            report(phase, event.progress);
+          }
           if (event.outcome === "rendered" && Number.isSafeInteger(event.lipSyncFrames) && event.lipSyncFrames >= 0) {
             outcome = { outcome: "rendered", lipSyncFrames: event.lipSyncFrames };
           } else if (["rendered", "original", "silent"].includes(event.outcome)) outcome = event.outcome;
@@ -61,12 +67,12 @@ export default definePlugin({
           signal?.removeEventListener("abort", stop);
           reject(Object.assign(new Error(cause.message, { cause }), { code: "DUBBING_RUNTIME_SETUP" }));
         });
-        child.once("close", (code) => {
+        child.once("close", (code, killedBy) => {
           signal?.removeEventListener("abort", stop);
           lines.close();
-          if (setupError) reject(setupError);
-          else if (code === 0 && outcome) resolve(outcome);
-          else reject(new Error(error.trim().slice(-1000) || `Dubbing worker stopped (exit ${code})`));
+          if (code === 0 && outcome && !workerError) return resolve(outcome);
+          if (!signal?.aborted && error.trim()) log("warn", "Dubbing worker failed", { mediaId: job.mediaId, language: job.language, phase, stderr: error.trim() });
+          reject(workerError ?? new Error(killedBy ? `Dubbing worker stopped (${killedBy})` : error.trim().slice(-1000) || `Dubbing worker stopped (exit ${code})`));
         });
       });
     } finally {
