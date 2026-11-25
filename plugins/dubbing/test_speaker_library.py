@@ -94,6 +94,14 @@ class References(unittest.TestCase):
             self.assertEqual(sf.info(directory/"speaker-0.wav").frames, round((3+3+.12)*24000))
             self.assertEqual(bank.prepare_references(current, base/"data", work, cues), (directory, key))
             self.assertEqual(sampler.from_video.call_count, 1)
+            # A new analysis assigns this speaker a different local ID. The
+            # independent sample of the related recording remains reusable.
+            sampler.from_work.return_value = {"1": sample([1, 0])}
+            shifted, _ = bank.prepare_references(current, base/"data", work, [{"speaker": 1}], analysis="new-turns")
+            self.assertEqual(json.loads((shifted/"selection.json").read_text())["sources"], {"1": ["current", "other"]})
+            self.assertEqual(sampler.from_work.call_count, 2)
+            self.assertEqual(sampler.from_video.call_count, 1)
+            sampler.from_work.return_value = {"0": sample([1, 0])}
             Path(other["source"]).write_bytes(b"unrelated audio at the same location")
             sampler.from_video.return_value = {"9": sample([0, 1], "another performer")}
             self.assertEqual(bank.prepare_references(current, base/"data", work, cues), (work, ""))

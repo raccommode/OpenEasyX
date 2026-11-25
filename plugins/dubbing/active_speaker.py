@@ -149,12 +149,22 @@ def _score_window(media, source_audio, model, observations):
     duration = len(pictures)/25+.025
     if isinstance(source_audio, sf.SoundFile):
         rate = source_audio.samplerate
-        source_audio.seek(min(len(source_audio), max(0, round(left*rate))))
-        samples = source_audio.read(round(duration*rate), dtype='float32', always_2d=True)
-        if not len(samples):
+        first = max(0, round(left*rate))
+        last = min(len(source_audio), round((left+duration)*rate))
+        if last <= first:
             return []
+        source_audio.seek(first)
+        samples = source_audio.read(last-first, dtype='float32', always_2d=True)
         div = gcd(16000, rate)
-        wave = resample_poly(samples.mean(axis=1), 16000//div, rate//div)
+        segment = resample_poly(samples.mean(axis=1), 16000//div, rate//div)
+        # The first picture can precede the first source audio sample. Place
+        # the decoded WAV on the same clock as the direct compressed-audio path.
+        wave = np.zeros(round(duration*16000), dtype='float32')
+        at = max(0, round((first/rate-left)*16000))
+        count = min(len(segment), len(wave)-at)
+        if count <= 0:
+            return []
+        wave[at:at+count] = segment[:count]
     else:
         wave = compressed_audio_window(source_audio, left, left+duration)
     if not len(wave) or np.max(abs(wave)) < 1e-6:

@@ -1,4 +1,3 @@
-import gc
 import json
 import os
 from pathlib import Path
@@ -6,16 +5,8 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
+from inference_memory import release_models
 from runtime import parent_watch, progress, provision, publish
-
-
-def release_models():
-    import torch
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
 
 
 def setup_runtime(data):
@@ -24,6 +15,21 @@ def setup_runtime(data):
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         publish(errorCode="DUBBING_RUNTIME_SETUP", message=str(error))
         raise
+
+
+def reuse_separated_source(old_dir, work):
+    # Only these two files predate speaker assignment. They were published by
+    # atomic rename inside the same source fingerprint's work directory.
+    names = ("mix.wav", "dialogue-bandit-v2.wav")
+    if not old_dir or not all((Path(old_dir)/name).is_file() for name in names):
+        return
+    for name in names:
+        try:
+            os.link(Path(old_dir)/name, work/name)
+        except OSError:
+            # Existing files can be reused, and a filesystem without hard
+            # links can rebuild its missing files through the normal worker.
+            pass
 
 
 def run(job, details=None):
@@ -35,11 +41,12 @@ def run(job, details=None):
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
     previous = job.get("previousOutput")
+    generation = job.get("audioGeneration")
     lip_sync = job.get("lipSync") is True
     output = Path(job["output"])
     from delivery import mux_original_picture, verify_playback
     from sync_cache import keep, move, restore
-    if not lip_sync and previous and previous["renderVersion"] == "5-lips":
+    if not lip_sync and previous and previous["renderVersion"] == f"{generation}-lips":
         progress("Restoring the original picture with the published dubbed audio", 75)
         mux_original_picture(source, previous["path"], output, language=target, published_audio=True,
                              prepare_recovery=lambda: setup_runtime(data))
@@ -54,7 +61,7 @@ def run(job, details=None):
     setup_runtime(data)
     import torch
     torch.set_num_threads(min(4, os.cpu_count() or 1))
-    if lip_sync and previous and previous["renderVersion"] == "5-audio":
+    if lip_sync and previous and previous["renderVersion"] == f"{generation}-audio":
         with TemporaryDirectory(dir=work) as temp:
             cues = restore(job, previous["path"], Path(temp))
             if cues:
@@ -73,18 +80,19 @@ def run(job, details=None):
     from speech_review import review_transcript
 
     progress("Separating dialogue from original soundtrack", 2)
-    mix, dialogue = separate_dialogue(source, work)
+    reuse_separated_source(job.get("previousStemDir"), work)
+    mix, dialogue = separate_dialogue(source, work, model_cache=data / "subtitle-models")
     release_models()
     progress("Identifying speakers", 15)
     cues = transcribe(dialogue, work, data / "subtitle-models")
-    cues, checkpoints = review_transcript(cues, work, data / "subtitle-models")
+    cues, checkpoints = review_transcript(cues, work, data / "subtitle-models", dialogue=dialogue)
     release_models()
     if not cues:
         return "silent"
     if all(c["language"] == target for c in cues):
         return "original"
     from speaker_library import prepare_references
-    references, reference_key = prepare_references(job, data, work, cues)
+    references, reference_key = prepare_references(job, data, work, cues, analysis=checkpoints.name)
     release_models()
     progress("Translating dialogue", 30)
     texts = translate_speech(cues, target, work, checkpoints/f"translation-{target}.json")

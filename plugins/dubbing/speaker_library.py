@@ -111,7 +111,7 @@ def selection_report(plan, work):
     return (work/("speaker-library-"+plan["key"]), plan["key"]) if plan["key"] else (work, "")
 
 
-def prepare_references(job, data, work, cues):
+def prepare_references(job, data, work, cues, *, analysis=None):
     if not job.get("referenceVideos") or not job.get("mediaId") or not job.get("fingerprint"):
         return work, ""
     try:
@@ -119,16 +119,19 @@ def prepare_references(job, data, work, cues):
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
         with sqlite3.connect(base/"references-v1.sqlite", timeout=10) as db:
             db.execute("CREATE TABLE IF NOT EXISTS recordings (media_id TEXT PRIMARY KEY, stamp TEXT, complete INTEGER, used REAL, voices BLOB)")
-            return prepare(db, job, data, work, cues)
+            return prepare(db, job, data, work, cues, analysis)
     except (OSError, TimeoutError, sqlite3.Error, ValueError, RuntimeError, subprocess.SubprocessError):
         progress("Using the original voices from this video", 30)
         return work, ""
 
 
-def prepare(db, job, data, work, cues):
+def prepare(db, job, data, work, cues, analysis):
     current = signature(job)
     key = current[0]
-    stamp = token((VERSION, current))
+    # A new separation can renumber speakers even with the same media file.
+    # Related recordings are sampled on their own and retain their cache keys.
+    stamp = token((VERSION, current, analysis if analysis is not None else cues))
+    anchor_key = "anchor:" + key
     identities = {(current[3], current[4])}
     keys = {key}
     candidates = []
@@ -150,7 +153,7 @@ def prepare(db, job, data, work, cues):
             return selection_report(previous, work)
 
     sampler = VoiceSampler(data/"subtitle-models")
-    anchors = cached(db, key, stamp, require_complete=True)
+    anchors = cached(db, anchor_key, stamp, require_complete=True)
     if anchors is None:
         # Current diarization uses the first audio track. Never learn from a dubbed first track.
         track = original_audio(job["source"])
@@ -159,7 +162,7 @@ def prepare(db, job, data, work, cues):
         anchors = sampler.from_work(work, cues)
         if signature(job) != current:
             return work, ""
-        save_record(db, key, stamp, anchors, True)
+        save_record(db, anchor_key, stamp, anchors, True)
     speakers = sorted({str(c["speaker"]) for c in cues})
     pool = {s: [] for s in anchors}
     for position, (row, sig) in enumerate(candidates if anchors else [], 1):

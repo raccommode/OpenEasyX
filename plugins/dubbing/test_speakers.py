@@ -1,5 +1,6 @@
 """Speaker assignment and soundtrack regressions for the optional dubbing runtime."""
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -18,6 +19,78 @@ if RUNTIME:
 
 @unittest.skipUnless(RUNTIME, "requires the optional dubbing Python environment")
 class SpeakerTests(unittest.TestCase):
+    def test_repaired_stem_and_lexical_evidence_invalidate_cached_transcription_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            stem = work/"restored.wav"
+            sf.write(stem, np.zeros(4410, dtype="float32"), 44100)
+            shutil.copyfile(stem, work/"mix.wav")
+            (work/"speakers.json").write_text("[]")
+            annotations = stem.with_suffix(".words.json")
+            annotations.write_text("[]")
+            sd = Mock()
+            sd.process.return_value.sort_by_start_time.return_value = []
+            with patch.object(dialogue, "WhisperRecognizer"), patch.object(dialogue, "diarizer", return_value=(sd, Mock())) as load:
+                self.assertEqual(dialogue.transcribe(stem, work, None), [])
+                self.assertEqual(dialogue.transcribe(stem, work, None), [])
+                self.assertEqual(load.call_count, 1)
+                annotations.write_text(json.dumps([dict(start=.02, end=.08, text="yes", language="en", confidence=.95)]))
+                self.assertEqual(dialogue.transcribe(stem, work, None), [])
+                self.assertEqual(load.call_count, 2)
+
+    def test_a_word_at_a_fragment_boundary_requires_consensus_from_both_speaker_timelines(self):
+        guided = [(0, 10_000, 3), (17_000, 21_000, 4), (25_000, 44_000, 4)]
+        source = [(0, 10_000, 8), (16_800, 44_000, 7)]
+        words = [dict(start=1.48, end=1.76)]
+        self.assertEqual(dialogue.join_restored_fragments(guided, source, words, 0.),
+                         [(0, 10_000, 3), (16_800, 44_000, 4)])
+        competing = source + [(18_000, 25_000, 9)]
+        self.assertEqual(dialogue.join_restored_fragments(guided, competing, words, 0.), guided)
+        competing = [*guided[:2], (25_000, 44_000, 6)]
+        self.assertEqual(dialogue.join_restored_fragments(competing, source, words, 0.), competing)
+
+    def test_restored_words_require_one_timed_speaker_and_no_competing_words(self):
+        turns = [(0, 16000, 5), (16000, 40000, 8), (32000, 42000, 2)]
+        def word(start, end, text):
+            return dict(start=start, end=end, text=text, language="en", confidence=.9)
+        solo = word(101.20, 101.60, "station")
+        overlap = word(102.05, 102.35, "train")
+        cut = word(100.88, 101.12, "crossing")
+        conflicting = [word(100.2, 100.6, "door"), word(100.3, 100.62, "window")]
+        first, second, third = dialogue.verified_turns([solo, overlap, cut, *conflicting], turns, 100.)
+        self.assertEqual((first, third), ([], []))
+        self.assertEqual([w["text"] for w in second], ["station"])
+        np.testing.assert_allclose([second[0]["start"], second[0]["end"]], [.2, .6])
+
+    def test_restored_word_survives_a_split_syllable_without_overwriting_another_clear_voice(self):
+        restored = [dict(start=.7, end=1.1, text="station", language="en", confidence=.9)]
+        def transcript(probability):
+            word = SimpleNamespace(start=.77, end=1.04, word="stage", probability=probability)
+            distant = SimpleNamespace(start=2.1, end=2.5, word=" tomorrow", probability=.85)
+            chunk = SimpleNamespace(start=.7, end=2.55, text="stage tomorrow", no_speech_prob=.1,
+                                    avg_logprob=-.8, words=[word, distant])
+            whisper = Mock()
+            whisper.transcribe.return_value = ([chunk], SimpleNamespace(language="en", language_probability=.75))
+            return dialogue.turn_transcript(whisper, np.ones(48000, dtype="float32"), restored)
+        repaired = transcript(.3)
+        self.assertEqual([(r[2], r[5]) for r in repaired], [("station", True), ("tomorrow", False)])
+        self.assertLessEqual(repaired[0][0], .7)
+        self.assertGreaterEqual(repaired[0][1], 1.1)
+        competing = transcript(.95)
+        self.assertEqual([(r[2], r[5]) for r in competing], [("stage tomorrow", False)])
+
+    def test_short_exclusive_turn_keeps_the_original_voice_around_a_verified_syllable(self):
+        sample = np.zeros(32000, dtype="float32")
+        whisper = Mock()
+        info = SimpleNamespace(language="en", language_probability=.53)
+        whisper.transcribe.return_value = ([], info)
+        restored = [dict(start=.83, end=1.14, text="ready", language="en", confidence=.92)]
+        alone = dialogue.turn_transcript(whisper, sample, restored)
+        self.assertEqual(alone, [(0., 2., "ready", "en", .53, True)])
+        overlapping = dialogue.turn_transcript(whisper, sample, restored, exclusive=False)
+        self.assertGreater(overlapping[0][0], 0.)
+        self.assertLess(overlapping[0][1], 2.)
+
     def test_cinematic_stem_has_its_own_cache_and_reconstructs_overlapped_blocks_on_the_source_clock(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
@@ -180,7 +253,40 @@ class SpeakerTests(unittest.TestCase):
     def test_natural_delivery_only_uses_free_time_between_lines(self):
         cues = [dict(start=0., end=1.), dict(start=3., end=5.), dict(start=4., end=6.),
                 dict(start=6.2, end=7.)]
-        np.testing.assert_allclose(voices.delivery_durations(cues, 7.5), [2.25, 2., 2., 1.22])
+        np.testing.assert_allclose(voices.delivery_durations(cues, 7.5), [2.25, 2., 2.12, 1.22])
+
+        # A short turn nested in another speaker's line has no pause to use.
+        nested = [dict(start=0., end=3.), dict(start=.1, end=.9), dict(start=5., end=6.)]
+        np.testing.assert_allclose(voices.delivery_durations(nested, 6.), [3., .8, 1.])
+
+    def test_short_clones_preserve_whole_words_and_allow_equivalent_tokenization(self):
+        expected = "Voici le prochain train."
+        wave = np.ones(1600, dtype="float32")
+        cases = [(expected, "Oui, voici le prochain train.", False),
+                 (expected, "Le prochain train.", False),
+                 (expected, "Alors, voici le prochain.", False),
+                 ("Rendez-vous à midi.", "Rendez vous a midi.", True)]
+        for target, heard, expected_match in cases:
+            with self.subTest(heard=heard):
+                recognizer = Mock()
+                recognized = SimpleNamespace(text=heard, avg_logprob=-.1, no_speech_prob=.01)
+                recognizer.transcribe.return_value = ([recognized], None)
+                self.assertEqual(voices.verifies_words(recognizer, wave, 16000, "fr", target), expected_match)
+
+    def test_nine_word_clone_cannot_drop_its_opening_or_insert_a_phrase(self):
+        target = "Écoutez bien le dernier train part très tôt demain."
+        wave = np.ones(1600, dtype="float32")
+        cases = [("Le dernier train part très tôt demain.", False),
+                 ("Écoutez bien le dernier train part en effet très tôt demain.", False),
+                 ("Écoutez bien le dernier train part demain.", False),
+                 ("Ecoutez bien, le dernier train part tres tot demain !", True),
+                 ("Écoute bien, le dernier train part très tôt demain.", True)]
+        for heard, expected in cases:
+            with self.subTest(heard=heard):
+                recognizer = Mock()
+                recognized = SimpleNamespace(text=heard, avg_logprob=-.1, no_speech_prob=.01)
+                recognizer.transcribe.return_value = ([recognized], None)
+                self.assertEqual(voices.verifies_words(recognizer, wave, 16000, "fr", target), expected)
 
     def test_metal_workers_resume_only_pending_translated_phrases_in_bounded_groups(self):
         cues = [{"language": "en"} for _ in range(10)]
@@ -298,6 +404,35 @@ class SpeakerTests(unittest.TestCase):
             np.testing.assert_allclose(bed, bg[:, 0], atol=1e-7)
             np.testing.assert_allclose(dry[gap], tail[np.where(gap)[0]-round(.25*rate)], atol=1e-7)
             np.testing.assert_array_equal(dry[t>1.62], 0.)
+
+    def test_microphone_fallback_preserves_verified_words_on_their_own_channel(self):
+        rate = 16000
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            t = np.arange(2*rate)/rate
+            first = .12*np.cos(2*np.pi*310*t)
+            other = .10*np.sin(2*np.pi*540*t)
+            music = np.column_stack((.015*np.sin(2*np.pi*170*t), .02*np.cos(2*np.pi*130*t)))
+            # The repaired left channel also contains a quiet consonant missed
+            # by the microphone model. The right channel still needs that model.
+            verified = (t >= .68) & (t <= 1.32)
+            consonant = verified*.025*np.cos(2*np.pi*1900*t)
+            clean = np.column_stack((first + consonant, other))
+            repaired = np.column_stack((verified*(first+consonant), np.zeros_like(t)))
+            for name, wave in (("mix.wav", music+clean), ("dialogue-bandit-v2.wav", np.zeros_like(clean)),
+                               ("repaired.wav", repaired), ("microphone-0.wav", np.column_stack((first, other))),
+                               ("0.wav", np.zeros_like(t))):
+                sf.write(work/name, wave, rate, subtype="FLOAT")
+            cues = [dict(start=0., end=2., speaker=0, language="en")]
+            regions, levels = voices.soundtrack_regions(work/"mix.wav", work/"repaired.wav", cues, work)
+            regions = list(regions)
+            self.assertTrue(any(region[-1] for region in regions))
+            voices.render_voice_buses(work/"mix.wav", work/"repaired.wav", cues, work, work,
+                                      work/"bed.wav", work/"dry.wav", iter(regions), levels, language="fr")
+            bed = sf.read(work/"bed.wav")[0]
+            np.testing.assert_allclose(bed[:, 1], music[:, 1], atol=1e-7)
+            check = (t<.66) | ((t>.70) & (t<1.30)) | (t>1.34)
+            np.testing.assert_allclose(bed[check, 0], music[check, 0], atol=1e-7)
 
     def test_only_the_target_language_speaker_is_restored_during_overlap(self):
         rate = 44100

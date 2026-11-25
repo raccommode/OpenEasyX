@@ -134,7 +134,8 @@ def delivery_durations(cues, media_duration):
         start, end = cue["start"], cue["end"]
         next_start = cues[i+1]["start"] if i+1 < len(cues) else media_duration
         gap = max(0., min(next_start, media_duration)-end)
-        extra = min(1.25, max(0., gap-.08)) if busy_until <= start else 0.
+        # The last speaker in an overlap can finish in the following silence.
+        extra = min(1.25, max(0., gap-.08)) if busy_until <= end else 0.
         durations.append(end-start+extra)
         busy_until = max(busy_until, end)
     return durations
@@ -220,6 +221,7 @@ def load_voice_model(model_class, directory, accelerator, dtype, percent):
 
 def verifies_words(recognizer, wave, rate, language, expected):
     from difflib import SequenceMatcher
+    import re
     import unicodedata
     from speech_review import at16
     audio = at16(wave, rate)
@@ -227,10 +229,24 @@ def verifies_words(recognizer, wave, rate, language, expected):
     segments, _ = recognizer.transcribe(audio, language=language, beam_size=3, max_new_tokens=192,
                                         condition_on_previous_text=False)
     words = " ".join(s.text for s in segments if s.avg_logprob > -1.4 and s.no_speech_prob < .8)
-    def normalize(text):
-        return "".join(c for c in unicodedata.normalize("NFKD", text.casefold()) if c.isalnum())
-    wanted, heard = normalize(expected), normalize(words)
-    return bool(wanted and heard) and SequenceMatcher(None, wanted, heard, autojunk=False).ratio() >= .65
+    def tokens(text):
+        decomposed = unicodedata.normalize("NFKD", text.casefold())
+        return re.findall(r"[^\W_]+", "".join(c for c in decomposed if not unicodedata.combining(c)))
+
+    wanted, heard = tokens(expected), tokens(words)
+    if not wanted or not heard:
+        return False
+    target_text, spoken_text = "".join(wanted), "".join(heard)
+    if target_text == spoken_text:
+        return True
+    # A high character score can hide a lost opening or extra phrase.
+    # Longer lines can still tolerate isolated recognition errors.
+    for tag, a, b, c, d in SequenceMatcher(None, wanted, heard, autojunk=False).get_opcodes():
+        if len(wanted) <= 8 and tag in {"insert", "delete"}:
+            return False
+        if abs((b-a)-(d-c)) >= 2 and "".join(wanted[a:b]) != "".join(heard[c:d]):
+            return False
+    return SequenceMatcher(None, target_text, spoken_text, autojunk=False).ratio() >= .65
 
 
 def speaker_reference(speaker, folders, start):
@@ -275,7 +291,7 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
     model = load_voice_model(OmniVoice, model_path("voice"), accelerator, dtype, percent)
     limits = delivery_durations(cues, sf.info(work/"mix.wav").duration)
     prompts, repaired_prompts, alternate_prompts = {}, {}, {}
-    folders = [wav_dir.parent if wav_dir.parent != work else None, references, work]
+    folders = [references if references != work else None, wav_dir.parent, work]
     speakers = {cue["speaker"]: cue["start"] for cue in cues}
 
     @cache
@@ -600,8 +616,31 @@ def turn_fade(at, length, rate):
     return np.clip(np.minimum(at, length-1-at)/(rate*.01), 0, 1)
 
 
+def preserve_repaired_speech(candidate, cinematic, repaired, start, rate):
+    """Keep independently confirmed speech when a microphone estimate replaces the rest of a turn."""
+    from scipy.ndimage import distance_transform_edt
+    fade = max(1, round(.01*rate))
+    first = max(0, start-fade)
+    frames = start-first+len(candidate)+fade
+    old = sf.read(cinematic, start=first, frames=frames, dtype="float32", always_2d=True)[0]
+    verified = sf.read(repaired, start=first, frames=frames, dtype="float32", always_2d=True)[0]
+    window = slice(start-first, start-first+len(candidate))
+    # The repair is channel-specific. Read a short overlap so crossings and
+    # transitions use the same gain on either side of a one-second output block.
+    for channel in range(candidate.shape[1]):
+        corrected = np.abs(verified[:, channel]-old[:, channel]) > 1e-7
+        if corrected.any():
+            blend = np.minimum(1., distance_transform_edt(~corrected)[window]/fade)
+            keep = blend < 1
+            voice = verified[window, channel][keep]
+            candidate[keep, channel] = voice + blend[keep]*(candidate[keep, channel]-voice)
+    return candidate
+
+
 def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, regions, targets, *, language=None):
     region = next(regions, None)
+    cinematic = work/"dialogue-bandit-v2.wav"
+    has_repairs = cinematic.is_file() and not cinematic.samefile(dialogue)
     with sf.SoundFile(mix) as src, sf.SoundFile(dialogue) as speech, sf.SoundFile(output, "w", samplerate=src.samplerate,
             channels=src.channels, format="RF64", subtype="FLOAT") as dst, sf.SoundFile(
                 dry_path, "w", samplerate=src.samplerate, channels=src.channels, format="RF64", subtype="FLOAT") as dry:
@@ -621,6 +660,8 @@ def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, reg
                 at = np.arange(a, b)
                 fade = np.clip(np.minimum(at-left, right-1-at)/(rate*.01), 0, 1)
                 if replace:
+                    if has_repairs:
+                        part = preserve_repaired_speech(part, cinematic, dialogue, a, rate)
                     vocal[a-start:b-start] = part
                     positioned[a-start:b-start] = True
                 else:

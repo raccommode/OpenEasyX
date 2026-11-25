@@ -41,13 +41,131 @@ def speech_spans(samples, start, end, *, normalize=True):
             if min(span["end"], end) - max(span["start"], start) >= min(1280, (end-start)*.5)]
 
 
-def review_transcript(cues, work, model_cache):
+def source_window(source, cue, padding):
+    rate = source.samplerate
+    first = max(0, round((cue["start"] - padding) * rate))
+    last = min(len(source), round((cue["end"] + padding) * rate))
+    if first >= last:
+        raise ValueError(f"No source audio available at {cue['start']:.2f}s")
+    source.seek(first)
+    block = source.read(last-first, dtype="float32", always_2d=True)
+    channel = np.argmax(np.mean(block**2, axis=0))
+    return at16(block[:, channel], rate), first/rate
+
+
+def aligned_words(recognizer, audio, origin, cue):
+    segments, info = recognizer.transcribe(audio, beam_size=4, temperature=0., max_new_tokens=96,
+                                           condition_on_previous_text=False, word_timestamps=True)
+    words = []
+    for segment in segments:
+        if segment.avg_logprob < -1.1 or segment.no_speech_prob >= .65:
+            continue
+        for word in segment.words or []:
+            start, end = origin + word.start, origin + word.end
+            duration = end-start
+            overlap = min(end, cue["end"]) - max(start, cue["start"])
+            if duration <= 0 or overlap < duration*.6 or word.probability < .6:
+                continue
+            token = "".join(c for c in unicodedata.normalize("NFKC", word.word).casefold() if c.isalnum())
+            if token:
+                words.append((token, (start + end)/2, word.word))
+    return info.language, info.language_probability, words
+
+
+def matching_words(first, second):
+    language, confidence, words = first
+    if not words or language != second[0] or len(words) != len(second[2]):
+        return None
+    if any(a[0] != b[0] or abs(a[1]-b[1]) > .6 for a, b in zip(words, second[2])):
+        return None
+    return dict(text="".join(w[2] for w in words).strip(), language=language,
+                languageProbability=max(confidence, second[1]))
+
+
+def impossible_word_rate(text, duration):
+    # Count lexical tokens, not punctuation. A single quick interjection and
+    # unspaced writing systems must not trigger the fast-speech check.
+    words = sum(any(ch.isalnum() for ch in token) for token in text.split())
+    return words >= 3 and words > 10 * duration
+
+
+def review_weak_turn(recognizer, original, separation, cue, isolated):
+    # Whisper can confidently guess a word from a breath cut out of its context.
+    # A word must also belong to this speaker's time slot in a contextual decode.
+    # The separator can erase quiet speech completely, so check the original mix.
+    previous = []
+    crop, origin = source_window(original, cue, 0.)
+    if not np.any(crop):
+        return None, crop
+    if cue.get("overlapping"):
+        # The live mix contains other speakers. Only the separated turn can
+        # corroborate that these words belong to this particular speaker.
+        if not np.any(isolated):
+            return None, isolated
+        speaker_words = aligned_words(recognizer, isolated, cue["start"], cue)
+        if not speaker_words[2]:
+            return None, isolated
+    contexts = set()
+    for padding in (3.5, 6.):
+        audio, first = source_window(original, cue, padding)
+        identity = (first, len(audio))
+        if identity in contexts:
+            continue
+        contexts.add(identity)
+        result = aligned_words(recognizer, audio, first, cue)
+        if cue.get("overlapping"):
+            repaired = matching_words(result, speaker_words)
+            if repaired:
+                return repaired, isolated
+            continue
+        for other in previous:
+            repaired = matching_words(result, other)
+            if repaired:
+                return repaired, crop
+        previous.append(result)
+    if not any(result[2] for result in previous):
+        return None, crop
+    # If the two contexts disagree, seek corroboration in the exact turn or
+    # in the independently separated dialogue. Never count the same input twice.
+    checks = []
+    if (origin, len(crop)) not in contexts:
+        checks.append((crop, origin))
+    if separation.is_file():
+        with sf.SoundFile(separation) as stem:
+            checks.append(source_window(stem, cue, 3.5))
+    for audio, first in checks:
+        result = aligned_words(recognizer, audio, first, cue)
+        for other in previous:
+            repaired = matching_words(result, other)
+            if repaired:
+                return repaired, crop
+    if all(result[2] for result in previous):
+        raise ValueError(f"Could not recover a reliable source transcript at {cue['start']:.2f}s")
+    return None, crop
+
+
+def save_repair(cue, audio, work, stage, index):
+    stage.mkdir(exist_ok=True)
+    path = stage/f"recovered-{index}.flac"
+    sf.write(path, audio*.75/max(float(np.max(np.abs(audio))), 1e-6), 16000)
+    return dict(cue, clip=str(path.relative_to(work)))
+
+
+def review_transcript(cues, work, model_cache, *, dialogue=None):
     """Keep legacy translation/WAV indices intact when a defective analysis changes."""
     from dialogue import speaker_references
     if not cues:
         return cues, work
-    digest = hashlib.sha256(json.dumps(cues, sort_keys=True).encode()).hexdigest()[:16]
-    stage = work / ("verified-speech-v1-" + digest)
+    if dialogue is None:
+        dialogue = work/"dialogue-bandit-v2.wav"
+    fingerprint = hashlib.sha256(json.dumps([dialogue.name, cues], sort_keys=True).encode())
+    landmarks = dialogue.with_suffix(".words.json")
+    if landmarks.is_file():
+        fingerprint.update(landmarks.read_bytes())
+    for cue in cues:
+        with (work/cue["clip"]).open("rb") as clip:
+            fingerprint.update(hashlib.file_digest(clip, "sha256").digest())
+    stage = work / ("verified-speech-v2-" + fingerprint.hexdigest()[:16])
     index = stage / "speakers.json"
     if index.is_file():
         try:
@@ -67,6 +185,22 @@ def review_transcript(cues, work, model_cache):
             if not np.isfinite(clip).all():
                 raise ValueError(f"Non-finite source audio at {cue['start']:.2f}s")
             peak = np.max(np.abs(clip), initial=0.)
+            confidence = cue.get("languageProbability")
+            duration = cue["end"]-cue["start"]
+            weak = (peak <= .001 and confidence is not None and confidence < .6 and not malformed
+                    and duration <= 3 and len(cue["text"].split()) <= 3)
+            if weak or impossible_word_rate(cue["text"], duration):
+                progress(f"Checking uncertain speech in context at {cue['start']:.2f}s", 28)
+                if recognizer is None:
+                    recognizer = whisper_model(model_cache)
+                repair, audio = review_weak_turn(recognizer, original, dialogue, cue, at16(clip, rate))
+                touched.add(cue["speaker"])
+                if repair:
+                    repaired = dict(cue, **repair)
+                    if suspect_text(repaired) or impossible_word_rate(repair["text"], duration):
+                        raise ValueError(f"Could not recover a reliable source transcript at {cue['start']:.2f}s")
+                    reviewed.append(save_repair(repaired, audio, work, stage, i))
+                continue
             if not malformed and peak > 0.:
                 reviewed.append(cue)
                 continue
@@ -144,14 +278,8 @@ def review_transcript(cues, work, model_cache):
                     continue
             if repaired is None:
                 raise ValueError(f"Could not recover a reliable source transcript at {cue['start']:.2f}s")
-            stage.mkdir(exist_ok=True)
-            path = stage/f"recovered-{i}.flac"
-            sf.write(path, audio*.75/max(float(np.max(np.abs(audio))), 1e-6), 16000)
-            repaired["clip"] = str(path.relative_to(work))
-            reviewed.append(repaired)
+            reviewed.append(save_repair(repaired, audio, work, stage, i))
             touched.add(cue["speaker"])
-    if not touched:
-        return cues, work
     stage.mkdir(exist_ok=True)
     affected = [c for c in reviewed if c["speaker"] in touched]
     if affected:

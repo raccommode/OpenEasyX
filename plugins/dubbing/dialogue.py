@@ -1,5 +1,6 @@
 """Isolate film dialogue and transcribe each speaker on the original timeline."""
 import gc
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,12 +12,21 @@ from scipy.optimize import linear_sum_assignment
 from scipy.signal import resample_poly
 
 from cinematic import cinematic_separator, isolate_dialogue
-from inference_memory import cuda_allocation_failed, free_cuda_bytes
+from inference_memory import cuda_allocation_failed, free_cuda_bytes, release_models
 from runtime import device, ffmpeg, model_path, progress, save_json
 from whisper_recognizer import WhisperRecognizer
 
 
-def separate_dialogue(source, work):
+def separate_dialogue(source, work, model_cache=None):
+    from dialogue_repair import repair_dialogue
+    mix, cinematic = separate_cinematic(source, work)
+    # Return the separator's GPU workspace before CTranslate2 checks for
+    # enough free memory to verify words in the remaining soundtrack.
+    release_models()
+    return mix, repair_dialogue(mix, cinematic, work/"dialogue-repaired-v2.wav", model_cache)
+
+
+def separate_cinematic(source, work):
     mix, dialogue = work / "mix.wav", work / "dialogue-bandit-v2.wav"
     if dialogue.is_file() and mix.is_file():
         return mix, dialogue
@@ -40,7 +50,7 @@ def separate_dialogue(source, work):
             final = start+len(original) == len(src)
             count = len(speech) if final else hop
             dst.write(speech[:count])
-            progress("Separating dialogue from music and effects", 2 + 13*(start+count)/len(src))
+            progress("Separating dialogue from music and effects", 2 + 11*(start+count)/len(src))
             if final:
                 break
             tail = speech[count:].copy()
@@ -313,7 +323,7 @@ def resolve_short_languages(cues, work, whisper):
         if votes[language] < 6 or votes[language] < .8 * sum(votes.values()):
             continue
         for cue in turns:
-            if cue["language"] == language or cue["end"]-cue["start"] > 4:
+            if cue.get("verifiedSource") or cue["language"] == language or cue["end"]-cue["start"] > 4:
                 continue
             audio, _ = sf.read(work/cue["clip"], dtype="float32")
             # The turn-level guess can differ from this particular clip.
@@ -329,10 +339,128 @@ def resolve_short_languages(cues, work, whisper):
                 cue.update(text=words, language=language)
 
 
+def join_restored_fragments(turns, original_turns, words, origin):
+    """Rejoin a split word when the intact soundtrack independently supports one continuous speaker."""
+    for word in words:
+        a, b = (round((word[key]-origin)*16000) for key in ("start", "end"))
+        owners = [(l, r, s) for l, r, s in original_turns if l < b and r > a]
+        if len(owners) != 1:
+            continue
+        left, right, _ = owners[0]
+        if left > a or right < b or right-left > 8*16000:
+            continue
+        if any(l < right and r > left for l, r, s in original_turns if s != owners[0][2]):
+            continue
+        fragments = [(l, r, s) for l, r, s in turns if l < right and r > left]
+        if len(fragments) < 2 or len({s for _, _, s in fragments}) != 1:
+            continue
+        if any(l < left-.25*16000 or r > right+.25*16000 for l, r, _ in fragments):
+            continue
+        # Leave unrelated boundaries alone. The original word itself must
+        # sit at the split, and the original diarizer must cover that split.
+        if not any(later[0]-earlier[1] <= 16000 and earlier[1] <= b and later[0] >= a
+                   for earlier, later in zip(fragments, fragments[1:])):
+            continue
+        combined = (min(left, fragments[0][0]), max(right, fragments[-1][1]), fragments[0][2])
+        turns = sorted([turn for turn in turns if turn not in fragments] + [combined])
+    return turns
+
+
+def verified_turns(words, turns, origin):
+    """Associate a restored word only with an exclusive diarized speaker turn."""
+    result = [[] for _ in turns]
+    for word in words:
+        if any(other is not word and other["text"].casefold() != word["text"].casefold() and
+               min(other["end"], word["end"])-max(other["start"], word["start"]) >
+               .5*min(other["end"]-other["start"], word["end"]-word["start"]) for other in words):
+            continue
+        left, right = word["start"]-origin, word["end"]-origin
+        hits = [(i, min(right, b/16000)-max(left, a/16000)) for i, (a, b, _) in enumerate(turns)
+                if a/16000 < right and b/16000 > left]
+        if len(hits) != 1:
+            continue
+        idx, overlap = hits[0]
+        if overlap >= .65*(right-left):
+            offset = turns[idx][0]/16000
+            result[idx].append(dict(word, start=max(0., left-offset), end=min(right, turns[idx][1]/16000)-offset))
+    return result
+
+
+def turn_transcript(whisper, audio, restored, original_audio=None, *, exclusive=True):
+    """Keep confirmed words on their isolated voice, with timing from the original audio."""
+    duration = len(audio)/16000
+    chunks, info = whisper.transcribe(audio, beam_size=2, condition_on_previous_text=False, word_timestamps=bool(restored))
+    chunks = [c for c in chunks if c.text.strip() and not (c.no_speech_prob > .65 and c.avg_logprob < -1)]
+    original = [(max(0., c.start), min(duration, c.end), c.text.strip(), info.language, info.language_probability, False)
+                for c in chunks]
+    if not restored:
+        return original
+
+    def token(text):
+        return "".join(c for c in text.casefold() if c.isalnum())
+
+    heard = [w for c in chunks for w in (c.words or []) if token(w.word) and w.end > w.start]
+    confirmed = []
+    for word in restored:
+        start, end = word["start"], word["end"]
+        # Two different high-confidence voices may be audible in a supposedly
+        # solo turn. Keep the isolated transcript whenever the assignment conflicts.
+        if any(token(w.word) != token(word["text"]) and w.probability >= .75 and
+               min(end, w.end)-max(start, w.start) > .5*min(end-start, w.end-w.start) for w in heard):
+            continue
+        confirmed.append(word)
+    if not confirmed:
+        return original
+    pieces = [(w["start"], w["end"], w["text"], w["language"],
+               info.language_probability if w["language"] == info.language else None, True) for w in confirmed]
+    support = None
+    for w in heard:
+        adjacent = [v for v in confirmed if v["start"]-1 < w.end and w.start < v["end"]+1]
+        if any(token(v["text"]) == token(w.word) or
+               min(v["end"], w.end) > max(v["start"], w.start) for v in adjacent):
+            continue
+        if adjacent and w.probability < .6:
+            # The adjacent weak syllable may be another real word. Check it
+            # on the original turn before accepting or dropping that neighbor.
+            if support is None:
+                support = []
+                if original_audio is not None:
+                    decoded, _ = whisper.transcribe(original_audio, language=info.language, beam_size=3,
+                                                    word_timestamps=True, condition_on_previous_text=False)
+                    support = [v for c in decoded if c.avg_logprob >= -1.1 and c.no_speech_prob < .65
+                               for v in c.words or [] if v.probability >= .6]
+            if not any(token(v.word) == token(w.word) and abs(v.start+v.end-w.start-w.end) <= .7 for v in support):
+                continue
+        pieces.append((w.start, w.end, w.word, info.language, info.language_probability, False))
+    groups = []
+    for start, end, text, lang, confidence, verified in sorted(pieces, key=lambda p: p[0]):
+        if groups and groups[-1][3] == lang and start-groups[-1][1] <= .45:
+            first, last, words, _, _, checked = groups[-1]
+            space = "" if lang in {"ja", "zh", "th", "lo", "km", "my"} else " "
+            groups[-1] = (first, max(last, end), words+space+text.strip(), lang, confidence, checked or verified)
+        else:
+            groups.append((start, end, text.strip(), lang, confidence, verified))
+    if len(groups) == 1 and groups[0][5] and exclusive and duration <= 3:
+        # A faint word can be timestamped on its stressed syllable alone. If
+        # this is the only utterance in a short exclusive turn, retain its
+        # acoustic onset and tail for the voice reference as well.
+        return [(0., duration, *groups[0][2:])]
+    return [(max(0., a-.12), min(duration, b+.14), text, lang, confidence, verified)
+            for a, b, text, lang, confidence, verified in groups]
+
+
 def transcribe(dialogue, work, model_cache):
     index = work / "speakers.json"
+    sidecar = dialogue.with_suffix(".words.json")
+    marks, signature = [], ""
+    if sidecar.is_file():
+        marks = json.loads(sidecar.read_text())
+        stem = dialogue.stat()
+        signature = hashlib.sha256(json.dumps([dialogue.name, stem.st_size, stem.st_mtime_ns, marks],
+                                              sort_keys=True).encode()).hexdigest()
+    stamp = work/"speakers-source-words.sha256"
     cached = None
-    if index.exists():
+    if index.is_file() and (stamp.read_text() if stamp.is_file() else "") == signature:
         result = json.loads(index.read_text())
         if all((work / f"speaker-{c['speaker']}.wav").is_file() and c.get("clip") and (work / c["clip"]).is_file() for c in result):
             if all("languageProbability" in c for c in result):
@@ -357,35 +485,51 @@ def transcribe(dialogue, work, model_cache):
             # Retain quiet simultaneous voices in the diarization input even
             # when the cinematic separator classifies one of them as background.
             guide = (samples + original.mean(axis=1)) * .5
-            segments = sd.process(guide).sort_by_start_time()
-            turns = [(max(0, round(s.start*16000)), min(len(samples), round(s.end*16000)), s.speaker) for s in segments if s.end > s.start]
+            origin = start/44100
+            words = [w for w in marks if w["end"] > origin and w["start"] < origin+len(samples)/16000]
+            # Where the stem failed, its changing level can split one original
+            # word into two apparent turns. Use the intact source for that context.
+            for w in words:
+                left = max(0, round((w["start"]-origin-1)*16000))
+                right = min(len(samples), round((w["end"]-origin+1)*16000))
+                guide[left:right] = original[left:right].mean(axis=1)
+            def detect(signal):
+                segments = sd.process(signal).sort_by_start_time()
+                return [(max(0, round(s.start*16000)), min(len(samples), round(s.end*16000)), s.speaker)
+                        for s in segments if s.end > s.start]
+            turns = detect(guide)
+            if words:
+                turns = join_restored_fragments(turns, detect(original.mean(axis=1)), words, origin)
+            annotations = verified_turns(words, turns, origin)
             turns_audio = speaker_audio(samples, original, turns, extractor, voices, separators)
             last_percent = -1
-            for offset, speaker, audio, direction, overlapping in turns_audio:
+            for (offset, speaker, audio, direction, overlapping), restored in zip(turns_audio, annotations, strict=True):
                 percent = int(15 + 12 * (start + offset * 44100 / 16000) / len(src))
                 if percent > last_percent:
                     progress("Identifying and transcribing speakers", percent)
                     last_percent = percent
                 if len(audio) < 1600:
                     continue
-                chunks, info = whisper.transcribe(audio, beam_size=2, condition_on_previous_text=False)
-                for chunk in chunks:
-                    text = chunk.text.strip()
-                    if not text or chunk.no_speech_prob > .65 and chunk.avg_logprob < -1:
-                        continue
-                    t0 = max(0, chunk.start)
-                    t1 = min(len(audio)/16000, chunk.end)
+                source_turn = original[offset:offset+len(audio)].mean(axis=1) if restored else None
+                transcript = turn_transcript(whisper, audio, restored, source_turn, exclusive=not overlapping)
+                for t0, t1, text, language, confidence, verified in transcript:
                     if t1-t0 < .08:
                         continue
                     at = start/44100 + offset/16000
                     clip = f"turn-{len(cues)}.flac"
                     sf.write(work/clip, audio[round(t0*16000):round(t1*16000)], 16000)
-                    cues.append(dict(start=at+t0, end=at+t1, speaker=speaker, language=info.language,
-                                     languageProbability=info.language_probability, text=text, clip=clip,
-                                     direction=direction, overlapping=overlapping))
+                    cue = dict(start=at+t0, end=at+t1, speaker=speaker, language=language,
+                               languageProbability=confidence, text=text, clip=clip, direction=direction, overlapping=overlapping)
+                    if verified:
+                        cue["verifiedSource"] = True
+                    cues.append(cue)
             progress("Identifying and transcribing speakers", 15 + 12 * min(1, (start + len(samples)*44100/16000)/len(src)))
     cues.sort(key=lambda c: c["start"])
     resolve_short_languages(cues, work, whisper)
     speaker_references(cues, work)
     save_json(index, cues)
+    if signature or stamp.is_file():
+        partial = stamp.with_suffix(".partial")
+        partial.write_text(signature)
+        partial.replace(stamp)
     return cues

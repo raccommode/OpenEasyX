@@ -12,9 +12,25 @@ from unittest.mock import Mock, patch
 
 import runtime
 from model_assets import verified_asset
+from pipeline import reuse_separated_source
 
 
 class DubbingRuntimeTests(unittest.TestCase):
+    def test_a_new_analysis_reuses_only_completed_source_stems(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)/"audio-5"
+            target = Path(directory)/"audio-6"
+            source.mkdir()
+            target.mkdir()
+            (source/"mix.wav").write_bytes(b"original")
+            (source/"speakers.json").write_text("[]")
+            reuse_separated_source(source, target)
+            self.assertEqual(list(target.iterdir()), [])
+            (source/"dialogue-bandit-v2.wav").write_bytes(b"speech")
+            reuse_separated_source(source, target)
+            self.assertEqual(sorted(p.name for p in target.iterdir()), ["dialogue-bandit-v2.wav", "mix.wav"])
+            self.assertEqual((target/"mix.wav").read_bytes(), b"original")
+
     def test_pinned_models_use_the_complete_local_cache_without_an_online_lookup(self):
         hub = Mock()
         with patch.dict(sys.modules, {"huggingface_hub": hub}), patch.dict(os.environ, {"EASYX_DUBBING_MODELS": ""}):

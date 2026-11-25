@@ -9,6 +9,16 @@ from unittest.mock import Mock, patch
 
 @unittest.skipUnless(all(importlib.util.find_spec(k) for k in ("soundfile", "torch", "transformers")), "requires the dubbing runtime")
 class TranslationTests(unittest.TestCase):
+    def test_a_verified_word_recovered_from_the_original_uses_its_transcript(self):
+        import speech_translation as st
+        with TemporaryDirectory() as folder:
+            work = Path(folder)
+            cues = [dict(language="en", speaker=1, text="Goodnight", verifiedSource=True)]
+            with patch.object(st, "model_path", side_effect=AssertionError("unexpected speech model load")), \
+                 patch.object(st, "translate", return_value=["Bonne nuit"]) as translate:
+                self.assertEqual(st.translate_speech(cues, "fr", work, work/"fr.json"), ["Bonne nuit"])
+            translate.assert_called_once_with(cues, "fr", work/"fr.json")
+
     def test_tight_cuda_uses_compact_cpu_and_real_oom_preserves_completed_translations(self):
         import speech_translation as st
         import torch

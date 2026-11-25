@@ -317,7 +317,7 @@ it("publishes distinct audio and lip-sync revisions and keeps serving the last c
     const audio = service.file(media, "fr")!;
     config.lipSync = true;
     service.sync();
-    await vi.waitFor(() => expect(runs[1]?.job).toMatchObject({ lipSync: true, previousOutput: { path: audio, renderVersion: "5-audio" } }));
+    await vi.waitFor(() => expect(runs[1]?.job).toMatchObject({ lipSync: true, previousOutput: { path: audio, renderVersion: localDubbing.manifest.dubbingRenderVersion } }));
     expect(service.file(media, "fr")).toBe(audio);
     config.lipSync = false;
     service.sync();
@@ -342,7 +342,7 @@ it("publishes distinct audio and lip-sync revisions and keeps serving the last c
     expect(visual).not.toBe(audio);
     config.lipSync = false;
     service.sync();
-    await vi.waitFor(() => expect(runs[4]?.job).toMatchObject({ lipSync: false, previousOutput: { path: visual, renderVersion: "5-lips" } }));
+    await vi.waitFor(() => expect(runs[4]?.job).toMatchObject({ lipSync: false, previousOutput: { path: visual, renderVersion: localDubbing.manifest.dubbingLipSyncRenderVersion } }));
     expect(fs.readFileSync(service.file(media, "fr")!, "utf8")).toBe("animated");
     runs[4].finish();
     await vi.waitFor(() => expect(service.file(media, "fr")).toBe(audio));

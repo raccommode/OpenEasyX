@@ -19,12 +19,13 @@ print('EASYX {"outcome":"rendered","lipSyncFrames":17}')
     vi.stubEnv("EASYX_DUBBING_PYTHON", exe);
     const context = { config: {}, signal: new AbortController().signal, fetch, runCommand: vi.fn(), log: vi.fn() };
     const job = { mediaId: "example", fingerprint: "sample", language: "fr", source: root, dataDir: root, workDir: path.join(root, "work"), output: path.join(root, "reported.json") };
-    const obsolete = { path: root, renderVersion: "4", lipSyncFrames: 10 };
+    const obsolete = { path: root, renderVersion: "5-lips", lipSyncFrames: 10 };
     await plugin.renderDub!(context, { ...job, previousOutput: obsolete }, vi.fn());
     const audio = JSON.parse(fs.readFileSync(job.output, "utf8"));
-    expect(audio).toMatchObject({ lipSync: false, workDir: path.join(root, "work", "audio-5"), speechCacheDir: path.join(root, "audio-5") });
+    expect(audio).toMatchObject({ lipSync: false, audioGeneration: "6", workDir: path.join(root, "work", "audio-6"),
+      previousStemDir: path.join(root, "work", "audio-5"), speechCacheDir: path.join(root, "audio-6") });
     expect(audio.previousOutput).toBeUndefined();
-    const previousOutput = { path: root, renderVersion: "5-audio", lipSyncFrames: 0 };
+    const previousOutput = { path: root, renderVersion: plugin.manifest.dubbingRenderVersion!, lipSyncFrames: 0 };
     const result = await plugin.renderDub!(context, { ...job, lipSync: true, previousOutput }, vi.fn());
     const visual = JSON.parse(fs.readFileSync(job.output, "utf8"));
     expect(visual).toMatchObject({ lipSync: true, workDir: audio.workDir, speechCacheDir: audio.speechCacheDir, previousOutput });
@@ -78,7 +79,7 @@ finally:
       { mediaId: "test", fingerprint: "test", language: "fr", source, dataDir: root, workDir, output: path.join(root, "fr.mp4") },
       vi.fn(),
     )).rejects.toMatchObject({ code: "DUBBING_RUNTIME_SETUP", message: "Cannot install the torch CPU wheel" });
-    expect(fs.readdirSync(workDir)).toEqual(["audio-5"]);
+    expect(fs.readdirSync(workDir)).toEqual(["audio-6"]);
   } finally {
     vi.unstubAllEnvs();
     fs.rmSync(root, { recursive: true, force: true });
@@ -97,7 +98,7 @@ it("restores the original picture and retains the published speech packets when 
     const result = await plugin.renderDub!(
       { config: {}, signal: new AbortController().signal, fetch, runCommand: vi.fn(), log: vi.fn() },
       { mediaId: "sample", fingerprint: "sample", language: "fr", source, lipSync: false,
-        dataDir: root, workDir: path.join(root, "work"), output, previousOutput: { path: previous, renderVersion: "5-lips", lipSyncFrames: 12 } }, vi.fn(),
+        dataDir: root, workDir: path.join(root, "work"), output, previousOutput: { path: previous, renderVersion: plugin.manifest.dubbingLipSyncRenderVersion!, lipSyncFrames: 12 } }, vi.fn(),
     );
     expect(result).toEqual({ outcome: "rendered", lipSyncFrames: 0 });
     function packets(file: string, stream: string, fields: string) {

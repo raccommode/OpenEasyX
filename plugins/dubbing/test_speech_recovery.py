@@ -19,6 +19,22 @@ if REQUIRED:
 
 @unittest.skipUnless(REQUIRED, "requires the optional dubbing Python environment")
 class SpeechRecoveryTests(unittest.TestCase):
+    def test_changed_isolated_audio_cannot_reuse_a_translation_or_clone_by_cue_number(self):
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            sf.write(work/"mix.wav", np.full(16000, .1), 16000)
+            cue = dict(text="Hello", language="en", start=0., end=1., speaker=0, clip="voice.flac")
+            sf.write(work/cue["clip"], np.full(16000, .1), 16000)
+            original, first = speech_review.review_transcript([cue], work, work)
+            (first/"translation-fr.json").write_text('["Bonjour"]')
+            self.assertEqual(original, [cue])
+            self.assertEqual(speech_review.review_transcript([cue], work, work)[1], first)
+            sf.write(work/cue["clip"], np.full(16000, .2), 16000)
+            unchanged_text, second = speech_review.review_transcript([cue], work, work)
+            self.assertEqual(unchanged_text, original)
+            self.assertNotEqual(first, second)
+            self.assertFalse((second/"translation-fr.json").exists())
+
     def test_unvoiced_guesses_cannot_displace_cached_phrases(self):
         with TemporaryDirectory() as root:
             work = Path(root)
@@ -79,6 +95,109 @@ class SpeechRecoveryTests(unittest.TestCase):
             self.assertEqual(recovered[0]["speaker"], 2)
             self.assertTrue((work/recovered[0]["clip"]).is_file())
             references.assert_called_once_with(recovered, work, stage)
+
+    @staticmethod
+    def words(start, end, text=" Wait", probability=.9):
+        word = SimpleNamespace(start=start, end=end, word=text, probability=probability)
+        return ([SimpleNamespace(words=[word], avg_logprob=-.2, no_speech_prob=.02)],
+                SimpleNamespace(language="en", language_probability=.9))
+
+    def test_faint_turn_recovers_a_real_short_word_when_separation_erased_it(self):
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            sf.write(work/"mix.wav", np.full(12*16000, .03), 16000)
+            sf.write(work/"faint.flac", np.full(6400, .00007), 16000)
+            cue = dict(text="Guess", language="en", languageProbability=.35, speaker=2,
+                       start=5., end=5.4, clip="faint.flac")
+            model = Mock()
+            model.transcribe.side_effect = [self.words(3.54, 3.82), self.words(5.08, 5.32)]
+            with patch.object(speech_review, "whisper_model", return_value=model), patch("dialogue.speaker_references"):
+                verified, stage = speech_review.review_transcript([cue], work, work)
+            self.assertEqual(len(verified), 1)
+            self.assertEqual((verified[0]["text"], verified[0]["speaker"]), ("Wait", 2))
+            self.assertEqual(sf.info(work/verified[0]["clip"]).frames, 6400)
+            self.assertIn("verified-speech-v2-", stage.name)
+
+    def test_context_excludes_neighbouring_and_zero_duration_words_even_on_a_nonzero_clip(self):
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            sf.write(work/"mix.wav", np.full(12*16000, .03), 16000)
+            sf.write(work/"faint.flac", np.full(6400, .00007), 16000)
+            cue = dict(text="Guess", language="en", languageProbability=.4, speaker=2,
+                       start=5., end=5.4, clip="faint.flac")
+            model = Mock()
+            # The first word straddles two turns but belongs to the next
+            # speaker. The other is a Whisper word collapsed to one timestamp.
+            model.transcribe.side_effect = [self.words(3.78, 4.13), self.words(5.2, 5.2)]
+            with patch.object(speech_review, "whisper_model", return_value=model):
+                verified, _ = speech_review.review_transcript([cue], work, work)
+            self.assertEqual(verified, [])
+
+    def test_impossible_rate_in_loud_overlap_does_not_borrow_another_speakers_word(self):
+        self.assertFalse(speech_review.impossible_word_rate("Yes, sir!", .23))
+        self.assertFalse(speech_review.impossible_word_rate("是的", .2))
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            sf.write(work/"mix.wav", np.full(12*16000, .05), 16000)
+            sf.write(work/"voice.flac", np.full(4000, .02), 16000)
+            cue = dict(text="One two three four", language="en", languageProbability=.9, speaker=1,
+                       start=5., end=5.25, clip="voice.flac", overlapping=True)
+            model = Mock()
+            model.transcribe.side_effect = [self.words(.02, .2, " Stop"),
+                                            self.words(3.53, 3.72), self.words(5.03, 5.19)]
+            with patch.object(speech_review, "whisper_model", return_value=model):
+                verified, _ = speech_review.review_transcript([cue], work, work)
+            self.assertEqual(verified, [])
+
+    def test_corrected_overlap_keeps_the_separated_speakers_clip_and_language(self):
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            sf.write(work/"mix.wav", np.full(12*16000, .05), 16000)
+            isolated = np.linspace(-.2, .2, 4000, dtype="float32")
+            sf.write(work/"voice.flac", isolated, 16000)
+            cue = dict(text="One two three four", language="fr", languageProbability=.5, speaker=3,
+                       start=5., end=5.25, clip="voice.flac", overlapping=True)
+            model = Mock()
+            model.transcribe.side_effect = [self.words(.02, .2), self.words(3.53, 3.72)]
+            with patch.object(speech_review, "whisper_model", return_value=model), patch("dialogue.speaker_references"):
+                verified, _ = speech_review.review_transcript([cue], work, work)
+            self.assertEqual((verified[0]["speaker"], verified[0]["language"], verified[0]["text"]), (3, "en", "Wait"))
+            saved, rate = sf.read(work/verified[0]["clip"])
+            self.assertEqual(rate, 16000)
+            self.assertGreater(np.corrcoef(saved, isolated)[0, 1], .999)
+
+    def test_one_cut_of_the_same_recording_cannot_corroborate_itself(self):
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            sf.write(work/"mix.wav", np.full(6400, .05), 16000)
+            sf.write(work/"voice.flac", np.zeros(6400), 16000)
+            cue = dict(text="Guess", language="en", languageProbability=.35, speaker=2,
+                       start=0., end=.4, clip="voice.flac")
+            model = Mock()
+            model.transcribe.return_value = self.words(.05, .29)
+            with patch.object(speech_review, "whisper_model", return_value=model):
+                with self.assertRaisesRegex(ValueError, "reliable source transcript"):
+                    speech_review.review_transcript([cue], work, work)
+            self.assertEqual(model.transcribe.call_count, 1)
+
+    def test_review_uses_the_supplied_diarization_stem_and_keys_the_cache_by_its_version(self):
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            sf.write(work/"mix.wav", np.full(12*16000, .03), 16000)
+            sf.write(work/"new-stem.wav", np.full(12*16000, .04), 16000)
+            sf.write(work/"faint.flac", np.zeros(6400), 16000)
+            cue = dict(text="Guess", language="en", languageProbability=.35, speaker=2,
+                       start=5., end=5.4, clip="faint.flac")
+            first = self.words(3.54, 3.82)
+            empty = ([], first[1])
+            model = Mock()
+            model.transcribe.side_effect = [first, empty, empty, first, empty, empty]
+            with patch.object(speech_review, "whisper_model", return_value=model), patch("dialogue.speaker_references"):
+                restored, stage = speech_review.review_transcript([cue], work, work, dialogue=work/"new-stem.wav")
+                previous, previous_stage = speech_review.review_transcript([cue], work, work)
+            self.assertNotEqual(stage, previous_stage)
+            self.assertEqual(restored[0]["text"], "Wait")
+            self.assertEqual(previous, [])
 
     def test_only_missing_or_empty_cached_translations_are_generated(self):
         with TemporaryDirectory() as root:

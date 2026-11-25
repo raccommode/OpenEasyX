@@ -9,17 +9,17 @@ import subtitleLanguages from "../../packages/translation-languages.json" with {
 
 const supported = new Set(["en", "fr", "es", "de", "it", "pt", "ru", "ja", "ko", "zh"]);
 const languages = subtitleLanguages.filter(({ code }) => supported.has(code)).map(({ code, label }) => ({ code, label }));
-const audioGeneration = "5";
+const audioGeneration = "6";
 const audioRevision = audioGeneration + "-audio";
 const lipRevision = audioGeneration + "-lips";
 const compatibleRevisions = [audioRevision, lipRevision];
 
 export default definePlugin({
   manifest: {
-    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.4.1", author: "Open EasyX",
+    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.5.0", author: "Open EasyX",
     capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: audioRevision,
     dubbingLipSyncRenderVersion: lipRevision, dubbingPreviousRenderVersions: compatibleRevisions,
-    dubbingRecheckSilentVersions: ["", "1", "2", "3", "4"],
+    dubbingRecheckSilentVersions: ["", "1", "2", "3", "4", "5-audio", "5-lips"],
     description: "Translate dialogue locally using each speaker’s voice. Enable lip sync to animate visible speakers.",
     settings: [
       ...languages.map(({ code, label }) => ({ key: code, label, type: "boolean" as const, default: false })),
@@ -36,7 +36,8 @@ export default definePlugin({
       // Both modes share the same speech analysis. Older audio checkpoints use a different separation pipeline.
       const cache = "audio-" + audioGeneration;
       const previous = job.previousOutput;
-      const workerJob = { ...job, lipSync: job.lipSync ?? (config.lipSync === true),
+      const workerJob = { ...job, audioGeneration, lipSync: job.lipSync ?? (config.lipSync === true),
+        previousStemDir: path.join(job.workDir, "audio-5"),
         workDir: path.join(job.workDir, cache), speechCacheDir: path.join(path.dirname(job.workDir), cache),
         previousOutput: previous && compatibleRevisions.includes(previous.renderVersion) ? previous : undefined };
       await writeFile(jobFile, JSON.stringify(workerJob), { flag: "wx", mode: 0o600 });

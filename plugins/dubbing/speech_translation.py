@@ -74,7 +74,9 @@ def translate_speech(cues, target, work, cache):
     for i, cue in enumerate(cues):
         if cue["language"] == target:
             texts[i] = cue["text"]
-        elif texts[i] is None and model_language(cue["language"]) in SPEECH_INPUTS:
+        # These words were verified on the original recording because the
+        # isolated voice lost part of the utterance. Translate the verified text.
+        elif texts[i] is None and not cue.get("verifiedSource") and model_language(cue["language"]) in SPEECH_INPUTS:
             pending.append(i)
     backend = device()
     if pending:

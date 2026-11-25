@@ -380,6 +380,29 @@ class LipSyncTests(unittest.TestCase):
             self.assertEqual((frames[-1].pts+frames[-1].duration)*frames[-1].time_base, 2)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "requires ffmpeg")
+    def test_speaker_context_before_delayed_audio_matches_the_source_packet_clock(self):
+        import active_speaker
+        rate = 16000
+        mix, source = self.tmp/"mix.wav", self.tmp/"delayed.mov"
+        signal = np.random.default_rng(7).uniform(-.2, .2, rate).astype("float32")
+        sf.write(mix, signal, rate, subtype="PCM_16")
+        subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=s=96x64:r=25:d=2",
+                        "-itsoffset", "0.879", "-i", str(mix), "-map", "0:v", "-map", "1:a",
+                        "-c:v", "libx264", "-c:a", "pcm_s16le", "-movie_timescale", "90000", str(source)], check=True)
+        observed = [(i/25-.60, np.float32([12, 12, 32, 32])) for i in range(26)]
+        waveforms = []
+        for cached in (True, False):
+            model = Mock()
+            model.scores.side_effect = lambda pictures, wave: np.ones(len(pictures))
+            with av.open(source) as media, (sf.SoundFile(mix) if cached else av.open(source)) as audio:
+                active_speaker._score_window(media, audio, model, observed)
+            waveforms.append(model.scores.call_args.args[1])
+        blank = round(.60*rate)
+        self.assertFalse(np.any(waveforms[0][:blank]))
+        self.assertGreater(np.max(abs(waveforms[0][blank:])), .1)
+        np.testing.assert_allclose(waveforms[0], waveforms[1], atol=1e-6)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "requires ffmpeg")
     def test_render_rejects_a_video_with_no_decodable_frames(self):
         source = self.damaged_video(range(20))
         voice, output = self.tmp/"mix.wav", self.tmp/"dub.mp4"

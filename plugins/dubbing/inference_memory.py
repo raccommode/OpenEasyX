@@ -1,6 +1,16 @@
 """Memory placement for the local speech models."""
+import gc
 import os
 from pathlib import Path
+
+
+def release_models():
+    import torch
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
 
 def cuda_allocation_failed(error):
