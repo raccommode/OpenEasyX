@@ -9,11 +9,41 @@ from unittest.mock import Mock, patch
 
 @unittest.skipUnless(all(importlib.util.find_spec(k) for k in ("soundfile", "torch", "transformers")), "requires the dubbing runtime")
 class TranslationTests(unittest.TestCase):
+    def test_pair_replaces_stale_translations_keeps_original_cues_and_resumes_after_reordering(self):
+        from speech_translation import translate_speech
+        import paired_translation as pair
+        cues = [dict(language="en", text="Wait!", verifiedSource=True),
+                dict(language="en", text="Oh", preserveOriginal=True),
+                dict(language="fr", text="Déjà là"),
+                dict(language="en", text="Wait!")]
+        with TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            target = work/"translation-fr.json"
+            target.write_text(json.dumps(["Je vous parle."]*4))
+            with patch.object(pair, "translate_pair_lines", return_value=["Attends !"]) as model:
+                self.assertEqual(translate_speech(cues, "fr", work, target),
+                                 ["Attends !", "Oh", "Déjà là", "Attends !"])
+                self.assertEqual(translate_speech(cues[::-1], "fr", work, target),
+                                 ["Attends !", "Déjà là", "Oh", "Attends !"])
+            model.assert_called_once_with(["Wait!"], "translation_en_fr")
+
+    def test_split_sentences_protect_numbers_and_names_only_when_needed(self):
+        from paired_translation import translate_sentences
+        data = {"Hey!": "Hé !", "Come in!": "Entrez !", "Wait for 72?": "Attendre ?",
+                "Wait for": "Attendre", "Thank you AK.": "Merci pour votre visite.",
+                "Thank you": "Merci.", "AK": "AK", "Oh": "Oh", "No, no, no.": "Non, non, non.",
+                "It's 1,234 at 8:15.": "C’est 1 234 à 8h15.", "All five.": "Tous les 5."}
+        lines = ["Hey! Come in!", "Wait for 72?", "Thank you AK.", "Oh", "No, no, no.",
+                 "It's 1,234 at 8:15.", "All five."]
+        self.assertEqual(translate_sentences(lines, lambda inputs: [data[i] for i in inputs]),
+                         ["Hé ! Entrez !", "Attendre 72?", "Merci, AK.", "Oh", "Non, non, non.",
+                          "C’est 1 234 à 8h15.", "Tous les 5."])
+
     def test_a_verified_word_recovered_from_the_original_uses_its_transcript(self):
         import speech_translation as st
         with TemporaryDirectory() as folder:
             work = Path(folder)
-            cues = [dict(language="en", speaker=1, text="Goodnight", verifiedSource=True)]
+            cues = [dict(language="es", speaker=1, text="Buenas noches", verifiedSource=True)]
             with patch.object(st, "model_path", side_effect=AssertionError("unexpected speech model load")), \
                  patch.object(st, "translate", return_value=["Bonne nuit"]) as translate:
                 self.assertEqual(st.translate_speech(cues, "fr", work, work/"fr.json"), ["Bonne nuit"])
@@ -25,7 +55,7 @@ class TranslationTests(unittest.TestCase):
         import transformers
         for tight in (True, False):
             with self.subTest(tight=tight), TemporaryDirectory() as folder:
-                cues = [dict(language="en", speaker=0, text=str(i)) for i in range(3)]
+                cues = [dict(language="es", speaker=0, text=str(i)) for i in range(3)]
                 runs = []
                 def generate(_model, _processor, cue, _work, _target, backend, dtype):
                     runs.append((cue["text"], backend, dtype))
@@ -46,8 +76,8 @@ class TranslationTests(unittest.TestCase):
     def test_separate_clips_and_transcript_fallback_preserve_overlapping_speaker_positions(self):
         import speech_translation as st
         import transformers
-        cues = [dict(speaker=1, text="At eight", language="en", clip="1.flac", overlapping=True),
-                dict(speaker=3, text="Here is the map", language="en", clip="3.flac", overlapping=True),
+        cues = [dict(speaker=1, text="A las ocho", language="es", clip="1.flac", overlapping=True),
+                dict(speaker=3, text="Aquí está el mapa", language="es", clip="3.flac", overlapping=True),
                 dict(speaker=1, text="Merci", language="fr", clip="1b.flac")]
         with TemporaryDirectory() as tmp:
             path = Path(tmp)/"translation-fr.json"

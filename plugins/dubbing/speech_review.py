@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import unicodedata
+from functools import cache
 
 import numpy as np
 import soundfile as sf
@@ -41,7 +42,7 @@ def speech_spans(samples, start, end, *, normalize=True):
             if min(span["end"], end) - max(span["start"], start) >= min(1280, (end-start)*.5)]
 
 
-def source_window(source, cue, padding):
+def original_channels(source, cue, padding):
     rate = source.samplerate
     first = max(0, round((cue["start"] - padding) * rate))
     last = min(len(source), round((cue["end"] + padding) * rate))
@@ -49,8 +50,76 @@ def source_window(source, cue, padding):
         raise ValueError(f"No source audio available at {cue['start']:.2f}s")
     source.seek(first)
     block = source.read(last-first, dtype="float32", always_2d=True)
+    if not np.isfinite(block).all():
+        raise ValueError(f"Non-finite source audio at {cue['start']:.2f}s")
+    return block, first/rate
+
+
+def source_window(source, cue, padding):
+    block, start = original_channels(source, cue, padding)
     channel = np.argmax(np.mean(block**2, axis=0))
-    return at16(block[:, channel], rate), first/rate
+    return at16(block[:, channel], source.samplerate), start
+
+
+def vocal_evidence(samples, get_classifier):
+    if not len(samples) or np.ptp(samples) < 1e-6:
+        return False
+    spans = speech_spans(samples, 0, len(samples), normalize=False)
+    # A momentary VAD hit alone also occurs on animal calls and transients.
+    # For short interjections the speech classifier can corroborate the sound.
+    voiced = sum(last-first for first, last in spans)
+    if voiced >= min(8000, len(samples)*.5) or get_classifier()(samples)[0]:
+        return True
+    # When raising the level, require a speech event (excludes singing and
+    # music) and an independent VAD hit on that same amplified waveform.
+    gain = min(16., .4 / np.max(np.abs(samples)))
+    if gain <= 1.:
+        return False
+    louder = samples*gain
+    return bool(speech_spans(louder, 0, len(louder), normalize=False) and get_classifier()(louder)[0])
+
+
+def may_contain_speech(original, cue, isolated, get_classifier):
+    # The active microphone need not be the loudest channel. Check the cue
+    # itself so speech outside its bounds cannot turn a sound effect into a line.
+    block, _ = original_channels(original, cue, 0.)
+    if not np.ptp(block, axis=0).any():
+        return False
+    if vocal_evidence(isolated, get_classifier):
+        return True
+    return any(vocal_evidence(at16(channel, original.samplerate), get_classifier) for channel in block.T)
+
+
+def duplicate_overlap(cue, isolated, cues, work, get_classifier):
+    # A phantom second speaker can be a short, leaked copy of a real line.
+    # Require a separately transcribed, longer turn covering the entire clip.
+    if not cue.get("overlapping") or not np.any(isolated):
+        return False
+    for other in cues:
+        if (other["speaker"] == cue["speaker"] or other["start"] > cue["start"] or other["end"] < cue["end"]
+                or other["end"]-other["start"] <= cue["end"]-cue["start"]
+                or (other.get("languageProbability") or 0) < .8 or suspect_text(other)
+                or impossible_word_rate(other["text"], other["end"]-other["start"])):
+            continue
+        with sf.SoundFile(work/other["clip"]) as track:
+            offset = round((cue["start"]-other["start"])*track.samplerate)
+            count = round(len(isolated)*track.samplerate/16000)
+            if count <= 0 or offset + count > len(track):
+                continue
+            track.seek(offset)
+            candidate = at16(track.read(count, dtype="float32"), track.samplerate)
+        length = min(len(candidate), len(isolated))
+        source = candidate[:length]
+        target = isolated[:length]
+        energy = np.dot(source, source)
+        if energy < 1e-8:
+            continue
+        residual = target - source*(np.dot(target, source)/energy)
+        # At least 84% of the power must be explained by the other voice. A
+        # distinct quiet voice in the remainder still warrants preserving it.
+        if np.dot(residual, residual) <= .16*np.dot(target, target) and not vocal_evidence(residual, get_classifier):
+            return True
+    return False
 
 
 def aligned_words(recognizer, audio, origin, cue):
@@ -89,7 +158,7 @@ def impossible_word_rate(text, duration):
     return words >= 3 and words > 10 * duration
 
 
-def review_weak_turn(recognizer, original, separation, cue, isolated):
+def review_weak_turn(get_recognizer, original, separation, cue, isolated):
     # Whisper can confidently guess a word from a breath cut out of its context.
     # A word must also belong to this speaker's time slot in a contextual decode.
     # The separator can erase quiet speech completely, so check the original mix.
@@ -97,21 +166,22 @@ def review_weak_turn(recognizer, original, separation, cue, isolated):
     crop, origin = source_window(original, cue, 0.)
     if not np.any(crop):
         return None, crop
+    if cue.get("overlapping") and not np.any(isolated):
+        return None, isolated
+    recognizer = get_recognizer()
     if cue.get("overlapping"):
         # The live mix contains other speakers. Only the separated turn can
         # corroborate that these words belong to this particular speaker.
-        if not np.any(isolated):
-            return None, isolated
         speaker_words = aligned_words(recognizer, isolated, cue["start"], cue)
         if not speaker_words[2]:
             return None, isolated
-    contexts = set()
+    contexts = {}
     for padding in (3.5, 6.):
         audio, first = source_window(original, cue, padding)
         identity = (first, len(audio))
         if identity in contexts:
             continue
-        contexts.add(identity)
+        contexts[identity] = audio
         result = aligned_words(recognizer, audio, first, cue)
         if cue.get("overlapping"):
             repaired = matching_words(result, speaker_words)
@@ -132,15 +202,16 @@ def review_weak_turn(recognizer, original, separation, cue, isolated):
         checks.append((crop, origin))
     if separation.is_file():
         with sf.SoundFile(separation) as stem:
-            checks.append(source_window(stem, cue, 3.5))
+            audio, first = source_window(stem, cue, 3.5)
+            same_window = contexts.get((first, len(audio)))
+            if np.any(audio) and not np.array_equal(audio, same_window):
+                checks.append((audio, first))
     for audio, first in checks:
         result = aligned_words(recognizer, audio, first, cue)
         for other in previous:
             repaired = matching_words(result, other)
             if repaired:
                 return repaired, crop
-    if all(result[2] for result in previous):
-        raise ValueError(f"Could not recover a reliable source transcript at {cue['start']:.2f}s")
     return None, crop
 
 
@@ -154,18 +225,19 @@ def save_repair(cue, audio, work, stage, index):
 def review_transcript(cues, work, model_cache, *, dialogue=None):
     """Keep legacy translation/WAV indices intact when a defective analysis changes."""
     from dialogue import speaker_references
+    from dialogue_repair import event_classifier
     if not cues:
         return cues, work
     if dialogue is None:
         dialogue = work/"dialogue-bandit-v2.wav"
-    fingerprint = hashlib.sha256(json.dumps([dialogue.name, cues], sort_keys=True).encode())
+    fingerprint = hashlib.sha256(json.dumps(["reviewed-original-intervals", dialogue.name, cues], sort_keys=True).encode())
     landmarks = dialogue.with_suffix(".words.json")
     if landmarks.is_file():
         fingerprint.update(landmarks.read_bytes())
     for cue in cues:
         with (work/cue["clip"]).open("rb") as clip:
             fingerprint.update(hashlib.file_digest(clip, "sha256").digest())
-    stage = work / ("verified-speech-v2-" + fingerprint.hexdigest()[:16])
+    stage = work / ("verified-speech-v3-" + fingerprint.hexdigest()[:16])
     index = stage / "speakers.json"
     if index.is_file():
         try:
@@ -174,114 +246,41 @@ def review_transcript(cues, work, model_cache, *, dialogue=None):
                 return cached, stage
         except (KeyError, TypeError, ValueError, UnicodeError):
             pass
-    reviewed, touched, recognizer = [], set(), None
-    # Whisper can emit a sequence of script-incompatible fragments in one
-    # background sound. Keep the surrounding acoustic context for Silero.
-    suspicious = [suspect_text(cue) for cue in cues]
+    reviewed, touched = [], set()
+    get_recognizer = cache(lambda: whisper_model(model_cache))
+    get_classifier = cache(event_classifier)
     with sf.SoundFile(work/"mix.wav") as original:
         for i, cue in enumerate(cues):
-            malformed = suspicious[i]
             clip, rate = sf.read(work/cue["clip"], dtype="float32")
             if not np.isfinite(clip).all():
                 raise ValueError(f"Non-finite source audio at {cue['start']:.2f}s")
             peak = np.max(np.abs(clip), initial=0.)
             confidence = cue.get("languageProbability")
             duration = cue["end"]-cue["start"]
-            weak = (peak <= .001 and confidence is not None and confidence < .6 and not malformed
+            weak = (peak <= .001 and confidence is not None and confidence < .6
                     and duration <= 3 and len(cue["text"].split()) <= 3)
-            if weak or impossible_word_rate(cue["text"], duration):
-                progress(f"Checking uncertain speech in context at {cue['start']:.2f}s", 28)
-                if recognizer is None:
-                    recognizer = whisper_model(model_cache)
-                repair, audio = review_weak_turn(recognizer, original, dialogue, cue, at16(clip, rate))
-                touched.add(cue["speaker"])
-                if repair:
-                    repaired = dict(cue, **repair)
-                    if suspect_text(repaired) or impossible_word_rate(repair["text"], duration):
-                        raise ValueError(f"Could not recover a reliable source transcript at {cue['start']:.2f}s")
-                    reviewed.append(save_repair(repaired, audio, work, stage, i))
-                continue
-            if not malformed and peak > 0.:
+            impossible = impossible_word_rate(cue["text"], duration)
+            if peak > 0. and not (weak or suspect_text(cue) or impossible):
                 reviewed.append(cue)
                 continue
-            progress(f"Verifying source speech at {cue['start']:.2f}s", 28)
-            start = round(cue["start"] * original.samplerate)
-            stop = round(cue["end"] * original.samplerate)
-            pad = round(.4 * original.samplerate)
-            before = after = i
-            if malformed:
-                while (before > 0 and suspicious[before-1] and cues[before-1]["speaker"] == cue["speaker"]
-                       and cues[before]["start"]-cues[before-1]["end"] <= .25
-                       and cue["start"]-cues[before-1]["start"] < 12):
-                    before -= 1
-                while (after+1 < len(cues) and suspicious[after+1] and cues[after+1]["speaker"] == cue["speaker"]
-                       and cues[after+1]["start"]-cues[after]["end"] <= .25
-                       and cues[after+1]["end"]-cue["end"] < 12):
-                    after += 1
-            first = max(0, round(cues[before]["start"]*original.samplerate)-pad)
-            last = round(cues[after]["end"]*original.samplerate)+pad
-            original.seek(min(len(original), first))
-            block = original.read(last-first, dtype="float32", always_2d=True)
-            if not len(block):
-                raise ValueError(f"No source audio available at {cue['start']:.2f}s")
-            channel = np.argmax(np.mean(block**2, axis=0))
-            raw = at16(block[:, channel], original.samplerate)
-            left = round((start-first)*16000/original.samplerate)
-            right = round((stop-first)*16000/original.samplerate)
+            # Words and language guessed from a zero-valued isolate are equally
+            # unreliable. Redetect both on independently framed original audio.
+            progress(f"Checking uncertain speech in context at {cue['start']:.2f}s", 28)
             isolated = at16(clip, rate)
-            has_isolated = speech_spans(isolated, 0, len(isolated))
-            has_original = speech_spans(raw, left, right)
-            if not has_isolated and not has_original and peak <= .001:
-                # Two independent audio observations contradict a silent clip's
-                # guessed transcript. Retain this interval's original soundtrack.
-                touched.add(cue["speaker"])
-                continue
-            if has_isolated:
-                audio = isolated
-            elif has_original and not cue.get("overlapping"):
-                audio = raw[left:right]
-            else:
-                raise ValueError(f"Could not verify the original speaker at {cue['start']:.2f}s")
-            if recognizer is None:
-                recognizer = whisper_model(model_cache)
-            # For a malformed transcript redetect the language from the recording.
-            # A zero-valued clip's provisional words can also be corroborated by
-            # a fresh decode of the original speaker in the original language.
-            expected = None if malformed else cue["language"]
-            repaired = None
-            for gain in dict.fromkeys([1., min(16., .4/max(float(np.max(np.abs(audio))), 1e-6))]):
-                segments, info = recognizer.transcribe(audio*gain, language=expected, beam_size=3,
-                                                       max_new_tokens=128, condition_on_previous_text=False)
-                segments = list(segments)
-                text = " ".join(s.text.strip() for s in segments).strip()
-                if not text:
-                    continue
-                candidate = dict(cue, text=text, language=info.language, languageProbability=info.language_probability)
-                if suspect_text(candidate):
-                    continue
-                same_words = not malformed and text.casefold().strip() == cue["text"].casefold().strip()
-                corroborated = same_words and all(s.avg_logprob > -1.2 and s.no_speech_prob < .8 for s in segments)
-                if corroborated or all(s.avg_logprob > -1 and s.no_speech_prob < .65 for s in segments):
-                    repaired = candidate
-                    break
-            if (repaired is None and malformed and peak <= .001 and not has_isolated
-                    and not speech_spans(raw, left, right, normalize=False)):
-                # A brief VAD hit only after heavy gain can also be a sound
-                # effect. Check the full acoustic context before ignoring it.
-                context, _ = recognizer.transcribe(raw, beam_size=3, max_new_tokens=192,
-                                                   condition_on_previous_text=False, word_timestamps=True)
-                words = [w.word.strip() for s in context if s.avg_logprob > -1 and s.no_speech_prob < .65
-                         for w in s.words or [] if w.probability >= .5
-                         and any(a <= (w.start+w.end)*8000 < b for a, b in has_original)]
-                if not words:
-                    touched.add(cue["speaker"])
-                    continue
-            if repaired is None:
-                raise ValueError(f"Could not recover a reliable source transcript at {cue['start']:.2f}s")
-            reviewed.append(save_repair(repaired, audio, work, stage, i))
+            repair, audio = review_weak_turn(get_recognizer, original, dialogue, cue, isolated)
             touched.add(cue["speaker"])
+            if repair:
+                repaired = dict(cue, **repair)
+                if not suspect_text(repaired) and not impossible_word_rate(repaired["text"], duration):
+                    reviewed.append(save_repair(repaired, audio, work, stage, i))
+                    continue
+            if impossible and duplicate_overlap(cue, isolated, cues, work, get_classifier):
+                continue
+            if may_contain_speech(original, cue, isolated, get_classifier):
+                progress(f"Keeping unverified original speech at {cue['start']:.2f}–{cue['end']:.2f}s", 28)
+                reviewed.append(dict(cue, text="", preserveOriginal="unverified-source"))
     stage.mkdir(exist_ok=True)
-    affected = [c for c in reviewed if c["speaker"] in touched]
+    affected = [c for c in reviewed if c["speaker"] in touched and not c.get("preserveOriginal")]
     if affected:
         speaker_references(affected, work, stage)
     save_json(index, reviewed)

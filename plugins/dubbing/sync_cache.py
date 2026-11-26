@@ -32,7 +32,9 @@ def keep(job, publication, cues, wav_dir):
             for i, cue in enumerate(cues):
                 item = {k: cue[k] for k in ("start", "end", "speaker")}
                 path = wav_dir / f"{i}.wav"
-                item["translated"] = path.is_file()
+                if cue.get("preserveOriginal"):
+                    item["preserveOriginal"] = cue["preserveOriginal"]
+                item["translated"] = not cue.get("preserveOriginal") and path.is_file()
                 timeline.append(item)
                 if item["translated"]:
                     wave, rate = sf.read(path, dtype="float32")

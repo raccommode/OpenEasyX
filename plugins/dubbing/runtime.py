@@ -156,6 +156,7 @@ def whisper_device():
 
 
 MODELS = {
+    "translation_en_fr": ("Helsinki-NLP/opus-mt-tc-big-en-fr", "6e062862ced6f5622a589ab2aadc2a1d4978db78"),
     "speech_translation": ("facebook/seamless-m4t-v2-large", "5f8cc790b19fc3f67a61c105133b20b34e3dcb76"),
     "voice": ("k2-fsa/OmniVoice", "3fc979d1cd72492cd679c5ac2611e0d7ac047ba1"),
     "translation": ("facebook/nllb-200-distilled-600M", "f8d333a098d19b4fd9a8b18f94170487ad3f821d"),
@@ -170,6 +171,8 @@ MODELS = {
 # Exact inference files in each pinned snapshot. An interrupted download can
 # leave a valid snapshot directory containing only a tokenizer or one shard.
 SNAPSHOT_FILES = {
+    "translation_en_fr": ["config.json", "generation_config.json", "model.safetensors", "source.spm",
+        "target.spm", "tokenizer_config.json", "special_tokens_map.json", "vocab.json"],
     "speech_translation": ["config.json", "generation_config.json", "preprocessor_config.json", "tokenizer_config.json",
         "special_tokens_map.json", "added_tokens.json", "tokenizer.model", "sentencepiece.bpe.model",
         "model.safetensors.index.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],

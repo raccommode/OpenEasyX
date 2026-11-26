@@ -12,7 +12,28 @@ import { PluginManager } from "./plugin-manager.js";
 import { SubtitleService } from "./subtitle-service.js";
 import { DubbingService } from "./dubbing-service.js";
 import { registerLibraryRoutes } from "./library-routes.js";
-import type { DubbingJob, EasyXPlugin } from "../packages/plugin-sdk/index.js";
+import type { DubbingJob, DubbingOriginalInterval, EasyXPlugin } from "../packages/plugin-sdk/index.js";
+
+it("retains publications from libraries created before original-language passage tracking", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-migration-"));
+  let library = new LibraryDatabase(root);
+  try {
+    const mediaDir = path.join(root, "media");
+    const catalog = new Catalog(library, mediaDir, root, false);
+    fs.writeFileSync(path.join(mediaDir, "sample.mp4"), "source");
+    await catalog.scan();
+    const media = library.listMedia({}).items[0];
+    library.sqlite.exec("ALTER TABLE dubbing_outputs DROP COLUMN original_intervals_json");
+    library.sqlite.prepare("INSERT INTO dubbing_outputs(media_id,language,fingerprint,provider,file_key,lip_sync_frames) VALUES(?,'fr',?,?,?,0)")
+      .run(media.id, media.size + ":" + media.modifiedAt, localDubbing.manifest.id, "existing");
+    library.close();
+    library = new LibraryDatabase(root);
+    expect(library.sqlite.prepare("SELECT file_key,lip_sync_frames,original_intervals_json FROM dubbing_outputs").get())
+      .toMatchObject({ file_key: "existing", lip_sync_frames: 0, original_intervals_json: null });
+  } finally {
+    library.close(); fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 it("keeps a migrated dub playable during a revision, interruption and failure, then publishes and revalidates the replacement", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "easyx-dub-revision-"));
@@ -25,13 +46,16 @@ it("keeps a migrated dub playable during a revision, interruption and failure, t
   let release: () => void = () => {};
   let attempts = 0;
   let fail = true;
+  const passages: DubbingOriginalInterval[] = [
+    { start: 4.2, end: 5.75, reason: "unverified-source" }, { start: 72.1, end: 73.5, reason: "unverified-voice" },
+  ];
   const plugin: EasyXPlugin = { ...localDubbing, manifest: { ...localDubbing.manifest, dubbingRenderVersion: "new" }, async renderDub({ signal }, job) {
     attempts++;
     fs.writeFileSync(job.output, "incomplete");
     await new Promise<void>((resolve) => { release = resolve; signal!.addEventListener("abort", () => resolve(), { once: true }); });
     if (fail) throw new Error("Model unavailable");
     fs.writeFileSync(job.output, "new rendition");
-    return { outcome: "rendered", lipSyncFrames: 0 };
+    return { outcome: "rendered", lipSyncFrames: 0, originalIntervals: [...passages].reverse() };
   } };
   vi.spyOn(manager, "dubbingProvider").mockImplementation(() => installed ? plugin : undefined);
   const context = manager.context.bind(manager);
@@ -56,6 +80,8 @@ it("keeps a migrated dub playable during a revision, interruption and failure, t
     service = new DubbingService(library, manager, catalog, root);
     const variant = () => service!.status(media).variants[0];
     expect(variant()).toMatchObject({ status: "ready", updateStatus: "queued", playbackVersion: "legacy" });
+    expect(variant().originalIntervals).toBeUndefined();
+    expect(service.overview().partialDubCount).toBe(0);
     service.sync();
     await vi.waitFor(() => expect(attempts).toBe(1));
     expect(variant().updateStatus).toBe("running");
@@ -85,6 +111,10 @@ it("keeps a migrated dub playable during a revision, interruption and failure, t
     expect((await app.inject(url)).body).toBe("existing");
     release();
     await vi.waitFor(() => expect(variant().lipSyncFrames).toBe(0));
+    const partialStatus = (await app.inject(`/api/media/${media.id}/dubbing`)).json().variants[0];
+    expect(partialStatus.originalIntervals).toEqual(passages);
+    expect((await app.inject("/api/dubbing/status")).json()).toMatchObject({ partialDubCount: 1,
+      partialDubs: [{ id: media.id, language: "fr", originalIntervals: passages }] });
     expect(variant().updateStatus).toBeUndefined();
     expect(variant().playbackVersion).not.toBe("legacy");
     const next = await app.inject({ url: url + "&v=" + variant().playbackVersion, headers: { "if-range": old.headers.etag!, range: "bytes=0-2" } });
@@ -98,6 +128,8 @@ it("keeps a migrated dub playable during a revision, interruption and failure, t
     service.sync();
     expect(service.overview().current).toBeNull();
     expect(variant().lipSyncFrames).toBe(0);
+    installed = false;
+    expect(variant()).toMatchObject({ status: "ready", originalIntervals: passages });
   } finally {
     await service?.close(); await subtitles?.close(); await app.close(); library.close(); db.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -112,13 +144,14 @@ it("offers only verified publications from supported revisions and reuses the sa
   const catalog = new Catalog(library, mediaDir, root, false);
   const manager = new PluginManager(db, []);
   const jobs: DubbingJob[] = [];
+  const passages: DubbingOriginalInterval[] = [{ start: 10, end: 11.5, reason: "unverified-voice" }];
   let finish = false;
   const plugin: EasyXPlugin = { ...localDubbing, manifest: {
     ...localDubbing.manifest, dubbingRenderVersion: "v3", dubbingPreviousRenderVersions: ["v1", "v2"],
   }, async renderDub(_ctx, job) {
     jobs.push(job);
     fs.writeFileSync(job.output, finish ? "updated" : "incomplete");
-    if (!finish) throw new Error("Interrupted upgrade");
+    if (!finish) return { outcome: "rendered", originalIntervals: [{ start: 20, end: 10, reason: "unverified-source" }] };
     return { outcome: "rendered", lipSyncFrames: job.previousOutput?.lipSyncFrames };
   } };
   vi.spyOn(manager, "dubbingProvider").mockReturnValue(plugin);
@@ -131,7 +164,7 @@ it("offers only verified publications from supported revisions and reuses the sa
     await catalog.scan();
     const media = library.listMedia({}).items;
     const expected = new Map<string, DubbingJob["previousOutput"]>();
-    const publish = library.sqlite.prepare("INSERT INTO dubbing_outputs(media_id,language,fingerprint,provider,file_key,lip_sync_frames) VALUES(?,'fr',?,?,?,0)");
+    const publish = library.sqlite.prepare("INSERT INTO dubbing_outputs(media_id,language,fingerprint,provider,file_key,lip_sync_frames,original_intervals_json) VALUES(?,'fr',?,?,?,0,?)");
     for (const item of media) {
       const kind = path.parse(item.relativePath).name;
       const fingerprint = item.size + ":" + item.modifiedAt;
@@ -145,8 +178,8 @@ it("offers only verified publications from supported revisions and reuses the sa
       const file = path.join(dir, key ? "fr." + key + ".mp4" : "fr.mp4");
       fs.mkdirSync(dir, { recursive: true });
       if (kind !== "missing") fs.writeFileSync(file, kind === "empty" ? "" : "published");
-      publish.run(item.id, source, provider, key);
-      expected.set(item.id, kind === "eligible" ? { path: file, renderVersion: revision, lipSyncFrames: 0 } : undefined);
+      publish.run(item.id, source, provider, key, kind === "eligible" ? JSON.stringify(passages) : null);
+      expected.set(item.id, kind === "eligible" ? { path: file, renderVersion: revision, lipSyncFrames: 0, originalIntervals: passages } : undefined);
     }
     service.sync();
     await vi.waitFor(() => expect(service.overview().errors).toHaveLength(kinds.length));
@@ -155,6 +188,8 @@ it("offers only verified publications from supported revisions and reuses the sa
     const item = media.find((item) => expected.get(item.id))!;
     const previous = expected.get(item.id)!;
     expect(service.file(item, "fr")).toBe(previous.path);
+    expect(service.status(item).variants[0]).toMatchObject({ status: "ready", updateStatus: "error", originalIntervals: passages });
+    expect(service.status(item).variants[0].error).toContain("invalid timestamps");
     expect(fs.readFileSync(previous.path, "utf8")).toBe("published");
     finish = true;
     service.retry(item, "fr");
@@ -163,6 +198,8 @@ it("offers only verified publications from supported revisions and reuses the sa
     expect(service.file(item, "fr")).not.toBe(previous.path);
     expect(fs.readFileSync(service.file(item, "fr")!, "utf8")).toBe("updated");
     expect(service.status(item).variants[0].lipSyncFrames).toBe(0);
+    expect(service.status(item).variants[0].originalIntervals).toBeUndefined();
+    expect(service.overview().partialDubs).toEqual([]);
   } finally {
     await service.close(); library.close(); db.close();
     fs.rmSync(root, { recursive: true, force: true });

@@ -54,7 +54,7 @@ def translate(cues, target, cache):
             candidate = None
         if isinstance(candidate, list) and len(candidate) == len(cues):
             cached = candidate
-    texts = [cue["text"] if cue["language"] == target else
+    texts = [cue["text"] if cue["language"] == target or cue.get("preserveOriginal") else
              (cached[i] if cached and isinstance(cached[i], str) and cached[i].strip() else None)
              for i, cue in enumerate(cues)]
     if all(text is not None for text in texts):
@@ -74,9 +74,7 @@ def translate(cues, target, cache):
     target_token = tokenizer.convert_tokens_to_ids(LANGUAGES[target]["nllb"])
     total = texts.count(None)
     translated = 0
-    for source in dict.fromkeys(cue["language"] for cue in cues):
-        if source == target:
-            continue
+    for source in dict.fromkeys(cue["language"] for cue, text in zip(cues, texts) if text is None):
         if source not in LANGUAGES:
             raise ValueError(f"Translation from detected language {source} is unavailable")
         tokenizer.src_lang = LANGUAGES[source]["nllb"]
@@ -157,7 +155,11 @@ def cached_voice(path):
 
 
 def speak(cues, texts, language, work, wav_dir, references=None, model_cache=None):
-    pending = [i for i, cue in enumerate(cues) if cue["language"] != language and not cached_voice(wav_dir/f"{i}.wav")]
+    def needs_take(i):
+        return not (wav_dir/f"{i}.original").exists() and not cached_voice(wav_dir/f"{i}.wav")
+
+    pending = [i for i, cue in enumerate(cues) if not cue.get("preserveOriginal") and
+               cue["language"] != language and needs_take(i)]
     if not pending:
         return
     accelerator = device()
@@ -172,7 +174,7 @@ def speak(cues, texts, language, work, wav_dir, references=None, model_cache=Non
             # Dropping the traceback first releases the failed clone prompts, codec and generation buffers.
             gc.collect()
             torch.cuda.empty_cache()
-            pending = [i for i in pending if not cached_voice(wav_dir/f"{i}.wav")]
+            pending = [i for i in pending if needs_take(i)]
         if pending:
             progress("Cloning voices on CPU while GPU memory is busy", 38 + 30*pending[0]/len(cues))
             synthesize(cues, texts, language, work, wav_dir, pending, "cpu", references, model_cache)
@@ -249,6 +251,10 @@ def verifies_words(recognizer, wave, rate, language, expected):
     return SequenceMatcher(None, target_text, spoken_text, autojunk=False).ratio() >= .65
 
 
+class MissingVoiceReference(ValueError):
+    pass
+
+
 def speaker_reference(speaker, folders, start):
     # Prefer a repaired reference when available, keeping the waveform and
     # transcript of a single original speaker together on every attempt.
@@ -266,7 +272,26 @@ def speaker_reference(speaker, folders, start):
             continue
         if text and audible(audio, rate):
             return audio, rate, text
-    raise ValueError(f"No audible original voice reference for speaker {speaker+1} at {start:.2f}s")
+    raise MissingVoiceReference(f"No audible original voice reference for speaker {speaker+1} at {start:.2f}s")
+
+
+def fit_natural_take(wave, rate, limit):
+    """Fit a complete utterance in its slot without cutting the last word or shifting pitch."""
+    count = round(rate*limit)
+    if len(wave) <= count:
+        return wave
+    peaks = np.flatnonzero(abs(wave) > max(1e-5, .014*float(np.max(abs(wave)))))
+    if len(peaks):
+        pad = round(.045*rate)
+        wave = wave[max(0, peaks[0]-pad):peaks[-1]+pad+1]
+    if len(wave) <= count:
+        return wave
+    if count < 1 or len(wave) > 1.45*count:
+        return np.empty(0, dtype="float32")
+    command = ["ffmpeg", "-nostdin", "-v", "error", "-f", "f32le", "-ar", str(rate), "-ac", "1",
+               "-i", "pipe:0", "-af", f"atempo={len(wave)/count:.8f}", "-f", "f32le", "pipe:1"]
+    data = subprocess.run(command, input=wave.astype("<f4").tobytes(), capture_output=True, check=True).stdout
+    return np.frombuffer(data, dtype="<f4")[:count]
 
 
 def wrong_speaker(vector, speaker, anchors):
@@ -292,7 +317,7 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
     limits = delivery_durations(cues, sf.info(work/"mix.wav").duration)
     prompts, repaired_prompts, alternate_prompts = {}, {}, {}
     folders = [references if references != work else None, wav_dir.parent, work]
-    speakers = {cue["speaker"]: cue["start"] for cue in cues}
+    speakers = {cue["speaker"]: cue["start"] for cue in cues if not cue.get("preserveOriginal")}
 
     @cache
     def reference(speaker):
@@ -323,14 +348,18 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
         cue, text = cues[idx], texts[idx]
         speaker = cue["speaker"]
         if speaker not in prompts:
-            ref_audio, sr, ref_text = reference(speaker)
+            try:
+                ref_audio, sr, ref_text = reference(speaker)
+            except MissingVoiceReference:
+                (wav_dir/f"{idx}.original").touch()
+                continue
             prompt = model.create_voice_clone_prompt(
                 (torch.from_numpy(ref_audio)[None, :], sr), ref_text, preprocess_prompt=False)
             prompts[speaker] = prompt, ref_audio, sr
         prompt, ref_audio, sr = prompts[speaker]
         original_duration = cue["end"]-cue["start"]
         limit = limits[idx]
-        for attempt in range(3):
+        for attempt in range(4):
             if attempt:
                 if speaker not in repaired_prompts:
                     from voice_samples import align_clone_reference
@@ -341,7 +370,7 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
                                                                  preprocess_prompt=False)
                     repaired_prompts[speaker] = prompt
                 prompt = repaired_prompts[speaker]
-                if attempt == 2:
+                if attempt >= 2:
                     if speaker not in alternate_prompts:
                         from voice_samples import alternate_clone_reference
                         alternative = alternate_clone_reference(recognizer(), cues, work, speaker)
@@ -358,13 +387,20 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
                 # On a final retry let the same voice finish in the available
                 # pause rather than repeatedly requesting a clipped delivery.
                 duration = min(limit, max(1.1, duration*1.2+.12))
+            elif attempt == 3:
+                duration = min(1.45*limit+.2, max(1.15, natural, len(text.split())/2.5))
             wave = model.generate(text=text, language=language, voice_clone_prompt=prompt, duration=duration,
                                   num_step=48, pad_duration=0., preprocess_prompt=False)[0]
-            wave = np.asarray(wave, dtype="float32").reshape(-1)[:max(1, round(limit*model.sampling_rate))]
+            wave = np.asarray(wave, dtype="float32").reshape(-1)
+            wave = fit_natural_take(wave, model.sampling_rate, limit)
             if not audible(wave, model.sampling_rate):
                 continue
             if not verifies_words(recognizer(), wave, model.sampling_rate, language, text):
-                continue
+                from voice_trim import trim_verified_take
+                trimmed = trim_verified_take(recognizer(), wave, model.sampling_rate, language, text)
+                if trimmed is None:
+                    continue
+                wave = trimmed
             if len(speakers) > 1 and len(wave) >= .8 * model.sampling_rate:
                 from dialogue import embedding
                 from speech_review import at16
@@ -376,8 +412,9 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
                 prompts[speaker] = prompt, ref_audio, sr
             break
         else:
-            raise ValueError(f"The cloned voice could not produce intelligible {language} speech for speaker "
-                             f"{speaker+1} at {cue['start']:.2f}–{cue['end']:.2f}s after 3 attempts")
+            (wav_dir/f"{idx}.original").touch()
+            progress(f"Keeping original speech for speaker {speaker+1} at {cue['start']:.2f}s", 38+30*(idx+1)/len(cues))
+            continue
         output = wav_dir/f"{idx}.wav"
         temporary = output.with_suffix(".partial.wav")
         sf.write(temporary, wave, model.sampling_rate, subtype="FLOAT")
@@ -612,6 +649,25 @@ def mix_voices(mix, dialogue, cues, wav_dir, work, output, *, language=None):
         dry_path.unlink(missing_ok=True)
 
 
+def original_intervals(cues):
+    """Keep inseparable, overlapping speakers together on their original soundtrack."""
+    groups = []
+    for cue in sorted(cues, key=lambda c: c["start"]):
+        if not groups or cue["start"] >= groups[-1][0]:
+            groups.append([cue["end"], [cue]])
+        else:
+            groups[-1][0] = max(groups[-1][0], cue["end"])
+            groups[-1][1].append(cue)
+    intervals = []
+    for end, turns in groups:
+        reason = next((c["preserveOriginal"] for c in turns if c.get("preserveOriginal")), None)
+        if reason:
+            for cue in turns:
+                cue.setdefault("preserveOriginal", reason)
+            intervals.append({"start": turns[0]["start"], "end": end, "reason": reason})
+    return intervals
+
+
 def turn_fade(at, length, rate):
     return np.clip(np.minimum(at, length-1-at)/(rate*.01), 0, 1)
 
@@ -639,12 +695,15 @@ def preserve_repaired_speech(candidate, cinematic, repaired, start, rate):
 
 def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, regions, targets, *, language=None):
     region = next(regions, None)
+    originals = original_intervals(cues)
     cinematic = work/"dialogue-bandit-v2.wav"
     has_repairs = cinematic.is_file() and not cinematic.samefile(dialogue)
     with sf.SoundFile(mix) as src, sf.SoundFile(dialogue) as speech, sf.SoundFile(output, "w", samplerate=src.samplerate,
             channels=src.channels, format="RF64", subtype="FLOAT") as dst, sf.SoundFile(
                 dry_path, "w", samplerate=src.samplerate, channels=src.channels, format="RF64", subtype="FLOAT") as dry:
         rate = src.samplerate
+        edges = [(round(r["start"]*rate), round(r["end"]*rate)) for r in originals]
+        edge = 0
         active, cursor = [], 0
         for start in range(0, len(src), rate):
             block = src.read(rate, dtype="float32", always_2d=True)
@@ -672,6 +731,9 @@ def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, reg
             active = [item for item in active if max(item[1], item[0]+len(item[2])) > start]
             while cursor < len(cues) and round(cues[cursor]["start"]*rate) < end:
                 cue = cues[cursor]
+                if cue.get("preserveOriginal"):
+                    cursor += 1
+                    continue
                 left = round(cue["start"]*rate)
                 right = round(cue["end"]*rate)
                 dub = wav_dir / f"{cursor}.wav"
@@ -719,7 +781,22 @@ def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, reg
                     vocal[solo] = panned
             # Keep the native channels and phase of music and effects at every
             # sample. ASR gaps and translated pauses must not reopen the source voice.
-            dst.write(block - vocal + retained)
+            bed = block - vocal + retained
+            fade_samples = max(1, round(.008*rate))
+            while edge < len(edges) and edges[edge][1]+fade_samples <= start:
+                edge += 1
+            if edge < len(edges) and edges[edge][0]-fade_samples < end:
+                at = np.arange(start, end)
+                dubbed = np.ones(len(block), dtype="float32")
+                for index in range(edge, len(edges)):
+                    left, right = edges[index]
+                    if left-fade_samples >= end:
+                        break
+                    distance = np.maximum(left-at, at-right+1)
+                    np.minimum(dubbed, np.clip(distance/fade_samples, 0, 1), out=dubbed)
+                bed = block + (bed-block)*dubbed[:, None]
+                voices *= dubbed[:, None]
+            dst.write(bed)
             dry.write(voices)
 
 
@@ -728,7 +805,9 @@ if __name__ == "__main__":
     work, wav_dir = map(Path, sys.argv[1:3])
     language = sys.argv[3]
     try:
-        synthesize(json.loads((wav_dir.parent/"speakers.json").read_text()),
+        cues = json.loads((wav_dir.parent/"speakers.json").read_text())
+        original_intervals(cues)
+        synthesize(cues,
                    json.loads((wav_dir.parent/f"translation-{language}.json").read_text()),
                    language, work, wav_dir, list(map(int, sys.argv[4:])), device(),
                    Path(os.environ.get("EASYX_DUBBING_VOICE_REFS", work)),

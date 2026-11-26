@@ -63,35 +63,73 @@ class SpeechRecoveryTests(unittest.TestCase):
         self.assertFalse(speech_review.suspect_text(dict(cue, text="Meet in 東京")))
         self.assertTrue(speech_review.suspect_text(dict(cue, text="a\ufffdb")))
 
-    def test_heard_but_unrecoverable_utterance_stops_instead_of_publishing_silence(self):
+    def test_unverified_speech_preserves_its_time_and_identity_and_other_speakers_continue(self):
         with TemporaryDirectory() as root:
             work = Path(root)
-            sf.write(work/"mix.wav", np.ones(16000)*.1, 16000)
+            wave = np.sin(2*np.pi*np.arange(32000)*200/16000)*.1
+            sf.write(work/"mix.wav", wave, 16000)
+            sf.write(work/"zero.flac", np.zeros(16000), 16000)
+            sf.write(work/"other.flac", wave[:16000], 16000)
+            cue = dict(text="Guess", language="nn", speaker=0, start=0., end=1., clip="zero.flac")
+            other = dict(text="Hello", language="en", speaker=1, start=1., end=2., clip="other.flac")
+            model = Mock()
+            model.transcribe.return_value = ([], SimpleNamespace(language="en", language_probability=.95))
+            with patch.object(speech_review, "speech_spans", return_value=[(10, 10000)]), \
+                 patch.object(speech_review, "whisper_model", return_value=model), \
+                 patch("dialogue.speaker_references") as references:
+                verified, stage = speech_review.review_transcript([cue, other], work, work)
+                self.assertEqual(verified, [dict(cue, text="", preserveOriginal="unverified-source"), other])
+                self.assertEqual(speech_review.review_transcript([cue, other], work, work), (verified, stage))
+                references.assert_not_called()
+                for call in model.transcribe.call_args_list:
+                    self.assertIsNone(call.kwargs.get("language"))
+
+    def test_transient_vad_on_background_does_not_create_a_preserved_line(self):
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            samples = .01*np.sin(2*np.pi*np.arange(16000)*200/16000)
+            sf.write(work/"mix.wav", samples, 16000)
             sf.write(work/"zero.flac", np.zeros(16000), 16000)
             cue = dict(text="Guess", language="en", speaker=0, start=0., end=1., clip="zero.flac")
             model = Mock()
             model.transcribe.return_value = ([], SimpleNamespace(language="en", language_probability=.95))
-            with patch.object(speech_review, "speech_spans", side_effect=[[], [(10, 10000)]]), \
+            with patch.object(speech_review, "whisper_model", return_value=model), \
+                 patch.object(speech_review, "speech_spans", side_effect=[[(500, 1100)], [(100, 5000)]]), \
+                 patch("dialogue_repair.event_classifier", return_value=lambda audio: (0., .95, .01)):
+                verified, _ = speech_review.review_transcript([cue], work, work)
+            self.assertEqual(verified, [])
+
+    def test_quieter_microphone_with_speech_survives_an_erased_isolate(self):
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            t = np.arange(16000)/16000
+            background, quieter = .4*np.sin(2*np.pi*500*t), .03*np.sin(2*np.pi*180*t)
+            sf.write(work/"mix.wav", np.column_stack([background, quieter]), 16000, subtype="FLOAT")
+            sf.write(work/"zero.flac", np.zeros(16000), 16000)
+            cue = dict(text="Guess", language="en", speaker=2, start=0., end=1., clip="zero.flac")
+            model = Mock()
+            model.transcribe.return_value = ([], SimpleNamespace(language="en", language_probability=.95))
+            classifier = Mock(side_effect=lambda samples: (.7,0.,0.) if np.max(samples) < .1 else (0.,.8,0.))
+            with patch.object(speech_review, "speech_spans", return_value=[]), \
+                 patch("dialogue_repair.event_classifier", return_value=classifier), \
                  patch.object(speech_review, "whisper_model", return_value=model):
-                with self.assertRaisesRegex(ValueError, "reliable source transcript"):
-                    speech_review.review_transcript([cue], work, work)
-            self.assertFalse(list(work.glob("verified-*/speakers.json")))
+                verified, _ = speech_review.review_transcript([cue], work, work)
+            self.assertEqual(verified, [dict(cue, text="", preserveOriginal="unverified-source")])
+            self.assertEqual(classifier.call_count, 2)
 
     def test_recover_source_words_from_the_same_solo_voice_and_keep_its_reference_separate(self):
         with TemporaryDirectory() as root:
             work = Path(root)
-            samples = np.sin(2*np.pi*np.arange(16000)*200/16000)*.1
+            samples = np.sin(2*np.pi*np.arange(12*16000)*200/16000)*.1
             sf.write(work/"mix.wav", samples, 16000)
             sf.write(work/"zero.flac", np.zeros(16000), 16000)
-            cue = dict(text="Guess", language="en", speaker=2, start=0., end=1., clip="zero.flac")
+            cue = dict(text="Guess", language="nn", speaker=2, start=5., end=6., clip="zero.flac")
             model = Mock()
-            model.transcribe.return_value = ([SimpleNamespace(text="Actual speech", avg_logprob=-.15, no_speech_prob=.02)],
-                                             SimpleNamespace(language="en", language_probability=.97))
-            with patch.object(speech_review, "speech_spans", side_effect=[[], [(10, 9000)]]), \
-                 patch.object(speech_review, "whisper_model", return_value=model), \
+            model.transcribe.side_effect = [self.words(3.54, 4.32, " Hello"), self.words(5.08, 5.83, " Hello")]
+            with patch.object(speech_review, "whisper_model", return_value=model), \
                  patch("dialogue.speaker_references") as references:
                 recovered, stage = speech_review.review_transcript([cue], work, work)
-            self.assertEqual(recovered[0]["text"], "Actual speech")
+            self.assertEqual((recovered[0]["text"], recovered[0]["language"]), ("Hello", "en"))
             self.assertEqual(recovered[0]["speaker"], 2)
             self.assertTrue((work/recovered[0]["clip"]).is_file())
             references.assert_called_once_with(recovered, work, stage)
@@ -116,7 +154,7 @@ class SpeechRecoveryTests(unittest.TestCase):
             self.assertEqual(len(verified), 1)
             self.assertEqual((verified[0]["text"], verified[0]["speaker"]), ("Wait", 2))
             self.assertEqual(sf.info(work/verified[0]["clip"]).frames, 6400)
-            self.assertIn("verified-speech-v2-", stage.name)
+            self.assertIn("verified-speech-v3-", stage.name)
 
     def test_context_excludes_neighbouring_and_zero_duration_words_even_on_a_nonzero_clip(self):
         with TemporaryDirectory() as root:
@@ -149,6 +187,24 @@ class SpeechRecoveryTests(unittest.TestCase):
                 verified, _ = speech_review.review_transcript([cue], work, work)
             self.assertEqual(verified, [])
 
+    def test_impossible_overlapping_turn_keeps_a_second_voice_but_drops_a_leaked_copy(self):
+        with TemporaryDirectory() as root:
+            work = Path(root)
+            t = np.arange(16000)/16000
+            speaker = (.2*np.sin(2*np.pi*180*t)).astype("float32")
+            sf.write(work/"other.wav", speaker, 16000, subtype="FLOAT")
+            other = dict(text="A real line", language="en", languageProbability=.99, speaker=1,
+                         start=3., end=4., clip="other.wav")
+            cue = dict(text="Too many guessed words", language="en", speaker=2,
+                       start=3.25, end=3.5, overlapping=True)
+            leak = .7*speaker[4000:8000]
+            independent = (.03*np.sin(2*np.pi*290*t[:4000])).astype("float32")
+            get_classifier = lambda: lambda samples: (.8, 0., 0.)
+            with patch.object(speech_review, "speech_spans", return_value=[]):
+                self.assertTrue(speech_review.duplicate_overlap(cue, leak, [other], work, get_classifier))
+                self.assertFalse(speech_review.duplicate_overlap(cue, leak+independent, [other], work, get_classifier))
+                self.assertFalse(speech_review.duplicate_overlap(cue, leak, [], work, get_classifier))
+
     def test_corrected_overlap_keeps_the_separated_speakers_clip_and_language(self):
         with TemporaryDirectory() as root:
             work = Path(root)
@@ -169,15 +225,18 @@ class SpeechRecoveryTests(unittest.TestCase):
     def test_one_cut_of_the_same_recording_cannot_corroborate_itself(self):
         with TemporaryDirectory() as root:
             work = Path(root)
-            sf.write(work/"mix.wav", np.full(6400, .05), 16000)
+            samples = np.sin(2*np.pi*np.arange(6400)*200/16000)*.1
+            sf.write(work/"mix.wav", samples, 16000)
+            sf.write(work/"same-stem.wav", samples, 16000)
             sf.write(work/"voice.flac", np.zeros(6400), 16000)
             cue = dict(text="Guess", language="en", languageProbability=.35, speaker=2,
                        start=0., end=.4, clip="voice.flac")
             model = Mock()
             model.transcribe.return_value = self.words(.05, .29)
-            with patch.object(speech_review, "whisper_model", return_value=model):
-                with self.assertRaisesRegex(ValueError, "reliable source transcript"):
-                    speech_review.review_transcript([cue], work, work)
+            with patch.object(speech_review, "whisper_model", return_value=model), \
+                 patch.object(speech_review, "speech_spans", return_value=[(500, 5500)]):
+                reviewed, _ = speech_review.review_transcript([cue], work, work, dialogue=work/"same-stem.wav")
+            self.assertEqual(reviewed, [dict(cue, text="", preserveOriginal="unverified-source")])
             self.assertEqual(model.transcribe.call_count, 1)
 
     def test_review_uses_the_supplied_diarization_stem_and_keys_the_cache_by_its_version(self):
@@ -271,22 +330,20 @@ class SpeechRecoveryTests(unittest.TestCase):
                 model.create_voice_clone_prompt.side_effect = [prompt, fixed]
                 model.duration_estimator.estimate_duration.return_value = 25
                 model.audio_tokenizer.config.frame_rate = 25
-                model.generate.side_effect = [[np.zeros(0)], [wave], [wave]]
+                model.generate.side_effect = [[np.zeros(0)], [wave], [wave], [wave]]
                 cue = dict(text="Hello", start=0., end=.75, language="en", speaker=2)
                 with patch.dict(sys.modules, {"omnivoice": Mock(), "faster_whisper": Mock()}), \
                      patch.object(voices, "model_directory", return_value="whisper"), \
                      patch.object(voices, "load_voice_model", return_value=model), patch.object(voices, "model_path"), \
                      patch("voice_samples.align_clone_reference", return_value=(wave, "Aligned")), \
-                     patch.object(voices, "verifies_words", side_effect=[False, successful]):
-                    if successful:
-                        voices.synthesize([cue], ["Bonjour"], "fr", work, out, [0], "cpu")
-                    else:
-                        with self.assertRaisesRegex(ValueError, "intelligible fr speech"):
-                            voices.synthesize([cue], ["Bonjour"], "fr", work, out, [0], "cpu")
+                     patch("voice_trim.trim_verified_take", return_value=None), \
+                     patch.object(voices, "verifies_words", side_effect=[False, successful, False]):
+                    voices.synthesize([cue], ["Bonjour"], "fr", work, out, [0], "cpu")
+                self.assertEqual((out/"0.original").is_file(), not successful)
                 self.assertEqual((out/"0.wav").is_file(), successful)
                 self.assertFalse((out/"0.partial.wav").exists())
                 self.assertEqual([c.kwargs["voice_clone_prompt"] for c in model.generate.call_args_list],
-                                 [prompt, fixed, fixed])
+                                 [prompt, fixed, fixed] if successful else [prompt, fixed, fixed, fixed])
                 self.assertTrue(all(c.kwargs["text"] == "Bonjour" for c in model.generate.call_args_list))
 
     def test_every_take_requires_its_target_words_including_short_and_unspaced_phrases(self):
@@ -324,6 +381,7 @@ class SpeechRecoveryTests(unittest.TestCase):
                 with patch.dict(sys.modules, {"omnivoice": Mock(), "faster_whisper": whisper}), \
                      patch.object(voices, "model_directory", return_value="whisper"), \
                      patch.object(voices, "model_path"), patch.object(voices, "load_voice_model", return_value=model), \
+                     patch("voice_trim.trim_verified_take", return_value=None), \
                      patch.object(voice_samples, "align_clone_reference", return_value=None):
                     voices.synthesize([cue], [target], language, work, out, [0], "cpu")
                 self.assertEqual(model.generate.call_count, takes)

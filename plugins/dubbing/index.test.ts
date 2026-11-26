@@ -14,7 +14,10 @@ import json, sys
 from pathlib import Path
 job = json.loads(Path(sys.argv[2]).read_text())
 Path(job["output"]).write_text(json.dumps(job))
-print('EASYX {"outcome":"rendered","lipSyncFrames":17}')
+event = {"outcome":"rendered","lipSyncFrames":17}
+if job.get("previousOutput"):
+    event["originalIntervals"] = job["previousOutput"]["originalIntervals"]
+print("EASYX", json.dumps(event))
 `, { mode: 0o700 });
     vi.stubEnv("EASYX_DUBBING_PYTHON", exe);
     const context = { config: {}, signal: new AbortController().signal, fetch, runCommand: vi.fn(), log: vi.fn() };
@@ -22,14 +25,15 @@ print('EASYX {"outcome":"rendered","lipSyncFrames":17}')
     const obsolete = { path: root, renderVersion: "5-lips", lipSyncFrames: 10 };
     await plugin.renderDub!(context, { ...job, previousOutput: obsolete }, vi.fn());
     const audio = JSON.parse(fs.readFileSync(job.output, "utf8"));
-    expect(audio).toMatchObject({ lipSync: false, audioGeneration: "6", workDir: path.join(root, "work", "audio-6"),
-      previousStemDir: path.join(root, "work", "audio-5"), speechCacheDir: path.join(root, "audio-6") });
+    expect(audio).toMatchObject({ lipSync: false, audioGeneration: "7", workDir: path.join(root, "work", "audio-6"),
+      previousStemDir: path.join(root, "work", "audio-5"), speechCacheDir: path.join(root, "audio-7") });
     expect(audio.previousOutput).toBeUndefined();
-    const previousOutput = { path: root, renderVersion: plugin.manifest.dubbingRenderVersion!, lipSyncFrames: 0 };
+    const previousOutput = { path: root, renderVersion: plugin.manifest.dubbingRenderVersion!, lipSyncFrames: 0,
+      originalIntervals: [{ start: 1.2, end: 4, reason: "unverified-voice" as const }] };
     const result = await plugin.renderDub!(context, { ...job, lipSync: true, previousOutput }, vi.fn());
     const visual = JSON.parse(fs.readFileSync(job.output, "utf8"));
     expect(visual).toMatchObject({ lipSync: true, workDir: audio.workDir, speechCacheDir: audio.speechCacheDir, previousOutput });
-    expect(result).toEqual({ outcome: "rendered", lipSyncFrames: 17 });
+    expect(result).toEqual({ outcome: "rendered", lipSyncFrames: 17, originalIntervals: previousOutput.originalIntervals });
   } finally {
     vi.unstubAllEnvs(); fs.rmSync(root, { recursive: true, force: true });
   }
@@ -95,12 +99,13 @@ it("restores the original picture and retains the published speech packets when 
         "-itsoffset", "0.2", "-f", "lavfi", "-i", "sine=d=4.8:frequency=" + frequency, "-vf", "select='not(eq(mod(n,9),2))'",
         "-fps_mode", "vfr", "-c:v", "libx264", "-bf", "0", "-c:a", "aac", "-movie_timescale", "90000", file]);
     }
+    const originalIntervals = [{ start: 1.5, end: 2.25, reason: "unverified-source" as const }];
     const result = await plugin.renderDub!(
       { config: {}, signal: new AbortController().signal, fetch, runCommand: vi.fn(), log: vi.fn() },
       { mediaId: "sample", fingerprint: "sample", language: "fr", source, lipSync: false,
-        dataDir: root, workDir: path.join(root, "work"), output, previousOutput: { path: previous, renderVersion: plugin.manifest.dubbingLipSyncRenderVersion!, lipSyncFrames: 12 } }, vi.fn(),
+        dataDir: root, workDir: path.join(root, "work"), output, previousOutput: { path: previous, renderVersion: plugin.manifest.dubbingLipSyncRenderVersion!, lipSyncFrames: 12, originalIntervals } }, vi.fn(),
     );
-    expect(result).toEqual({ outcome: "rendered", lipSyncFrames: 0 });
+    expect(result).toEqual({ outcome: "rendered", lipSyncFrames: 0, originalIntervals });
     function packets(file: string, stream: string, fields: string) {
       return JSON.parse(execFileSync("ffprobe", ["-v", "error", "-select_streams", stream, "-show_packets",
         "-show_data_hash", "sha256", "-show_entries", "packet="+fields, "-of", "json", file], { encoding: "utf8" })).packets;

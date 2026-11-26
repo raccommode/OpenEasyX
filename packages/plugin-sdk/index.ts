@@ -204,6 +204,9 @@ export type LiveStream = {
 
 export type DubbingReferenceVideo = { mediaId: string; fingerprint: string; source: string };
 
+/** A spoken passage retained in the original language, in seconds on the published video's timeline. */
+export type DubbingOriginalInterval = { start: number; end: number; reason: "unverified-source" | "unverified-voice" };
+
 export type DubbingJob = {
   mediaId: string;
   fingerprint: string;
@@ -215,12 +218,13 @@ export type DubbingJob = {
   /** Selected at dispatch for providers with an optional lip-sync renderer. */
   lipSync?: boolean;
   /** Read-only publication for this source, provider and language. Write the replacement to output. */
-  previousOutput?: { path: string; renderVersion: string; lipSyncFrames?: number };
+  previousOutput?: { path: string; renderVersion: string; lipSyncFrames?: number; originalIntervals?: DubbingOriginalInterval[] };
   /** Other local videos credited to the same performers. Confirm speaker identity from the audio. */
   referenceVideos?: DubbingReferenceVideo[];
 };
 
-export type DubbingResult = "rendered" | "original" | "silent" | { outcome: "rendered"; lipSyncFrames?: number };
+export type DubbingResult = "rendered" | "original" | "silent"
+  | { outcome: "rendered"; lipSyncFrames?: number; originalIntervals?: DubbingOriginalInterval[] };
 
 export interface EasyXPlugin {
   renderDub?(context: PluginContext, job: DubbingJob, report: (phase: string, progress: number) => void): Promise<DubbingResult>;

@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Check, Languages, LoaderCircle, RefreshCw, Save, Trash2, X } from "lucide-react";
 import { ProcessingOrderField } from "../../src/ProcessingOrderField";
 import { api } from "../../src/api";
+import { DubbingPassages } from "../../src/DubbingPassages";
+import type { DubbingOriginalInterval } from "../../packages/plugin-sdk";
 
 type Overview = {
   languages: { code: string; label: string }[];
@@ -11,6 +13,8 @@ type Overview = {
   current: { title: string; language: string; phase: string; progress: number } | null;
   runtimeRetryAt?: string | null;
   errors: { id: string; title: string; language: string; error: string; runtimeSetup?: boolean }[];
+  partialDubCount?: number;
+  partialDubs?: { id: string; title: string; language: string; originalIntervals: DubbingOriginalInterval[] }[];
 };
 
 export default function DubbingSettings({ name, close, uninstall }: { name: string; close: () => void; uninstall: () => Promise<void> }) {
@@ -96,6 +100,10 @@ export default function DubbingSettings({ name, close, uninstall }: { name: stri
               : <p role="status">{overview.selected.length ? "Waiting for the next video" : "Select a language to start dubbing."}</p>}
           </section>
           {failedJobs.length > 0 && <section className="settings-card dubbing-errors"><h3>Failed jobs</h3>{failedJobs.map(failureRow)}</section>}
+          {!!overview.partialDubs?.length && <section className="settings-card"><h3>Partially dubbed videos</h3>
+            {(overview.partialDubCount ?? 0) > overview.partialDubs.length && <p>Showing the {overview.partialDubs.length} newest of {overview.partialDubCount} versions.</p>}
+            {overview.partialDubs.map((dub) => <DubbingPassages key={`${dub.id}-${dub.language}`} label={`${dub.title} · ${languageLabel(dub.language)}`} intervals={dub.originalIntervals}/>)}
+          </section>}
         </div>}
       </div>
       <div className="modal-actions"><button className="danger-soft" disabled={busy} onClick={async () => { setBusy(true); try { await uninstall(); } finally { setBusy(false); } }}><Trash2 size={16}/>Uninstall</button>

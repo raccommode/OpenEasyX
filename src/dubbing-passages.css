@@ -1,0 +1,5 @@
+.dubbing-passages { margin: 0.5rem 0; font-size: 0.8rem; line-height: 1.5; }
+.dubbing-passages > summary { cursor: pointer; }
+.dubbing-passages ul { margin: 0.4rem 0; padding-inline-start: 1.3rem; }
+.dubbing-time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.caption-menu > .dubbing-passages { margin: 0 10px 8px; color: #c1c1cb; }

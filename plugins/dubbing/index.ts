@@ -9,14 +9,14 @@ import subtitleLanguages from "../../packages/translation-languages.json" with {
 
 const supported = new Set(["en", "fr", "es", "de", "it", "pt", "ru", "ja", "ko", "zh"]);
 const languages = subtitleLanguages.filter(({ code }) => supported.has(code)).map(({ code, label }) => ({ code, label }));
-const audioGeneration = "6";
+const audioGeneration = "7";
 const audioRevision = audioGeneration + "-audio";
 const lipRevision = audioGeneration + "-lips";
 const compatibleRevisions = [audioRevision, lipRevision];
 
 export default definePlugin({
   manifest: {
-    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.5.0", author: "Open EasyX",
+    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.6.0", author: "Open EasyX",
     capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: audioRevision,
     dubbingLipSyncRenderVersion: lipRevision, dubbingPreviousRenderVersions: compatibleRevisions,
     dubbingRecheckSilentVersions: ["", "1", "2", "3", "4", "5-audio", "5-lips"],
@@ -38,7 +38,7 @@ export default definePlugin({
       const previous = job.previousOutput;
       const workerJob = { ...job, audioGeneration, lipSync: job.lipSync ?? (config.lipSync === true),
         previousStemDir: path.join(job.workDir, "audio-5"),
-        workDir: path.join(job.workDir, cache), speechCacheDir: path.join(path.dirname(job.workDir), cache),
+        workDir: path.join(job.workDir, "audio-6"), speechCacheDir: path.join(path.dirname(job.workDir), cache),
         previousOutput: previous && compatibleRevisions.includes(previous.renderVersion) ? previous : undefined };
       await writeFile(jobFile, JSON.stringify(workerJob), { flag: "wx", mode: 0o600 });
       signal?.throwIfAborted();
@@ -65,8 +65,9 @@ export default definePlugin({
             phase = event.phase;
             report(phase, event.progress);
           }
-          if (event.outcome === "rendered" && Number.isSafeInteger(event.lipSyncFrames) && event.lipSyncFrames >= 0) {
-            outcome = { outcome: "rendered", lipSyncFrames: event.lipSyncFrames };
+          const frames = Number.isSafeInteger(event.lipSyncFrames) && event.lipSyncFrames >= 0 ? event.lipSyncFrames : undefined;
+          if (event.outcome === "rendered" && (frames !== undefined || event.originalIntervals !== undefined)) {
+            outcome = { outcome: "rendered", lipSyncFrames: frames, originalIntervals: event.originalIntervals };
           } else if (["rendered", "original", "silent"].includes(event.outcome)) outcome = event.outcome;
         } catch { /* Ignore non-protocol model output. */ }
       });

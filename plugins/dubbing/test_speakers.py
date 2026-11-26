@@ -405,6 +405,30 @@ class SpeakerTests(unittest.TestCase):
             np.testing.assert_allclose(dry[gap], tail[np.where(gap)[0]-round(.25*rate)], atol=1e-7)
             np.testing.assert_array_equal(dry[t>1.62], 0.)
 
+    def test_uncertain_overlapping_turns_play_original_without_underlying_dub(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            rate = 16000
+            t = np.arange(rate*3)/rate
+            source = .2*np.sin(500*t)
+            music = .04*np.cos(300*t)
+            sf.write(work/"mix.wav", source+music, rate, subtype="FLOAT")
+            sf.write(work/"dialogue.wav", source, rate, subtype="FLOAT")
+            sf.write(work/"0.wav", .08*np.sin(1900*t), rate, subtype="FLOAT")
+            cues = [dict(speaker=i, start=a, end=b, language="en") for i, (a, b) in
+                    enumerate([(.1,.65), (.8,1.15), (1.,1.7), (1.6,2.05)])]
+            cues[2]["preserveOriginal"] = "unverified-source"
+            self.assertEqual(voices.original_intervals(cues), [dict(start=.8, end=2.05, reason="unverified-source")])
+            voices.render_voice_buses(work/"mix.wav", work/"dialogue.wav", cues, work, work,
+                                      work/"bed.wav", work/"dry.wav", iter([]), {}, language="fr")
+            original = (t>=.8) & (t<2.05)
+            bed = sf.read(work/"bed.wav")[0]
+            dry = sf.read(work/"dry.wav")[0]
+            np.testing.assert_array_equal(dry[original], 0.)
+            np.testing.assert_allclose(bed[original], (source+music)[original], atol=2e-7)
+            np.testing.assert_allclose(bed[t<.7], music[t<.7], atol=2e-7)
+            self.assertGreater(abs(dry[t<.7]).max(), .05)
+
     def test_microphone_fallback_preserves_verified_words_on_their_own_channel(self):
         rate = 16000
         with tempfile.TemporaryDirectory() as tmp:

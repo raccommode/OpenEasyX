@@ -203,6 +203,7 @@ export class LibraryDatabase {
         provider TEXT NOT NULL,
         file_key TEXT NOT NULL,
         lip_sync_frames INTEGER,
+        original_intervals_json TEXT,
         PRIMARY KEY(media_id, language)
       );
       CREATE TABLE IF NOT EXISTS subtitle_jobs (
@@ -238,6 +239,8 @@ export class LibraryDatabase {
     const subtitleColumns = new Set((this.sqlite.prepare("PRAGMA table_info(subtitle_jobs)").all() as Array<{ name: string }>).map((column) => column.name));
     const dubColumns = this.sqlite.prepare("PRAGMA table_info(video_dubs)").all();
     if (!dubColumns.some((column) => column.name === "render_version")) this.sqlite.exec("ALTER TABLE video_dubs ADD COLUMN render_version TEXT NOT NULL DEFAULT ''");
+    const outputColumns = this.sqlite.prepare("PRAGMA table_info(dubbing_outputs)").all();
+    if (!outputColumns.some((column) => column.name === "original_intervals_json")) this.sqlite.exec("ALTER TABLE dubbing_outputs ADD COLUMN original_intervals_json TEXT");
     this.sqlite.exec(`INSERT OR IGNORE INTO dubbing_outputs(media_id,language,fingerprint,provider,file_key)
       SELECT media_id,language,fingerprint,provider,'' FROM video_dubs WHERE status='ready'`);
     if (!subtitleColumns.has("phase")) this.sqlite.exec("ALTER TABLE subtitle_jobs ADD COLUMN phase TEXT NOT NULL DEFAULT 'detecting'");

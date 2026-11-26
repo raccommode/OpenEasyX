@@ -887,7 +887,8 @@ def voice_timeline(cues, files, tails=None):
 
 
 def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, output: Path, *, language=None, source_audio=None, published_audio=False) -> int:
-    files = {i: wav_dir/f"{i}.wav" for i in range(len(cues)) if (wav_dir/f"{i}.wav").is_file()}
+    files = {i: wav_dir/f"{i}.wav" for i, cue in enumerate(cues) if not cue.get("preserveOriginal")
+             and (wav_dir/f"{i}.wav").is_file()}
     models = FaceModels() if files else None
     lip_model = LipModel() if models else None
     anchors = SpeakerAnchors()
@@ -911,6 +912,9 @@ def render(source: Path, mixed_audio: Path, cues: list[dict], wav_dir: Path, out
                 t = at - audio_origin
                 active = {}
                 for i, cue in turns.at(t).items():
+                    if cue.get("preserveOriginal"):
+                        active.clear()
+                        break
                     if i in files:
                         identity = anchors.face(i, min(t, cues[i]["end"]-.01), speakers.get(cue["speaker"]))
                         if identity is not None:

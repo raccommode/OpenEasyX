@@ -268,7 +268,8 @@ def align_clone_reference(recognizer, samples, rate, language):
 def alternate_clone_reference(recognizer, cues, work, speaker):
     """Find an independent, solo recording of the same diarized speaker."""
     from speech_review import at16, speech_spans
-    solo = [c for c in cues if c["speaker"] == speaker and not c.get("overlapping") and c.get("clip")
+    solo = [c for c in cues if c["speaker"] == speaker and not c.get("overlapping")
+            and not c.get("preserveOriginal") and c.get("clip")
             and 1.2 <= c["end"]-c["start"] <= 12]
     for cue in sorted(solo, key=lambda c: abs(5-(c["end"]-c["start"])))[:3]:
         try:

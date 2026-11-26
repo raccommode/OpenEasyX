@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,19 @@ def reuse_separated_source(old_dir, work):
             pass
 
 
+def playback_intervals(source, intervals):
+    if not intervals:
+        return []
+    probe = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries",
+        "stream=codec_type,start_time:stream_disposition=attached_pic:format=start_time", "-of", "json", str(source)]))
+    origin = probe.get("format", {}).get("start_time", 0)
+    def start(kind):
+        stream = next(s for s in probe["streams"] if s["codec_type"] == kind and not s.get("disposition", {}).get("attached_pic"))
+        return float(stream.get("start_time", origin))
+    offset = max(0., start("audio")-start("video"))
+    return [dict(r, start=round(r["start"]+offset, 6), end=round(r["end"]+offset, 6)) for r in intervals]
+
+
 def run(job, details=None):
     data, work, source = (Path(job[key]).resolve() for key in ("dataDir", "workDir", "source"))
     target = job["language"]
@@ -53,6 +67,8 @@ def run(job, details=None):
         move(job, previous["path"], output)
         if details is not None:
             details["lipSyncFrames"] = 0
+            if previous.get("originalIntervals"):
+                details["originalIntervals"] = previous["originalIntervals"]
         return "rendered"
     audio = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=index",
                             "-of", "csv=p=0", str(source)], capture_output=True, text=True, check=True)
@@ -73,9 +89,11 @@ def run(job, details=None):
                 move(job, previous["path"], output)
                 if details is not None:
                     details["lipSyncFrames"] = changed
+                    if previous.get("originalIntervals"):
+                        details["originalIntervals"] = previous["originalIntervals"]
                 return "rendered"
     from dialogue import separate_dialogue, transcribe
-    from voices import mix_voices, speak
+    from voices import mix_voices, original_intervals, speak
     from speech_translation import translate_speech
     from speech_review import review_transcript
 
@@ -89,18 +107,33 @@ def run(job, details=None):
     release_models()
     if not cues:
         return "silent"
-    if all(c["language"] == target for c in cues):
+    if all(c["language"] == target and not c.get("preserveOriginal") for c in cues):
         return "original"
+    original_intervals(cues)
+    reliable = [cue for cue in cues if not cue.get("preserveOriginal")]
     from speaker_library import prepare_references
-    references, reference_key = prepare_references(job, data, work, cues, analysis=checkpoints.name)
+    references, reference_key = prepare_references(job, data, work, reliable, analysis=checkpoints.name)
     release_models()
     progress("Translating dialogue", 30)
     texts = translate_speech(cues, target, work, checkpoints/f"translation-{target}.json")
     release_models()
-    wav_dir = checkpoints / (f"voice-{target}-{reference_key}" if reference_key else f"voice-{target}")
+    # A resumed translator can correct the wording while using the same
+    # verified source cues. Reuse a take only for the exact delivery plan.
+    plan = json.dumps([[c.get("preserveOriginal"), text] for c, text in zip(cues, texts, strict=True)],
+                      ensure_ascii=False).encode()
+    take_key = hashlib.sha256(plan).hexdigest()[:16]
+    wav_dir = checkpoints / f"voice-{target}-{reference_key or 'source'}-{take_key}"
     wav_dir.mkdir(exist_ok=True)
     speak(cues, texts, target, work, wav_dir, references, data / "subtitle-models")
     release_models()
+    for i, cue in enumerate(cues):
+        if (wav_dir/f"{i}.original").is_file():
+            cue["preserveOriginal"] = "unverified-voice"
+    intervals = original_intervals(cues)
+    if not any(not c.get("preserveOriginal") and c["language"] != target for c in cues):
+        for marker in wav_dir.glob("*.original"):
+            marker.unlink()
+        raise ValueError(f"No verified {target} translation could be rendered for this video")
     mixed = wav_dir / "soundtrack.wav"
     progress("Mixing voices with original music and effects", 69)
     mix_voices(mix, dialogue, cues, wav_dir, work, mixed, language=target)
@@ -116,6 +149,8 @@ def run(job, details=None):
     keep(job, output, cues, wav_dir)
     if details is not None:
         details["lipSyncFrames"] = changed
+        if intervals:
+            details["originalIntervals"] = playback_intervals(source, intervals)
     # Keep shared analysis for other selected languages. Per-language PCM is only needed to resume an unfinished render.
     import shutil
     shutil.rmtree(wav_dir)

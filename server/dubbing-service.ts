@@ -1,14 +1,27 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import type { EasyXPlugin } from "../packages/plugin-sdk/index.js";
+import type { DubbingOriginalInterval, EasyXPlugin } from "../packages/plugin-sdk/index.js";
 import type { Catalog } from "./catalog.js";
 import type { LibraryDatabase, Media } from "./library-database.js";
 import type { PluginManager } from "./plugin-manager.js";
 
 type Identity = { media_id: string; language: string; fingerprint: string; provider: string };
 type Job = Identity & { status: string; phase: string; progress: number; error: string; render_version: string };
-type Output = Identity & { file_key: string; lip_sync_frames: number | null };
+type Output = Identity & { file_key: string; lip_sync_frames: number | null; original_intervals_json: string | null };
+function storedIntervals(json?: string | null): DubbingOriginalInterval[] | undefined {
+  return json ? JSON.parse(json) : undefined;
+}
+function serializeIntervals(intervals?: DubbingOriginalInterval[]) {
+  if (intervals === undefined) return null;
+  if (!Array.isArray(intervals) || !intervals.every((part) => part && Number.isFinite(part.start) && Number.isFinite(part.end)
+    && part.start >= 0 && part.end > part.start && (part.reason === "unverified-source" || part.reason === "unverified-voice"))) {
+    throw new Error("The dubbing provider returned invalid timestamps for a passage in the original language.");
+  }
+  if (!intervals.length) return null;
+  const ordered = intervals.map(({ start, end, reason }) => ({ start, end, reason })).sort((a, b) => a.start - b.start || a.end - b.end);
+  return JSON.stringify(ordered);
+}
 function fingerprint(media: Media) { return `${media.size}:${media.modifiedAt}`; }
 function publicationKey(job: Identity, revision: string) {
   return createHash("sha256").update(JSON.stringify([job.provider, job.fingerprint, revision])).digest("hex").slice(0, 24);
@@ -91,7 +104,8 @@ export class DubbingService {
     if (!renderVersion) return;
     const file = this.existingOutputPath(published);
     if (!file) return;
-    return { path: file, renderVersion, lipSyncFrames: published.lip_sync_frames ?? undefined };
+    return { path: file, renderVersion, lipSyncFrames: published.lip_sync_frames ?? undefined,
+      originalIntervals: storedIntervals(published.original_intervals_json) };
   }
 
   private reconcilePublishedRevision(media: Media, job: Job, interrupted = false) {
@@ -144,7 +158,8 @@ export class DubbingService {
         else if (stale) updateStatus = "queued";
       }
       return { code, label, status: output ? "ready" : status, phase: job?.phase, progress: job?.progress ?? 0, error: job?.error,
-        updateStatus, playbackVersion: output ? output.file_key || "legacy" : undefined, lipSyncFrames: output?.lip_sync_frames ?? undefined };
+        updateStatus, playbackVersion: output ? output.file_key || "legacy" : undefined, lipSyncFrames: output?.lip_sync_frames ?? undefined,
+        originalIntervals: storedIntervals(output?.original_intervals_json) };
     }) };
   }
 
@@ -161,8 +176,15 @@ export class DubbingService {
     const wait = this.runtimeFailure;
     const runtimeRetryAt = wait && wait.provider === plugin?.manifest.id && wait.revision === settings.revision && wait.retryAt > Date.now()
       ? new Date(wait.retryAt).toISOString() : undefined;
+    const partial = this.db.sqlite.prepare(`SELECT m.id,m.title,o.language,o.original_intervals_json,COUNT(*) OVER() AS total
+      FROM dubbing_outputs o JOIN media m ON m.id=o.media_id AND o.fingerprint=(m.size||':'||m.modified_at)
+      WHERE m.missing=0 AND o.provider=? AND o.original_intervals_json IS NOT NULL
+      ORDER BY m.added_at DESC,m.id,o.language LIMIT 20`).all(plugin?.manifest.id ?? "") as
+      { id: string; title: string; language: string; original_intervals_json: string; total: number }[];
     return { oldestFirst: settings.oldestFirst, lipSync: settings.lipSync ?? false, languages: plugin?.manifest.dubbingLanguages ?? [],
-      selected: settings.targets.map(({ code }) => code), current: current ?? null, errors, runtimeRetryAt };
+      selected: settings.targets.map(({ code }) => code), current: current ?? null, errors, runtimeRetryAt,
+      partialDubCount: partial[0]?.total ?? 0, partialDubs: partial.map(({ id, title, language, original_intervals_json }) =>
+        ({ id, title, language, originalIntervals: storedIntervals(original_intervals_json)! })) };
   }
 
   file(media: Media, language: string) {
@@ -267,14 +289,15 @@ export class DubbingService {
         if (!fs.statSync(output).size) throw new Error("The rendered video is empty");
         const frames = typeof result === "object" ? result.lipSyncFrames : undefined;
         published = { ...job, file_key: publicationKey(job, job.render_version),
-          lip_sync_frames: frames !== undefined && Number.isSafeInteger(frames) && frames >= 0 ? frames : null };
+          lip_sync_frames: frames !== undefined && Number.isSafeInteger(frames) && frames >= 0 ? frames : null,
+          original_intervals_json: serializeIntervals(typeof result === "object" ? result.originalIntervals : undefined) };
         fs.renameSync(output, this.outputPath(published));
       }
       // Keep serving the old publication until the complete file and its metadata are available together.
       this.db.sqlite.exec("BEGIN IMMEDIATE");
       try {
-        if (published) this.db.sqlite.prepare(`INSERT OR REPLACE INTO dubbing_outputs(media_id,language,fingerprint,provider,file_key,lip_sync_frames)
-          VALUES(?,?,?,?,?,?)`).run(media.id, job.language, job.fingerprint, job.provider, published.file_key, published.lip_sync_frames);
+        if (published) this.db.sqlite.prepare(`INSERT OR REPLACE INTO dubbing_outputs(media_id,language,fingerprint,provider,file_key,lip_sync_frames,original_intervals_json)
+          VALUES(?,?,?,?,?,?,?)`).run(media.id, job.language, job.fingerprint, job.provider, published.file_key, published.lip_sync_frames, published.original_intervals_json);
         update.run(published ? "ready" : outcome, "", 100, "", media.id, job.language, job.fingerprint);
         this.db.sqlite.exec("COMMIT");
       } catch (error) { this.db.sqlite.exec("ROLLBACK"); throw error; }

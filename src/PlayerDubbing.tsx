@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { AudioLines, Check } from "lucide-react";
+import type { DubbingOriginalInterval } from "../packages/plugin-sdk";
 import { api } from "./api";
+import { DubbingPassages } from "./DubbingPassages";
 
 type DubVariant = { code: string; label: string; status: "ready" | "original" | "silent" | "error" | "running" | "queued"; phase?: string; progress: number; error?: string;
-  updateStatus?: "queued" | "running" | "error"; playbackVersion?: string; lipSyncFrames?: number };
+  updateStatus?: "queued" | "running" | "error"; playbackVersion?: string; lipSyncFrames?: number; originalIntervals?: DubbingOriginalInterval[] };
 type MediaDubbing = { installed: boolean; variants: DubVariant[] };
 
 export function useMediaDubbing(mediaId?: string) {
@@ -77,9 +79,12 @@ export function PlayerDubbing({ state, selected, busy, open, toggle, select }: {
     <button className={`player-icon-button ${selected ? "active" : ""}`} aria-label="Audio language" aria-expanded={open} title="Audio language" onClick={toggle}><AudioLines/></button>
     {open && <div className="caption-menu"><strong>Audio language</strong>
       <button className={!selected ? "active" : ""} aria-pressed={!selected} disabled={busy} onClick={() => select("")}><span>Original audio{original && <small>{original.label}</small>}</span>{!selected && <Check/>}</button>
-      {state.variants.filter((v) => v.status !== "original").map((variant) => <button key={variant.code} className={selected === variant.code ? "active" : ""} aria-pressed={selected === variant.code} disabled={busy || variant.status !== "ready"} onClick={() => select(variant.code)}>
-        <span>{variant.label}<small>{statusLabel(variant)}</small></span>{selected === variant.code && <Check/>}
-      </button>)}
+      {state.variants.filter((v) => v.status !== "original").map((variant) => <Fragment key={variant.code}>
+        <button className={selected === variant.code ? "active" : ""} aria-pressed={selected === variant.code} disabled={busy || variant.status !== "ready"} onClick={() => select(variant.code)}>
+          <span>{variant.label}<small>{statusLabel(variant)}</small></span>{selected === variant.code && <Check/>}
+        </button>
+        {variant.status === "ready" && <DubbingPassages intervals={variant.originalIntervals}/>}
+      </Fragment>)}
     </div>}
   </div>;
 }

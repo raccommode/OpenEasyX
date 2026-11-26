@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowLeft, Cast, ChevronsLeft, ChevronsRight, FastForwar
 import { dubbingStreamUrl, readyDub, PlayerDubbing, useMediaDubbing } from "./PlayerDubbing";
 import { PlayerSubtitles, readSubtitlePreference, selectedSubtitleTrack, useMediaSubtitles } from "./PlayerSubtitles";
 import { api } from "./api";
-import { initialAutoplay, nextMediaId, PHOTO_AUTOPLAY_SECONDS } from "./playback";
+import { initialAutoplay, nextMediaId, PHOTO_AUTOPLAY_SECONDS, playerTime } from "./playback";
 import { loadPlayerAudio, savePlayerAudio } from "./player-audio";
 import { monitorVideoStalls } from "./video-stall-recovery";
 import { usePlayerFullscreen } from "./player-fullscreen";
@@ -28,11 +28,6 @@ function readPlayerPreference(key: string) {
 }
 function writePlayerPreference(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch { /* Preferences are optional. */ }
-}
-function playerTime(value = 0) {
-  if (!Number.isFinite(value)) return "0:00";
-  const seconds = Math.max(0, Math.floor(value)); const hours = Math.floor(seconds / 3600); const minutes = Math.floor(seconds % 3600 / 60);
-  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}` : `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
 function bytes(value = 0) {
   const units = ["B", "KB", "MB", "GB", "TB"]; const index = value ? Math.min(4, Math.floor(Math.log(value) / Math.log(1024))) : 0;
@@ -310,7 +305,7 @@ export function PlayerViewer({ media, context, autoStart = false, close, favorit
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
       if (event.key === "Escape" && menu) { setMenu(null); return; }
-      if (media.kind !== "video" || ["INPUT", "SELECT", "BUTTON"].includes((event.target as HTMLElement).tagName)) return;
+      if (media.kind !== "video" || ["INPUT", "SELECT", "BUTTON", "SUMMARY"].includes((event.target as HTMLElement).tagName)) return;
       reveal();
       if (event.code === "Space" || event.key.toLowerCase() === "k") { event.preventDefault(); togglePlayback(); }
       else if (event.key === "ArrowLeft") seek(shownTime - 10); else if (event.key === "ArrowRight") seek(shownTime + 10);

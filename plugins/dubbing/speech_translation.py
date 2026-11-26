@@ -10,6 +10,7 @@ import torch
 
 from runtime import device, model_path, progress, save_json
 from inference_memory import compact_cpu, cuda_allocation_failed, free_cuda_bytes
+from paired_translation import apply_pairs
 from speech_review import at16
 from voices import LANGUAGES, translate
 
@@ -70,9 +71,10 @@ def translate_speech(cues, target, work, cache):
             saved = None
         if isinstance(saved, list) and len(saved) == len(cues):
             texts = [v if isinstance(v, str) and v.strip() else None for v in saved]
+    apply_pairs(cues, target, cache, texts)
     pending = []
     for i, cue in enumerate(cues):
-        if cue["language"] == target:
+        if cue["language"] == target or cue.get("preserveOriginal"):
             texts[i] = cue["text"]
         # These words were verified on the original recording because the
         # isolated voice lost part of the utterance. Translate the verified text.

@@ -45,4 +45,19 @@ describe("library audio versions", () => {
     const saved = renderToStaticMarkup(<PlayerDubbing {...controls} state={{ installed: false, variants: [{ code: "fr", label: "French", status: "ready", progress: 100 }] }}/>);
     expect(saved).toContain("French<small>Dubbed audio");
   });
+
+  it("identifies the passages that still use original audio in a playable dub during an update", () => {
+    const html = renderToStaticMarkup(<PlayerDubbing {...controls} state={{ installed: true, variants: [
+      { code: "fr", label: "French", status: "ready", updateStatus: "running", progress: 42, originalIntervals: [
+        { start: 85.2, end: 87.6, reason: "unverified-source" }, { start: 3605, end: 3607, reason: "unverified-voice" },
+      ] },
+      { code: "de", label: "German", status: "ready", progress: 100, originalIntervals: [] },
+    ] }}/>);
+    expect(html).toContain("2 passages use original audio");
+    expect(html).toContain("1:25–1:28");
+    expect(html).toContain("1:00:05–1:00:07");
+    expect(html).toContain("Source words unverified");
+    expect(html).toContain("Dubbed speech unverified");
+    expect(html.match(/<details/g)).toHaveLength(1);
+  });
 });
