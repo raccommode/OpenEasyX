@@ -443,7 +443,10 @@ it("requeues known legacy dubbing failures without resetting finished or unrelat
     const renderFailed = "subprocess.CalledProcessError: Command '['ffmpeg', '-i', '/data/dubbing-runtime/demo.mp4']' returned non-zero exit status 1.";
     const packets = 'File "/app/plugins/dubbing/lips.py", line 954, in render\nav.error.InvalidDataError: Invalid data: avcodec_send_packet()';
     const silentVoice = "ValueError: The voice model did not generate audible speech";
+    const killedVoice = "Loading weights: 100%|313/313\rLoading weights: 100%|527/527";
     const cases = [
+      ["it", id, "error", killedVoice, "queued"], ["fi", id, "error", killedVoice, "error"],
+      ["is", id, "error", killedVoice+"\nRuntimeError: corrupt model", "error"],
       ["ko", id, "error", packets, "queued"], ["fa", id, "error", silentVoice, "queued"],
       ["sv", id, "error", "ValueError: Translation produced an empty phrase", "queued"],
       ["nn", id, "error", packets.replace("/lips.py", "/dialogue.py"), "error"],
@@ -457,6 +460,7 @@ it("requeues known legacy dubbing failures without resetting finished or unrelat
     for (const [language, provider, status, error] of cases) {
       insert.run(media.id, language, media.size+":"+media.modifiedAt, provider, status, status === "error" ? 0 : 100, error);
     }
+    library.sqlite.exec("UPDATE video_dubs SET render_version='7-audio' WHERE language IN ('it','is')");
     const service = new DubbingService(library, manager, catalog, root);
     const select = library.sqlite.prepare("SELECT status,progress,error FROM video_dubs WHERE media_id=? AND language=?");
     for (const [language, , status, error, expectedStatus] of cases) {

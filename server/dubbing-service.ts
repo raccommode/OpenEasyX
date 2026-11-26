@@ -53,15 +53,20 @@ export class DubbingService {
     // using their existing checkpoints, without scheduling another render of published videos.
     this.db.sqlite.exec("BEGIN IMMEDIATE");
     try {
-      const marker = this.db.sqlite.prepare("INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?, 'true', ?)").run(
-        "requeued_dubbing_packet_voice_translation_errors_v1", new Date().toISOString(),
-      );
+      const once = this.db.sqlite.prepare("INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES(?, 'true', ?)");
+      const now = new Date().toISOString();
+      const marker = once.run("requeued_dubbing_packet_voice_translation_errors_v1", now);
       if (marker.changes) this.db.sqlite.exec(`UPDATE video_dubs SET status='queued',phase='',progress=0,error=''
         WHERE provider='org.easyx.dubbing' AND status='error' AND (
           instr(error,'ValueError: The voice model did not generate audible speech')>0
           OR instr(error,'ValueError: Translation produced an empty phrase')>0
           OR (instr(error,'/lips.py')>0 AND instr(error,'av.error.InvalidDataError:')>0 AND instr(error,'avcodec_send_packet()')>0)
         )`);
+      // A SIGKILL during synthesis could leave only Hugging Face's progress bars on stderr.
+      if (once.run("requeued_dubbing_interrupted_voice_model_v1", now).changes) this.db.sqlite.exec(`UPDATE video_dubs
+        SET status='queued',phase='',progress=0,error='' WHERE provider='org.easyx.dubbing' AND status='error'
+        AND render_version IN ('7-audio','7-lips') AND (error='Dubbing worker stopped (SIGKILL)'
+          OR (instr(error,'Loading weights:')>0 AND instr(error,'Error')=0 AND instr(error,'Traceback')=0))`);
       this.db.sqlite.exec("COMMIT");
     } catch (error) {
       this.db.sqlite.exec("ROLLBACK");

@@ -6,8 +6,8 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
-from inference_memory import release_models
-from runtime import parent_watch, progress, provision, publish
+from inference_memory import isolated_voice_batches, release_models
+from runtime import parent_watch, progress, provision, publish, save_json
 
 
 def setup_runtime(data):
@@ -46,7 +46,7 @@ def playback_intervals(source, intervals):
     return [dict(r, start=round(r["start"]+offset, 6), end=round(r["end"]+offset, 6)) for r in intervals]
 
 
-def run(job, details=None):
+def run(job, details=None, *, job_arg=None):
     data, work, source = (Path(job[key]).resolve() for key in ("dataDir", "workDir", "source"))
     target = job["language"]
     work.mkdir(parents=True, exist_ok=True)
@@ -59,7 +59,7 @@ def run(job, details=None):
     lip_sync = job.get("lipSync") is True
     output = Path(job["output"])
     from delivery import mux_original_picture, verify_playback
-    from sync_cache import keep, move, restore
+    from sync_cache import move, restore
     if not lip_sync and previous and previous["renderVersion"] == f"{generation}-lips":
         progress("Restoring the original picture with the published dubbed audio", 75)
         mux_original_picture(source, previous["path"], output, language=target, published_audio=True,
@@ -93,7 +93,7 @@ def run(job, details=None):
                         details["originalIntervals"] = previous["originalIntervals"]
                 return "rendered"
     from dialogue import separate_dialogue, transcribe
-    from voices import mix_voices, original_intervals, speak
+    from voices import original_intervals
     from speech_translation import translate_speech
     from speech_review import review_transcript
 
@@ -124,8 +124,30 @@ def run(job, details=None):
     take_key = hashlib.sha256(plan).hexdigest()[:16]
     wav_dir = checkpoints / f"voice-{target}-{reference_key or 'source'}-{take_key}"
     wav_dir.mkdir(exist_ok=True)
-    speak(cues, texts, target, work, wav_dir, references, data / "subtitle-models")
-    release_models()
+    if job_arg is not None and isolated_voice_batches():
+        # Torch, ONNX Runtime and CTranslate2 can retain native allocations
+        # after model deletion. Replace the analysis interpreter before TTS.
+        save_json(wav_dir/"delivery-cues.json", cues)
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), job_arg, "--voices",
+                                  str(wav_dir), str(references), str(mix), str(dialogue)])
+    return finish_job(job, details, wav_dir, references, mix, dialogue, cues, texts)
+
+
+def finish_job(job, details, wav_dir, references, mix, dialogue, cues, texts, *, isolated=False):
+    data, work, source = (Path(job[key]).resolve() for key in ("dataDir", "workDir", "source"))
+    target = job["language"]
+    output = Path(job["output"])
+    if isolated:
+        # Keep this coordinator free of model libraries until every child exits.
+        from voice_batches import run_voice_batches
+        run_voice_batches(cues, texts, target, work, wav_dir, references, data/"subtitle-models")
+    else:
+        from voices import speak
+        speak(cues, texts, target, work, wav_dir, references, data/"subtitle-models")
+        release_models()
+    from delivery import mux_original_picture, verify_playback
+    from sync_cache import keep
+    from voices import mix_voices, original_intervals
     for i, cue in enumerate(cues):
         if (wav_dir/f"{i}.original").is_file():
             cue["preserveOriginal"] = "unverified-voice"
@@ -138,7 +160,7 @@ def run(job, details=None):
     progress("Mixing voices with original music and effects", 69)
     mix_voices(mix, dialogue, cues, wav_dir, work, mixed, language=target)
     changed = 0
-    if lip_sync:
+    if job.get("lipSync") is True:
         from lips import render
         changed = render(source, mixed, cues, wav_dir, output, language=target, source_audio=mix)
         verify_playback(output)
@@ -163,7 +185,13 @@ if __name__ == "__main__":
     job = json.loads(arg if arg.startswith("{") else Path(arg).read_text())
     details = {}
     try:
-        outcome = run(job, details)
+        if sys.argv[2:3] == ["--voices"]:
+            wav_dir, references, mix, dialogue = map(Path, sys.argv[3:])
+            cues = json.loads((wav_dir/"delivery-cues.json").read_text())
+            texts = json.loads((wav_dir.parent/f"translation-{job['language']}.json").read_text())
+            outcome = finish_job(job, details, wav_dir, references, mix, dialogue, cues, texts, isolated=True)
+        else:
+            outcome = run(job, details, job_arg=arg)
     except Exception as error:
         publish(errorCode="DUBBING_RENDER_FAILED", message=str(error) or type(error).__name__)
         raise

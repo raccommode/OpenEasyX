@@ -224,7 +224,8 @@ class SpeakerTests(unittest.TestCase):
                         sf.write(wav_dir/"0.wav", np.full(2400, .1), 24000)
                         raise RuntimeError("CUDNN_STATUS_ALLOC_FAILED while generating the second line")
                 free = (4*1024 if gpu_attempt else 800)*1024**2
-                with patch.object(voices, "device", return_value="cuda"), patch.object(voices, "synthesize", side_effect=synth), \
+                with patch.object(voices, "isolated_voice_batches", return_value=False), \
+                     patch.object(voices, "device", return_value="cuda"), patch.object(voices, "synthesize", side_effect=synth), \
                      patch.object(voices.torch.cuda, "mem_get_info", return_value=(free, 12*1024**3)), \
                      patch.object(voices.torch.cuda, "empty_cache") as clear:
                     voices.speak(cues, ["Un", "Deux", "Trois"], "fr", work, work, work/"refs", work/"whisper")
@@ -291,7 +292,8 @@ class SpeakerTests(unittest.TestCase):
     def test_metal_workers_resume_only_pending_translated_phrases_in_bounded_groups(self):
         cues = [{"language": "en"} for _ in range(10)]
         cues[2]["language"] = "fr"
-        with tempfile.TemporaryDirectory() as tmp, patch.object(voices, "device", return_value="mps"), patch.object(voices.subprocess, "run") as run:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(voices, "isolated_voice_batches", return_value=False), \
+             patch.object(voices, "device", return_value="mps"), patch.object(voices.subprocess, "run") as run:
             work = Path(tmp)
             sf.write(work/"0.wav", np.ones(2400, dtype="float32")*.1, 24000)
             (work/"1.wav").touch()

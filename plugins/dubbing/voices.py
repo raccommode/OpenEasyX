@@ -14,7 +14,8 @@ import torch
 from scipy.signal import resample_poly
 
 from runtime import device, model_path, progress, save_json
-from inference_memory import compact_cpu, cuda_allocation_failed, free_cuda_bytes
+from inference_memory import compact_cpu, cuda_allocation_failed, free_cuda_bytes, isolated_voice_batches, release_models
+from voice_batches import RETRY_ON_CPU, needs_take, run_voice_batches
 from whisper_recognizer import model_directory
 
 CATALOG = Path(__file__).resolve().parents[2] / "packages"
@@ -144,22 +145,14 @@ def audible(wave, rate):
             and np.max(abs(wave)) >= 1e-5 and np.sqrt(np.mean(wave**2)) >= 1e-6)
 
 
-def cached_voice(path):
-    if not path.is_file():
-        return False
-    try:
-        wave, rate = sf.read(path, dtype="float32")
-    except (OSError, RuntimeError, ValueError):
-        return False
-    return audible(wave, rate)
-
-
 def speak(cues, texts, language, work, wav_dir, references=None, model_cache=None):
-    def needs_take(i):
-        return not (wav_dir/f"{i}.original").exists() and not cached_voice(wav_dir/f"{i}.wav")
-
+    if isolated_voice_batches():
+        # Direct callers may already have used other inference libraries. The
+        # server pipeline also execs a fresh, lightweight coordinator here.
+        release_models()
+        return run_voice_batches(cues, texts, language, work, wav_dir, references, model_cache)
     pending = [i for i, cue in enumerate(cues) if not cue.get("preserveOriginal") and
-               cue["language"] != language and needs_take(i)]
+               cue["language"] != language and needs_take(wav_dir, i)]
     if not pending:
         return
     accelerator = device()
@@ -174,7 +167,7 @@ def speak(cues, texts, language, work, wav_dir, references=None, model_cache=Non
             # Dropping the traceback first releases the failed clone prompts, codec and generation buffers.
             gc.collect()
             torch.cuda.empty_cache()
-            pending = [i for i in pending if needs_take(i)]
+            pending = [i for i in pending if needs_take(wav_dir, i)]
         if pending:
             progress("Cloning voices on CPU while GPU memory is busy", 38 + 30*pending[0]/len(cues))
             synthesize(cues, texts, language, work, wav_dir, pending, "cpu", references, model_cache)
@@ -345,6 +338,8 @@ def synthesize(cues, texts, language, work, wav_dir, indices, accelerator, refer
         return WhisperModel(str(model_directory(model_cache)), device="cpu", compute_type="int8", cpu_threads=2)
 
     for idx in indices:
+        if os.environ.get("EASYX_DUBBING_VOICE_BATCH") and not needs_take(wav_dir, idx):
+            continue
         cue, text = cues[idx], texts[idx]
         speaker = cue["speaker"]
         if speaker not in prompts:
@@ -801,18 +796,36 @@ def render_voice_buses(mix, dialogue, cues, wav_dir, work, output, dry_path, reg
 
 
 if __name__ == "__main__":
-    torch.set_num_threads(min(4, os.cpu_count() or 1))
+    control = os.environ.get("EASYX_DUBBING_VOICE_BATCH")
     work, wav_dir = map(Path, sys.argv[1:3])
     language = sys.argv[3]
+    accelerator = None
     try:
-        cues = json.loads((wav_dir.parent/"speakers.json").read_text())
+        if control:
+            available = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+            threads = min(int(os.environ["OMP_NUM_THREADS"]), available)
+            torch.set_num_threads(threads)
+            torch.set_num_interop_threads(1)
+            cues, texts = json.loads((Path(control)/"input.json").read_text())
+        else:
+            torch.set_num_threads(min(4, os.cpu_count() or 1))
+            cues = json.loads((wav_dir.parent/"speakers.json").read_text())
+            texts = json.loads((wav_dir.parent/f"translation-{language}.json").read_text())
         original_intervals(cues)
-        synthesize(cues,
-                   json.loads((wav_dir.parent/f"translation-{language}.json").read_text()),
-                   language, work, wav_dir, list(map(int, sys.argv[4:])), device(),
+        accelerator = device()
+        if control:
+            (Path(control)/"device").write_text(accelerator)
+            if accelerator == "cuda" and free_cuda_bytes() < 1536*1024**2:
+                sys.exit(RETRY_ON_CPU)
+        synthesize(cues, texts, language, work, wav_dir, list(map(int, sys.argv[4:])), accelerator,
                    Path(os.environ.get("EASYX_DUBBING_VOICE_REFS", work)),
                    os.environ.get("EASYX_DUBBING_VERIFY_MODEL_CACHE") or None)
     except Exception as error:
-        from runtime import publish
-        publish(errorCode="DUBBING_RENDER_FAILED", message=str(error) or type(error).__name__)
+        if control:
+            if accelerator == "cuda" and cuda_allocation_failed(error):
+                sys.exit(RETRY_ON_CPU)
+            (Path(control)/"error").write_text(str(error) or type(error).__name__)
+        else:
+            from runtime import publish
+            publish(errorCode="DUBBING_RENDER_FAILED", message=str(error) or type(error).__name__)
         raise

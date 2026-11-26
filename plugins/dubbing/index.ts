@@ -16,7 +16,7 @@ const compatibleRevisions = [audioRevision, lipRevision];
 
 export default definePlugin({
   manifest: {
-    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.6.0", author: "Open EasyX",
+    id: "org.easyx.dubbing", name: "Local Dubbing", version: "1.6.1", author: "Open EasyX",
     capabilities: ["video-dubbing"], dubbingLanguages: languages, dubbingRenderVersion: audioRevision,
     dubbingLipSyncRenderVersion: lipRevision, dubbingPreviousRenderVersions: compatibleRevisions,
     dubbingRecheckSilentVersions: ["", "1", "2", "3", "4", "5-audio", "5-lips"],
